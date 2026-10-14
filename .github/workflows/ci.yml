@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege: the default GITHUB_TOKEN can write to the repo; CI only needs to read.
+permissions:
+  contents: read
+
+# A new push to the same PR/branch cancels the now-stale run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: lint, type-check, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Actions pinned to commit SHAs: tags are mutable, SHAs are not.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: true # Python version comes from .python-version
+
+      - name: Install (fails if uv.lock is stale)
+        run: uv sync --locked
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type check
+        run: uv run mypy src tests
+
+      - name: Test
+        run: uv run pytest
