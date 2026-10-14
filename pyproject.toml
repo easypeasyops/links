@@ -1,0 +1,54 @@
+[project]
+name = "shortly"
+version = "0.1.0"
+description = "URL shortener — a hands-on DevOps practice project"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "httpx>=0.28.1",
+    "pydantic>=2.14.1",
+]
+
+[project.scripts]
+shortly = "shortly:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4.0",
+    "pre-commit>=4.7.0",
+    "pytest>=9.1.1",
+    "ruff>=0.17.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+  "E", "F", "W",   # pycodestyle + pyflakes
+  "I",             # import sorting
+  "UP",            # modernize syntax for target version
+  "B",             # bugbear: real bug patterns (mutable defaults, etc.)
+  "SIM", "C4",     # simplifications, comprehensions
+  "RUF",           # ruff-specific
+  "S",             # bandit security checks
+  "PT",            # pytest style
+  "TID252",        # ban relative imports
+  "DTZ",           # naive datetimes (a classic prod bug)
+  "ASYNC",         # blocking calls inside async code
+]
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]   # allow assert in tests
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+ignore_missing_imports = true
