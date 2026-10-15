@@ -1,0 +1,21 @@
+# Local development dependencies only. The app itself runs on your machine with
+# `uv run shortly` for fast reloads; containerizing the app is the next milestone.
+services:
+  postgres:
+    image: postgres:17-alpine # keep in sync with POSTGRES_IMAGE in tests/conftest.py
+    environment:
+      POSTGRES_USER: shortly
+      POSTGRES_PASSWORD: dev # local-only credential; never reuse outside this file
+      POSTGRES_DB: shortly
+    ports:
+      - "127.0.0.1:5432:5432" # bind to loopback, not all interfaces
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U shortly -d shortly"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:

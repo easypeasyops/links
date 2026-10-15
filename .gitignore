@@ -14,3 +14,6 @@ wheels/
 # Test/coverage artifacts
 .hypothesis/
 .coverage
+
+# Local config (may hold secrets); .env.example is the committed template
+.env

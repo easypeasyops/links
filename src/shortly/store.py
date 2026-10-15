@@ -20,6 +20,10 @@ class LinkStore(Protocol):
 
     def get(self, code: str) -> ShortLink | None: ...
 
+    def ping(self) -> bool:
+        """True if the backend can serve requests. Used by the readiness probe."""
+        ...
+
 
 class InMemoryStore:
     """Dict-backed store for tests and local runs. Not thread-safe; single process only."""
@@ -34,3 +38,6 @@ class InMemoryStore:
 
     def get(self, code: str) -> ShortLink | None:
         return self._links.get(code)
+
+    def ping(self) -> bool:
+        return True
