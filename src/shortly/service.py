@@ -70,6 +70,9 @@ class Shortener:
             return link
         raise CodeSpaceExhaustedError(f"no free code after {self._max_attempts} attempts")
 
+    def is_ready(self) -> bool:
+        return self._store.ping()
+
     def resolve(self, code: str) -> str:
         link = self._store.get(code)
         if link is None:

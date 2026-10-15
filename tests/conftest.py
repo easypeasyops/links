@@ -1,8 +1,17 @@
+import gc
+import os
+import warnings
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import Engine, text
 
+from shortly.db import make_engine
+from shortly.pg_store import PostgresStore
 from shortly.service import Shortener
 from shortly.store import InMemoryStore
 
@@ -41,3 +50,67 @@ def store() -> InMemoryStore:
 @pytest.fixture
 def shortener(store: InMemoryStore, clock: FakeClock) -> Shortener:
     return Shortener(store, clock=clock)
+
+
+# --- Postgres (integration) fixtures -------------------------------------------------
+# One container per test session (seconds to start), migrated with the real Alembic
+# migrations, then truncated between tests. Fast enough to run on every push.
+
+POSTGRES_IMAGE = "postgres:17-alpine"  # pin the same major version you run in prod
+
+
+def _docker_available() -> bool:
+    import docker
+
+    # docker-py leaks its socket when the daemon is unreachable. Collect it here, with
+    # ResourceWarning silenced for just this probe, so the leak can't surface later as an
+    # unrelated test failure (we run with filterwarnings=error).
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ResourceWarning)
+        try:
+            client = docker.from_env()
+            try:
+                return bool(client.ping())
+            finally:
+                client.close()
+        except Exception:
+            return False
+        finally:
+            gc.collect()
+
+
+def alembic_config(url: str) -> Config:
+    cfg = Config(str(Path(__file__).parent.parent / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", url)
+    cfg.attributes["configure_logger"] = False  # keep pytest's logging config intact
+    return cfg
+
+
+@pytest.fixture(scope="session")
+def pg_url() -> Iterator[str]:
+    if not _docker_available():
+        # Skipping locally is a convenience; skipping in CI would be a silent hole in the
+        # safety net, so there it's a hard failure.
+        if os.environ.get("CI"):
+            pytest.fail("Docker is required for integration tests in CI")
+        pytest.skip("Docker not available")
+    from testcontainers.community.postgres import PostgresContainer
+
+    with PostgresContainer(POSTGRES_IMAGE, driver=None) as pg:
+        url = pg.get_connection_url()
+        command.upgrade(alembic_config(url), "head")
+        yield url
+
+
+@pytest.fixture(scope="session")
+def pg_engine(pg_url: str) -> Iterator[Engine]:
+    engine = make_engine(pg_url)
+    yield engine
+    engine.dispose()
+
+
+@pytest.fixture
+def pg_store(pg_engine: Engine) -> PostgresStore:
+    with pg_engine.begin() as conn:
+        conn.execute(text("TRUNCATE links"))
+    return PostgresStore(pg_engine)

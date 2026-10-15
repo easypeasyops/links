@@ -5,8 +5,13 @@ description = "URL shortener — a hands-on DevOps practice project"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "httpx>=0.28.1",
+    "alembic>=1.20.0",
+    "fastapi>=0.143.1",
+    "psycopg[binary]>=3.3.6",
     "pydantic>=2.14.1",
+    "pydantic-settings>=2.16.0",
+    "sqlalchemy>=2.1.4",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [project.scripts]
@@ -18,12 +23,14 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.13.1",
     "hypothesis>=6.169.2",
     "mypy>=2.4.0",
     "pre-commit>=4.7.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "ruff>=0.17.0",
+    "testcontainers[postgres]>=4.15.0",
 ]
 
 [tool.ruff]
@@ -52,14 +59,21 @@ strict = true
 warn_unreachable = true
 plugins = ["pydantic.mypy"]
 
+[[tool.mypy.overrides]]
+module = ["docker.*"]          # pulled in by testcontainers; ships no type stubs
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = ["error"]   # a new deprecation fails the build now, not the upgrade later
+markers = ["integration: needs Docker (Postgres via testcontainers); deselect with -m 'not integration'"]
 addopts = [
   "--strict-markers", "--strict-config", "-ra",
   "--cov=shortly", "--cov-branch", "--cov-report=term-missing",
 ]
 
 [tool.coverage.report]
-fail_under = 90         # a floor that blocks regressions, not a target to game
+# The 90% floor is enforced in CI (`pytest --cov-fail-under=90`), where the full suite runs.
+# Enforcing it here would fail every partial local run (-m "not integration", -k, one file).
 skip_covered = true
 exclude_also = ["\\.\\.\\.$"]   # Protocol method stubs
