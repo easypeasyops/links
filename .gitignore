@@ -10,3 +10,7 @@ wheels/
 .venv
 
 .idea
+
+# Test/coverage artifacts
+.hypothesis/
+.coverage
