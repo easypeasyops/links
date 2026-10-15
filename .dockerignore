@@ -1,0 +1,12 @@
+# Allow-list: send only what the build needs. Smaller context, faster builds, and no
+# chance of baking .env secrets or .git history into an image layer.
+*
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!alembic.ini
+!migrations/
+
+**/__pycache__
+**/*.py[oc]
