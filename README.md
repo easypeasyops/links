@@ -40,6 +40,18 @@ Without Docker, integration tests are skipped locally. In CI they fail instead o
 Coverage is reported on every run but only *enforced* in CI (90% floor on the full suite).
 To reproduce CI exactly: `uv run pytest --cov-fail-under=90` with Docker running.
 
+## Container
+
+```bash
+docker compose --profile app up -d --build --wait   # Postgres → migrate (one-shot) → app
+SHORTLY_IMAGE=shortly:dev scripts/smoke.sh          # the same black-box test CI runs
+docker compose --profile app down -v
+```
+
+The image is multi-stage (build tools never ship), runs as UID 10001 with read-only code,
+has pip removed, and handles SIGTERM gracefully. Migrations run as a separate one-shot
+command (`alembic upgrade head`) from the same image — never on app startup.
+
 ## Migrations
 
 ```bash
