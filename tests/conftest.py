@@ -1,4 +1,5 @@
 import gc
+import logging
 import os
 import warnings
 from collections.abc import Callable, Iterator
@@ -114,3 +115,13 @@ def pg_store(pg_engine: Engine) -> PostgresStore:
     with pg_engine.begin() as conn:
         conn.execute(text("TRUNCATE links"))
     return PostgresStore(pg_engine)
+
+
+@pytest.fixture
+def restore_logging() -> Iterator[None]:
+    root = logging.getLogger()
+    saved = root.handlers[:], root.level, logging.getLogger("uvicorn.access").disabled
+    yield
+    root.handlers[:], level, disabled = saved
+    root.setLevel(level)
+    logging.getLogger("uvicorn.access").disabled = disabled

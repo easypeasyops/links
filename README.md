@@ -52,6 +52,30 @@ The image is multi-stage (build tools never ship), runs as UID 10001 with read-o
 has pip removed, and handles SIGTERM gracefully. Migrations run as a separate one-shot
 command (`alembic upgrade head`) from the same image — never on app startup.
 
+## Observability
+
+| Signal  | Where | Notes |
+|---------|-------|-------|
+| Logs    | stdout, one JSON object per line | `request_id` on every line; `trace_id` when tracing is on |
+| Metrics | `GET /metrics` (Prometheus) | RED metrics by route *template*, plus links created, resolutions, code collisions |
+| Traces  | OTLP/HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set | request span → SQL spans (psycopg) |
+
+Every response carries `x-request-id` (a valid caller-supplied ID is propagated).
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 \
+  docker compose --profile app --profile obs up -d --build --wait
+# Prometheus: http://localhost:9090   Jaeger: http://localhost:16686
+```
+
+Useful queries:
+
+```promql
+sum by (route, status) (rate(http_requests_total[5m]))                       # traffic & errors
+histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_bucket[5m])))  # p99
+rate(code_collisions_total[1h])                                              # code space filling up?
+```
+
 ## Migrations
 
 ```bash
