@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-20 for chart 0.2.0 (app changes since v0.1.0 are unreleased). Mirrored at
+> Last updated 2026-10-21 for chart 0.2.0 (app changes since v0.1.0 are unreleased). Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -19,6 +19,8 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Database | `postgres` StatefulSet per namespace; URL in Secret `shortly-db` key `url` |
 | Endpoints | `/healthz` liveness · `/readyz` readiness · `/metrics` Prometheus |
 | Logs | JSON on stdout; `request_id` and `trace_id` on every line |
+| SLOs | redirects 99.9% available and 99% < 50 ms; creates 99.5% and 99% < 100 ms; 30-day window (`deploy/prometheus/slos.yaml`) |
+| Alerts | `deploy/prometheus/rules/`; local: `http://localhost:9090/alerts` (compose `obs` profile, no Alertmanager) |
 
 ```bash
 # Most-used commands
@@ -62,6 +64,8 @@ Do not judge health through `kubectl port-forward svc/...`: it attaches to one p
 | Readiness failing | `rate(http_requests_total{route="/readyz",status="503"}[5m])` |
 | Load being shed | `sum(rate(load_shed_total[5m]))` |
 | Pool saturation per pod | `db_pool_in_use / db_pool_size` |
+| Error budget left, per SLO (1 = untouched, below 0 = overspent) | `slo:error_budget_remaining:ratio` |
+| Current burn rate (1 = on pace to spend exactly the 30-day budget) | `slo:sli_error:ratio_rate1h / on(slo) group_left () (1 - slo:objective:ratio)` |
 
 **Logs.** Filter structured fields with `jq`:
 
@@ -245,6 +249,38 @@ flowchart TD
 
 Ask the questions in order; the first yes picks the playbook below.
 
+### SLO burn-rate alerts
+
+`<Slo>BudgetBurn` (for example `RedirectAvailabilityBudgetBurn`) means users are hurting faster than the SLO allows. The `slo` label says which promise is at risk; `severity` says how fast.
+
+| Severity | Meaning | Response |
+| --- | --- | --- |
+| `page` | 2% of the 30-day budget gone in an hour, or 5% in six hours; still happening | Now. Mitigate first, investigate after |
+| `ticket` | 10% gone in a day or three days; a slow leak | Working hours. Find the cause before the budget runs out |
+
+1. Find the scale and the shape:
+
+   ```promql
+   slo:sli_error:ratio_rate5m                          # error ratio now, per SLO and namespace
+   slo:error_budget_remaining:ratio                    # how much of the month is left
+   sum by (status) (rate(http_requests_total{route="/{code}"}[5m]))   # which status codes
+   ```
+2. Pick the playbook with the triage questions above. An availability SLO burning usually means 5xx: see 5xx rate rising, or Saturation if `load_shed_total` is rising. A latency SLO burning means Latency up.
+3. After mitigation, watch `slo:sli_error:ratio_rate5m` drop to 0: that is your confirmation. The page itself keeps firing for up to about 30 minutes (the short window of its 6x pair), and the ticket for up to 6 hours. That is expected, so don't take it as a sign the fix failed. Silence the alert with a note instead of changing the rule.
+4. If the budget is spent (`slo:error_budget_remaining:ratio` below 0), the usual policy is to freeze feature releases and spend the time on reliability until it recovers.
+
+### ShortlyDown
+
+No shortly target is being scraped, so every SLO alert is blind. Assume a full outage until you prove otherwise.
+
+```bash
+kubectl -n prod get pods -l app.kubernetes.io/name=shortly     # are there pods at all?
+kubectl -n prod exec postgres-0 -- wget -q -O- http://shortly/readyz   # does the Service answer?
+```
+
+- Pods are missing or crash-looping: see CrashLoopBackOff, or Deploy stuck or failed.
+- Pods are fine and the Service answers: the problem is the scrape (Prometheus target config or a NetworkPolicy), not the app. Fix it anyway: until scraping works, nothing else can page.
+
 ### Pods not Ready, `/readyz` returns 503
 
 **Likely cause:** the database is unreachable. `/healthz` stays 200, so pods are not restarted; they are only removed from the Service.
@@ -333,6 +369,10 @@ Check whether the running digest is affected (the SBOM is attached to the image)
 Every CI step can be reproduced locally with the same command; reproduce before you guess.
 
 | Job → step | Usual cause | Reproduce and fix |
+| test → `test_generated_slo_rules_are_current` | `slos.yaml` or the generator changed without regenerating | `uv run python scripts/gen_slo_rules.py`, commit `deploy/prometheus/rules/slo.yaml` |
+| test → `test_every_selector_matches_something_the_app_exports` | A metric, route, label or histogram bucket changed, and an alert now selects nothing | Update the rule (or `slos.yaml`) to the new name, or revert the rename |
+| test → `test_promtool_unit_tests_pass` | A rule's behaviour changed, or its annotations no longer match the test | Run promtool (command in `deploy/prometheus/tests/alerts_test.yaml`); fix the rule or update the expected alert |
+| test → `test_runbook_links_point_at_real_sections` | A RUNBOOK heading was renamed | Rename it back, or update `runbook_url` in the rules |
 | --- | --- | --- |
 | lint → `uv sync --locked` | `pyproject.toml` changed without updating `uv.lock` | `uv lock`, commit the lockfile |
 | lint → format check | Unformatted code | `uv run ruff format .` (pre-commit does this on commit) |
@@ -398,6 +438,15 @@ Measure capacity before changing CPU requests, the HPA target or the pool, and a
 6. Prove that autoscaling still works in-cluster: `scripts/hpa-drill.sh`.
 
 Don't run load tests against prod. The drill runs against the kind `prod` namespace only because it is disposable.
+
+## Change an SLO or an alert
+
+1. SLOs: edit `deploy/prometheus/slos.yaml`, then run `uv run python scripts/gen_slo_rules.py`. Never edit `rules/slo.yaml` by hand. Cause-based alerts: edit `deploy/prometheus/rules/shortly.yaml`.
+2. Add or update a promtool test in `deploy/prometheus/tests/alerts_test.yaml`. It needs one case where the alert fires and one where it must stay quiet.
+3. Give every alert a `runbook_url` pointing at a section of this runbook. Write the section first.
+4. Run `uv run pytest tests/test_alert_rules.py`; it needs Docker for the promtool step.
+5. Check it live: `docker compose --profile app --profile obs up -d`, cause the condition, and watch `http://localhost:9090/alerts` go from pending to firing.
+6. Update DESIGN.md (SLOs and alerting) and the Quick reference above in the same PR.
 
 ## Incident process
 

@@ -1,0 +1,237 @@
+# promtool unit tests for every alert: synthetic series in, expected alerts out.
+#   docker run --rm -v "$PWD/deploy/prometheus:/p:ro" --entrypoint promtool \
+#     prom/prometheus:v3.15.0 test rules /p/tests/alerts_test.yaml
+# Run in CI by tests/test_alert_rules.py. Each scenario proves an alert fires when it should
+# AND stays quiet when it shouldn't: an alert that is never tested is assumed broken.
+rule_files:
+  - ../rules/slo.yaml
+  - ../rules/shortly.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # 5% of redirects fail: 50x the budget rate. Both severities fire.
+  - name: redirect 5xx at 5% pages
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{method="GET",route="/{code}",status="307"}'
+        values: '0+5700x120'
+      - series: 'http_requests_total{method="GET",route="/{code}",status="500"}'
+        values: '0+300x120'
+    promql_expr_test:
+      - expr: round(slo:sli_error:ratio_rate5m{slo="redirect-availability"}, 0.0001)
+        eval_time: 10m
+        exp_samples:
+          - labels: '{slo="redirect-availability"}'
+            value: 0.05
+      - expr: round(slo:error_budget_remaining:ratio{slo="redirect-availability"}, 0.01)
+        eval_time: 10m
+        exp_samples:
+          - labels: '{slo="redirect-availability"}'
+            value: -49 # 5% errors is 50x the 0.1% budget: 1 - 50 = -49, deeply overspent
+    alert_rule_test:
+      - eval_time: 1m # the 2-minute `for` has not elapsed yet
+        alertname: RedirectAvailabilityBudgetBurn
+        exp_alerts: []
+      - eval_time: 70m
+        alertname: RedirectAvailabilityBudgetBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: redirect-availability}
+            exp_annotations:
+              summary: 'redirect-availability: error budget burning fast (14.4x over 1h or 6x over 6h)'
+              description: 'GET /{code} answers without a server error: objective 0.999 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+          - exp_labels: {severity: ticket, slo: redirect-availability}
+            exp_annotations:
+              summary: 'redirect-availability: error budget burning steadily (3x over 1d or 1x over 3d)'
+              description: 'GET /{code} answers without a server error: objective 0.999 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+
+  # 0.05% errors: half the budget rate. Nothing fires.
+  - name: redirect errors within budget stay quiet
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{method="GET",route="/{code}",status="307"}'
+        values: '0+5997x240'
+      - series: 'http_requests_total{method="GET",route="/{code}",status="500"}'
+        values: '0+3x240'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: RedirectAvailabilityBudgetBurn
+        exp_alerts: []
+
+  # 404 (unknown link) and 410 (expired) are correct answers, not failures.
+  - name: 404 and 410 count as good
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{method="GET",route="/{code}",status="404"}'
+        values: '0+3000x120'
+      - series: 'http_requests_total{method="GET",route="/{code}",status="410"}'
+        values: '0+3000x120'
+    promql_expr_test:
+      - expr: slo:sli_error:ratio_rate1h{slo="redirect-availability"}
+        eval_time: 70m
+        exp_samples:
+          - labels: 'slo:sli_error:ratio_rate1h{slo="redirect-availability"}'
+            value: 0
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: RedirectAvailabilityBudgetBurn
+        exp_alerts: []
+
+  # 0.5% errors for a day: 5x the budget rate. Too slow to page, worth a ticket.
+  - name: slow burn opens a ticket, not a page
+    interval: 5m
+    input_series:
+      - series: 'http_requests_total{method="GET",route="/{code}",status="307"}'
+        values: '0+29850x320'
+      - series: 'http_requests_total{method="GET",route="/{code}",status="500"}'
+        values: '0+150x320'
+    alert_rule_test:
+      - eval_time: 25h
+        alertname: RedirectAvailabilityBudgetBurn
+        exp_alerts:
+          - exp_labels: {severity: ticket, slo: redirect-availability}
+            exp_annotations:
+              summary: 'redirect-availability: error budget burning steadily (3x over 1d or 1x over 3d)'
+              description: 'GET /{code} answers without a server error: objective 0.999 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+
+  # 20% of redirects slower than 50 ms (the bucket edge the SLO uses).
+  - name: slow redirects page on latency
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_count{method="GET",route="/{code}"}'
+        values: '0+6000x120'
+      - series: 'http_request_duration_seconds_bucket{method="GET",route="/{code}",le="0.05"}'
+        values: '0+4800x120'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: RedirectLatencyBudgetBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: redirect-latency}
+            exp_annotations:
+              summary: 'redirect-latency: error budget burning fast (14.4x over 1h or 6x over 6h)'
+              description: 'GET /{code} answers in under 50 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+          - exp_labels: {severity: ticket, slo: redirect-latency}
+            exp_annotations:
+              summary: 'redirect-latency: error budget burning steadily (3x over 1d or 1x over 3d)'
+              description: 'GET /{code} answers in under 50 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+
+  # Staging and prod are separate budgets: an outage in staging must not page for prod.
+  - name: budgets are per namespace
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{namespace="prod",method="POST",route="/links",status="201"}'
+        values: '0+600x120'
+      - series: 'http_requests_total{namespace="staging",method="POST",route="/links",status="503"}'
+        values: '0+600x120'
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: CreateAvailabilityBudgetBurn
+        exp_alerts:
+          - exp_labels: {namespace: staging, severity: page, slo: create-availability}
+            exp_annotations:
+              summary: 'create-availability: error budget burning fast (14.4x over 1h or 6x over 6h)'
+              description: 'POST /links answers without a server error: objective 0.995 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+          - exp_labels: {namespace: staging, severity: ticket, slo: create-availability}
+            exp_annotations:
+              summary: 'create-availability: error budget burning steadily (3x over 1d or 1x over 3d)'
+              description: 'POST /links answers without a server error: objective 0.995 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+
+  - name: every target down pages
+    interval: 1m
+    input_series:
+      - series: 'up{job="shortly",instance="a"}'
+        values: '0x10'
+      - series: 'up{job="shortly",instance="b"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ShortlyDown
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations: &down
+              summary: No shortly target is being scraped
+              description: Prometheus has no healthy shortly target, so the SLO alerts are blind. Treat it as a full outage until proven otherwise.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#shortlydown
+
+  - name: one target down is not an outage
+    interval: 1m
+    input_series:
+      - series: 'up{job="shortly",instance="a"}'
+        values: '0x10'
+      - series: 'up{job="shortly",instance="b"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ShortlyDown
+        exp_alerts: []
+
+  - name: no shortly targets at all pages
+    interval: 1m
+    input_series:
+      - series: 'up{job="something-else"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ShortlyDown
+        exp_alerts:
+          - exp_labels: {job: shortly, severity: page}
+            exp_annotations: *down
+
+  - name: failing readiness pages
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{method="GET",route="/readyz",status="503"}'
+        values: '0+12x20'
+      - series: 'http_requests_total{method="GET",route="/readyz",status="200"}'
+        values: '0+0x20'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ShortlyNotReady
+        exp_alerts:
+          - exp_labels: {severity: page}
+            exp_annotations:
+              summary: Most readiness checks are failing
+              description: Over half of /readyz checks return 503 (usually the database is unreachable). Pods are out of rotation; user requests fail before they reach the app.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#pods-not-ready-readyz-returns-503
+
+  - name: sustained load shedding opens a ticket
+    interval: 1m
+    input_series:
+      - series: 'load_shed_total'
+        values: '0x5 0+60x15'
+    alert_rule_test:
+      - eval_time: 8m # shedding for 3 minutes: not yet
+        alertname: ShortlyLoadShedding
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: ShortlyLoadShedding
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: Requests are being shed with 503
+              description: The DB pool has been exhausted for 5 minutes. Check the database before adding replicas.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
+
+  - name: HPA pinned at max opens a ticket
+    interval: 1m
+    input_series:
+      - series: 'kube_horizontalpodautoscaler_status_current_replicas{namespace="prod",horizontalpodautoscaler="shortly"}'
+        values: '4x30'
+      - series: 'kube_horizontalpodautoscaler_spec_max_replicas{namespace="prod",horizontalpodautoscaler="shortly"}'
+        values: '4x30'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ShortlyAtMaxReplicas
+        exp_alerts:
+          - exp_labels: {namespace: prod, horizontalpodautoscaler: shortly, severity: ticket}
+            exp_annotations:
+              summary: The HPA has been at maxReplicas for 15 minutes
+              description: Autoscaling has no headroom left. See Capacity in the design doc for the sizing rule and the DB connection budget.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max

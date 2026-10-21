@@ -131,6 +131,21 @@ One pod sustains about 250 req/s within the latency SLO (redirect p99 < 50 ms) a
 CPU-bound; prod autoscales on CPU from 2 pods. Method, numbers and sizing:
 [DESIGN.md, Capacity](docs/DESIGN.md#capacity).
 
+## SLOs and alerts
+
+| SLO | Objective (30 days) |
+| --- | --- |
+| Redirects without a server error | 99.9% |
+| Redirects under 50 ms | 99% |
+| Creates without a server error | 99.5% |
+| Creates under 100 ms | 99% |
+
+Declared in `deploy/prometheus/slos.yaml`; `scripts/gen_slo_rules.py` generates the
+recording rules and multi-window burn-rate alerts in `deploy/prometheus/rules/`. Every alert
+has promtool unit tests, and CI fails if a rule selects a metric the app doesn't export.
+Locally, `docker compose --profile app --profile obs up -d` and open
+http://localhost:9090/alerts. Details: [DESIGN.md, SLOs and alerting](docs/DESIGN.md#slos-and-alerting).
+
 ## Migrations
 
 ```bash

@@ -1,0 +1,58 @@
+# Cause-based alerts for shortly, hand-written. The SLO alerts (slo.yaml, generated) say
+# "users are hurting"; these cover what an SLO cannot see, or warn before it is spent.
+# Every runbook_url anchor must exist in docs/RUNBOOK.md (tests/test_alert_rules.py checks).
+groups:
+  - name: shortly-health
+    rules:
+      # The SLO is computed FROM the app's own metrics: if no pod is scraped, there is no
+      # traffic data, every ratio is empty, and no burn-rate alert can fire. A full outage
+      # would be silent without this one.
+      - alert: ShortlyDown
+        expr: sum(up{job="shortly"}) == 0 or absent(up{job="shortly"})
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: No shortly target is being scraped
+          description: Prometheus has no healthy shortly target, so the SLO alerts are blind. Treat it as a full outage until proven otherwise.
+          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#shortlydown
+
+      # Pods that fail readiness are removed from the Service. Users then get errors at the
+      # load balancer, which the app never sees, so the availability SLI stays green.
+      - alert: ShortlyNotReady
+        expr: |-
+          sum by (namespace) (rate(http_requests_total{route="/readyz", status="503"}[5m]))
+            / sum by (namespace) (rate(http_requests_total{route="/readyz"}[5m])) > 0.5
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: Most readiness checks are failing
+          description: Over half of /readyz checks return 503 (usually the database is unreachable). Pods are out of rotation; user requests fail before they reach the app.
+          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#pods-not-ready-readyz-returns-503
+
+      # 503 + Retry-After because no DB connection freed up in time. Usually a slow database.
+      # It also burns the availability budget; this alert names the cause.
+      - alert: ShortlyLoadShedding
+        expr: sum by (namespace) (rate(load_shed_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Requests are being shed with 503
+          description: The DB pool has been exhausted for 5 minutes. Check the database before adding replicas.
+          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
+
+      # Needs kube-state-metrics in the cluster (not part of the local stack). At max, the
+      # next traffic increase becomes latency: raise maxReplicas or add capacity.
+      - alert: ShortlyAtMaxReplicas
+        expr: |-
+          kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler="shortly"}
+            >= kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler="shortly"}
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: The HPA has been at maxReplicas for 15 minutes
+          description: Autoscaling has no headroom left. See Capacity in the design doc for the sizing rule and the DB connection budget.
+          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max

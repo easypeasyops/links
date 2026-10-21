@@ -34,8 +34,10 @@ dev = [
     "pre-commit>=4.7.0",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
+    "pyyaml>=6.0.3",
     "ruff>=0.17.0",
     "testcontainers[postgres]>=4.15.0",
+    "types-pyyaml>=6.0.12.20260906",
 ]
 
 [tool.ruff]
@@ -57,7 +59,7 @@ select = [
   "ASYNC",         # blocking calls inside async code
 ]
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]   # allow assert in tests
+"tests/**" = ["S101", "S603", "S607"]   # assert; tests run docker/promtool by name
 
 [tool.mypy]
 strict = true

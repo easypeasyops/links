@@ -1,8 +1,0 @@
-# Local-only Prometheus config for `docker compose --profile app --profile obs up`.
-global:
-  scrape_interval: 5s # short for local feedback; 15-60s is typical in production
-
-scrape_configs:
-  - job_name: shortly
-    static_configs:
-      - targets: ["app:8000"]
