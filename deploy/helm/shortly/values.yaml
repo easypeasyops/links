@@ -1,0 +1,63 @@
+# Defaults are production-shaped; values-<env>.yaml files override per environment.
+
+image:
+  repository: ghcr.io/statsguy/shortly
+  # Deploy by digest (sha256:...) whenever possible: a digest is immutable, so the bits
+  # tested in staging are exactly the bits promoted to production. `tag` is a fallback.
+  digest: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+replicaCount: 2
+
+# Non-secret config. Becomes SHORTLY_* environment variables.
+config:
+  baseUrl: "https://sho.rt"
+  logLevel: INFO
+  dbPoolSize: 5
+
+# The database URL is a secret and is NEVER put in values files (they live in git).
+# Create it out of band (kubectl, External Secrets, Sealed Secrets, Vault...) and point here.
+database:
+  existingSecret: shortly-db
+  secretKey: url
+
+# OpenTelemetry: tracing is on only if an endpoint is set.
+otel:
+  endpoint: ""
+
+migrations:
+  enabled: true
+  # The Job runs as a Helm pre-install/pre-upgrade hook: the schema is migrated BEFORE
+  # new pods start, and a failed migration aborts the release (old pods keep serving).
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+
+service:
+  type: ClusterIP
+  port: 80
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    # No CPU limit on purpose: CPU limits cause throttling even when the node is idle.
+    # Memory limit stays: a leak should OOM-kill one pod, not the node.
+    memory: 256Mi
+
+# Seconds the pod keeps serving after it's told to stop, so the endpoint removal can
+# propagate to every kube-proxy / load balancer before the process stops accepting.
+preStopSleepSeconds: 5
+# Must exceed preStop + uvicorn's graceful drain (20s in the Dockerfile CMD).
+terminationGracePeriodSeconds: 30
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

@@ -1,0 +1,135 @@
+name: Release
+
+# Cut a release:  bump `version` in pyproject.toml (via PR), merge, then
+#   git tag v0.2.0 && git push origin v0.2.0
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions: {} # nothing by default; the job asks for exactly what it needs
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false # never cancel a half-finished release
+
+jobs:
+  release:
+    name: build, scan, publish, attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write # create the GitHub Release
+      packages: write # push the image to ghcr.io
+      id-token: write # OIDC identity for keyless Sigstore signing of the attestation
+      attestations: write # store the provenance attestation
+    env:
+      IMAGE: ghcr.io/${{ github.repository }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # One source of truth for the version. A tag that disagrees with pyproject.toml is
+      # a mistake (tagged the wrong commit, forgot the bump) — stop before publishing.
+      - name: Tag must match pyproject version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          if [[ "$tag" != "$version" ]]; then
+            echo "::error::tag v$tag does not match pyproject.toml version $version"
+            exit 1
+          fi
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      # Gate: build and scan BEFORE anything is published. A release that fails the scan
+      # never reaches the registry.
+      - name: Build for scanning
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: shortly:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Scan image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: shortly:scan
+          version: v0.70.0
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          # 0.2.0 and 0.2 — no `latest`: deploys reference digests, and a moving `latest`
+          # makes "what's running in prod?" unanswerable.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      # amd64 for servers/CI, arm64 for Apple Silicon laptops and Graviton/Ampere nodes.
+      # SBOM + max provenance are attached to the image in the registry by BuildKit.
+      - name: Build and push (multi-arch)
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+
+      # Signed (Sigstore, keyless via this workflow's OIDC identity) statement of which
+      # repo, commit, and workflow produced this exact digest. Verify with:
+      #   gh attestation verify oci://ghcr.io/statsguy/shortly@<digest> --owner statsguy
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "## Image"
+            echo
+            echo '```'
+            echo "${IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Deploy by digest (immutable):"
+            echo
+            echo '```bash'
+            echo "scripts/deploy.sh staging ${IMAGE}@${DIGEST}"
+            echo "scripts/deploy.sh prod    ${IMAGE}@${DIGEST}"
+            echo '```'
+            echo
+            echo "Verify provenance:"
+            echo
+            echo '```bash'
+            echo "gh attestation verify oci://${IMAGE}@${DIGEST} --owner ${GITHUB_REPOSITORY_OWNER}"
+            echo '```'
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes --notes-file notes.md

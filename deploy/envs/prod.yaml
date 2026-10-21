@@ -1,0 +1,8 @@
+# Production: at least two replicas so a rollout, drain, or crash never drops to zero.
+replicaCount: 2
+config:
+  baseUrl: "http://sho.rt.localhost"
+  logLevel: INFO
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1

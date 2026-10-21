@@ -1,0 +1,5 @@
+shortly {{ include "shortly.version" . }} → namespace {{ .Release.Namespace }} (revision {{ .Release.Revision }})
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "shortly.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "shortly.fullname" . }} 8080:{{ .Values.service.port }}
+  helm -n {{ .Release.Namespace }} history {{ .Release.Name }}      # releases you can roll back to
