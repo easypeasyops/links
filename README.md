@@ -4,6 +4,11 @@
 
 A URL shortener built as a hands-on DevOps practice project: uv, strict typing, tests, CI/CD, containers, and observability.
 
+## Docs
+
+- [Design](docs/DESIGN.md): architecture, decisions, failure modes, security
+- [Runbook](docs/RUNBOOK.md): release, deploy, rollback, incident playbooks
+
 ## API
 
 | Method | Path       | Result                                                     |
