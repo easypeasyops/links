@@ -3,7 +3,7 @@
 # that the HorizontalPodAutoscaler adds ready pods. Run by scripts/k8s-e2e.sh (and so by
 # CI), or on its own against a deployed environment:
 #
-#   scripts/hpa-drill.sh                     # prod, 1000 req/s for 150 s
+#   scripts/hpa-drill.sh                     # prod, 1000 req/s for 100 s
 #   NS=prod RATE=1500 DURATION=240s scripts/hpa-drill.sh
 #
 # It gates on scaling only. k6's latency thresholds are expected to fail during the first
@@ -16,7 +16,8 @@ NS="${NS:-prod}"
 # tolerance), and per-request CPU varies by hardware. 600 req/s gave 75% vs a 70% target on
 # a GitHub runner (ratio 1.07, so no scale-up): too close. 1000 lands well past 77%.
 RATE="${RATE:-1000}"
-DURATION="${DURATION:-150s}"
+# 100 s: in CI the first new pod is ready after 30-55 s, so this leaves about 2x margin.
+DURATION="${DURATION:-100s}"
 K6_IMAGE="${K6_IMAGE:-grafana/k6:2.3.0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 JOB=k6-hpa-drill
