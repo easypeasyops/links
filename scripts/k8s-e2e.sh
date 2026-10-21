@@ -7,6 +7,7 @@
 #   IMAGE=shortly:e2e scripts/k8s-e2e.sh
 #
 # What it proves:
+#   0. the digest-mode render (how releases deploy) passes API-server validation
 #   1. the chart deploys under the "restricted" Pod Security Standard, migrations run as a hook
 #   2. the app works in-cluster (readiness, create → redirect, metrics)
 #   3. the SAME image promotes to prod with 2 replicas + a PodDisruptionBudget
@@ -56,6 +57,20 @@ in_cluster() { kubectl -n "$1" exec postgres-0 -- wget -q -O /dev/null -T 2 "htt
 
 revision() { helm -n "$1" status shortly -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'; }
 deployed_image() { kubectl -n "$1" get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}'; }
+
+# ---------------------------------------------------------------- 0. digest-mode render
+# Releases deploy by digest, but this test deploys a local image by tag. Render the digest
+# path too and let the real API server validate it (server-side dry run). JSON-schema tools
+# like kubeconform don't check label syntax; the API server does. (v0.1.0 shipped a label
+# "sha256:..." that only the API server rejected.)
+fake_digest="sha256:$(printf '0%.0s' {1..64})"
+for ns in staging prod; do
+  helm template shortly "$ROOT/deploy/helm/shortly" -n "$ns" -f "$ROOT/deploy/envs/$ns.yaml" \
+    --set image.repository=ghcr.io/statsguy/shortly --set "image.digest=$fake_digest" \
+    | kubectl -n "$ns" apply --dry-run=server -f - >/dev/null \
+    || fail "API server rejected the digest-mode render for $ns"
+done
+pass "digest-mode render accepted by the API server (server-side dry run)"
 
 # ---------------------------------------------------------------- 1-2. staging
 "$ROOT/scripts/deploy.sh" staging "$IMAGE" >/dev/null

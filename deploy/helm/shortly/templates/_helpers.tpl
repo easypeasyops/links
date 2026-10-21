@@ -26,8 +26,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
+{{/*
+Version for the app.kubernetes.io/version label. Label values allow only [A-Za-z0-9_.-],
+max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
+*/}}
 {{- define "shortly.version" -}}
-{{- if .Values.image.tag -}}{{ .Values.image.tag }}{{- else -}}{{ .Values.image.digest | trunc 19 }}{{- end -}}
+{{- if .Values.image.tag -}}
+{{- .Values.image.tag | trunc 63 | trimSuffix "-" | trimSuffix "." -}}
+{{- else -}}
+{{- .Values.image.digest | trimPrefix "sha256:" | trunc 12 -}}
+{{- end -}}
 {{- end -}}
 
 {{/* Env shared by the app and the migration Job — one source of truth. */}}
