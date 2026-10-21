@@ -265,6 +265,8 @@ Two inhibitions cut the noise. A page silences the ticket for the same alert, SL
 - Every dashboard query is valid PromQL.
 - A real alert completes the path. The script scales staging to zero; `ShortlyNoAvailablePods` fires and reaches Alertmanager, which routes it to the `staging` receiver. Then staging is restored.
 
+On the first CI run (PR #14), Prometheus scraped all 4 prod pods (the HPA drill had just scaled them up) and all 12 dashboard queries parsed. The staging alert reached Alertmanager **81 s** after the scale-down: about 15 s for kube-state-metrics to be scraped, 60 s of `for`, then evaluation.
+
 **Live drill.** Prometheus in the compose `obs` profile loads the same rule files; firing alerts show at `http://localhost:9090/alerts` (the compose stack has no Alertmanager). The drill ran k6 at 100 req/s and paused Postgres for 6 minutes. What happened, with times measured from the pause:
 
 | Time after pause | What happened |
