@@ -96,9 +96,9 @@ The HTTP layer only parses input, calls the service and maps outcomes to status 
 | --- | --- | --- | --- |
 | `POST /links` | 201 `{code, short_url, target, expires_at}` | 422 invalid URL or TTL; 503 code space exhausted | Body `{"url": "https://…", "ttl_seconds": 1..31536000}` (TTL optional) |
 | `GET /{code}` | 307, `Location: <target>` | 404 unknown; 410 expired; 503 + `Retry-After: 1` when the DB pool is exhausted | Sync endpoint: blocking DB calls run in the threadpool |
-| `GET /healthz` | 200 | — | Liveness: process is responsive. Never touches the DB |
-| `GET /readyz` | 200 | 503 when the DB ping fails | Readiness: can this pod take traffic |
-| `GET /metrics` | 200, Prometheus text | — | Should be reachable only from inside the cluster |
+| `GET /healthz` | 200 | — | Liveness: process is responsive. Never touches the DB. `async`: answered on the event loop, never behind request work |
+| `GET /readyz` | 200 | 503 when the DB ping fails | Readiness: can this pod take traffic. The ping runs on its own one-thread limiter, not the request threadpool |
+| `GET /metrics` | 200, Prometheus text | — | Should be reachable only from inside the cluster. `async`, so scrapes don't time out under load |
 
 Any endpoint that touches the database returns **503 with `Retry-After: 1`** when no pooled connection frees up within `SHORTLY_DB_POOL_TIMEOUT_SECONDS`. The store raises `StoreBusyError` (overload, not failure), and the API maps it in one place and counts it in `load_shed_total`.
 
@@ -321,7 +321,9 @@ One Helm chart (`deploy/helm/shortly`, Helm 4) deploys the same image digest to 
 
 **Rollout.** `helm upgrade --install --rollback-on-failure --wait --timeout 3m`. `RollingUpdate` with `maxUnavailable: 0, maxSurge: 1` never drops below desired capacity: a new pod that never becomes ready stalls the rollout while old pods keep serving, Helm times out and rolls back. The drill measures this: 0 failed requests through the Service during a broken rollout.
 
-**Probes.** startupProbe on `/healthz` (2 s × 30) gates the others; liveness `/healthz` every 10 s, 3 failures; readiness `/readyz` every 5 s, 2 failures.
+**Probes.** startupProbe on `/healthz` (2 s × 30) gates the others; liveness `/healthz` every 10 s, 3 failures; readiness `/readyz` every 5 s, 2 failures; both with a 2 s timeout.
+
+The probes, and `/metrics`, never wait in the request threadpool. FastAPI runs sync handlers on 40 shared threads, so under overload a sync `/healthz` queued behind user requests. Its probe timed out, kubelet restarted the pod, the remaining pods took more load, and they were restarted too. The outage fed itself. The CI autoscaling drill hit exactly this once the monitoring stack shared the node: pods fell to 0 ready during the load. `/healthz` and `/metrics` are now `async`, and `/readyz` pings the database on a dedicated one-thread limiter. A test saturates the threadpool and requires all three to answer in under 0.5 s; with the old handlers they took about 0.8 s.
 
 **Graceful shutdown.** On termination Kubernetes removes the pod from endpoints and sends SIGTERM concurrently. A `preStop` sleep of 5 s lets routers stop sending traffic first; uvicorn then drains in-flight requests for up to 20 s; `terminationGracePeriodSeconds: 30` covers both.
 
@@ -348,7 +350,7 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | Code space exhausted (5 collisions in a row) | `POST /links` 503 | 503s on `route="/links"` |
 | Invalid config | Process exits at boot with a validation error | CrashLoopBackOff; first log line names the field |
 | Database slow or hung | Requests holding connections wait on it; all others wait at most 1 s for a connection, then get **503 + `Retry-After`** instead of queueing for 30 s | `load_shed_total` rising, `db_pool_in_use` = `db_pool_size`, 503s on all DB routes |
-| Load above capacity (CPU) | Latency rises with no errors (requests queue in the threadpool); HPA adds pods within about a minute, up to `maxReplicas` | p99 up, HPA `desiredReplicas` rising or pinned at max |
+| Load above capacity (CPU) | Latency rises with no errors (requests queue in the threadpool); probes and scrapes still answer, so pods are neither restarted nor pulled; HPA adds pods within about a minute, up to `maxReplicas` | p99 up, HPA `desiredReplicas` rising or pinned at max |
 | Every pod down, or not scraped | No metrics at all, so the SLO ratios are empty and no burn-rate alert can fire | `ShortlyDown` (from `up`, not from app metrics) |
 | Tracing backend down | Spans dropped by the batch exporter; requests unaffected | Exporter warnings in logs |
 | Vulnerable dependency published | CI image scan fails; release workflow refuses to publish | Red `build, scan` job |
@@ -472,6 +474,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Milestone 8 | First draft of the availability SLI, `1 − good/total`, returned *nothing* for a namespace with 100% errors (it has no "good" series), so a total outage could not alert | `bad/total`, with `or 0 × total` for no errors; promtool test "budgets are per namespace" |
 | Milestone 8 | The HPA drill flaked: 600 req/s produced 75% CPU against a 70% target, and the HPA does nothing within 10% of its target | Drill load raised to 1000 req/s; on failure the drill reports whether the load was too light or the HPA failed to act |
 | Milestone 8 | The selector check let `le="0.04"` pass because `route="/{code}"` contains braces | Quote-aware selector parser; the test fails on any matcher it can't parse |
+| Milestone 9 | Under overload, sync `/healthz` queued behind requests; liveness failed, kubelet restarted the pods, and the restarts cascaded (CI HPA drill, with monitoring on the node) | Probes and `/metrics` off the request threadpool; probe timeout 2 s; threadpool-saturation regression test |
 
 ## Known limitations and future work
 

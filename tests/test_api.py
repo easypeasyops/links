@@ -1,3 +1,5 @@
+import asyncio
+import time
 from datetime import timedelta
 
 import pytest
@@ -91,3 +93,34 @@ def test_saturated_store_is_shed_with_503_and_retry_after(clock: FakeClock) -> N
     assert resp.status_code == 503
     assert resp.headers["retry-after"] == "1"
     assert metrics.registry.get_sample_value("load_shed_total") == 1
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    return "asyncio"
+
+
+@pytest.mark.anyio
+async def test_probes_and_metrics_answer_while_the_threadpool_is_saturated(
+    clock: FakeClock,
+) -> None:
+    # Regression: sync probe handlers queued behind request work in the threadpool (40
+    # threads); under overload they timed out and kubelet restarted every pod.
+    import httpx2 as httpx
+
+    class SlowStore(InMemoryStore):
+        def get(self, code: str) -> None:
+            time.sleep(1.0)  # a request stuck on a slow dependency, holding its thread
+
+    app = create_app(Shortener(SlowStore(), clock=clock), base_url=BASE)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        busy = [asyncio.create_task(client.get(f"/c{i}")) for i in range(60)]  # > 40 threads
+        await asyncio.sleep(0.2)  # let them take every thread
+        timings = {}
+        for path in ("/healthz", "/readyz", "/metrics"):
+            start = time.perf_counter()
+            assert (await client.get(path)).status_code == 200
+            timings[path] = time.perf_counter() - start
+        await asyncio.gather(*busy)
+    assert all(t < 0.5 for t in timings.values()), timings  # queued, they'd wait about 1 s

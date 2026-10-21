@@ -324,6 +324,7 @@ kubectl -n prod logs <pod> --previous --tail=30
 | --- | --- | --- |
 | `ValidationError for Settings` naming a field | Bad or missing config | Fix the value in `deploy/envs/<env>.yaml` or the Secret; redeploy |
 | `OOMKilled` | Memory above 256Mi | Raise `resources.limits.memory`; look for a leak |
+| `Liveness probe failed … context deadline exceeded` during heavy load | The process was alive but couldn't answer within 2 s: CPU starvation on the node, or a regression that put `/healthz` back in the threadpool | `kubectl top pods`/nodes; check that `healthz` is still `async def` in `api.py`; add capacity. Don't lengthen the timeout to hide it |
 | Exit code 1 right after a deploy | Bad release | Roll back (Roll back section) |
 
 ### Deploy stuck or failed
