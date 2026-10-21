@@ -49,7 +49,28 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/doesnotexist")
 [[ "$code" == "404" ]] || fail "unknown code returned $code"
 pass "unknown code 404"
 
-# 5. Graceful shutdown: SIGTERM must produce a clean exit well inside the grace period.
+# 5. Observability: request IDs are returned, and Prometheus can scrape us.
+rid=$(curl -s -D - -o /dev/null -H 'x-request-id: smoke-1' "$BASE/healthz" | tr -d '\r' \
+  | awk -F': ' 'tolower($1)=="x-request-id"{print $2}')
+[[ "$rid" == "smoke-1" ]] || fail "request id not echoed (got '$rid')"
+metrics=$(curl -sf "$BASE/metrics")
+grep -q 'http_requests_total{method="GET",route="/{code}",status="307"}' <<<"$metrics" \
+  || fail "/metrics missing the redirect series"
+pass "x-request-id echoed; /metrics has route-templated series"
+
+# 6. Logs are structured: every line the app wrote is a JSON object.
+if ! compose logs --no-color --no-log-prefix app | python3 -c '
+import json, sys
+lines = [l for l in sys.stdin if l.strip()]
+bad = [l for l in lines if not l.lstrip().startswith("{")]
+assert lines and not bad, bad[:3]
+[json.loads(l) for l in lines]
+'; then
+  fail "app logs are not all JSON"
+fi
+pass "logs are JSON"
+
+# 7. Graceful shutdown: SIGTERM must produce a clean exit well inside the grace period.
 #    Exit 137 here would mean Docker had to SIGKILL it — signals aren't reaching uvicorn.
 start=$(date +%s)
 compose stop -t 25 app >/dev/null

@@ -1,6 +1,8 @@
-# Two ways to use this file:
-#   docker compose up -d --wait                      # just Postgres; run the app with `uv run shortly`
+# Three ways to use this file:
+#   docker compose up -d --wait                        # just Postgres; run the app with `uv run shortly`
 #   docker compose --profile app up -d --build --wait  # the full stack, as it runs in production
+#   docker compose --profile app --profile obs up -d --build --wait
+#       # + Prometheus (http://localhost:9090) and Jaeger (http://localhost:16686)
 services:
   postgres:
     image: postgres:17-alpine # keep in sync with POSTGRES_IMAGE in tests/conftest.py
@@ -29,6 +31,9 @@ services:
     environment: &app-env
       SHORTLY_DATABASE_URL: postgresql://shortly:dev@postgres:5432/shortly
       SHORTLY_BASE_URL: http://localhost:8000
+      # Tracing is on only when an endpoint is set. With the obs profile running:
+      #   OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318 docker compose --profile app --profile obs up -d
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -48,6 +53,20 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+
+  prometheus:
+    profiles: [obs]
+    image: prom/prometheus:v3.15.0
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  jaeger: # all-in-one: OTLP receiver + storage + UI, in memory. Local use only.
+    profiles: [obs]
+    image: jaegertracing/jaeger:2.22.0
+    ports:
+      - "127.0.0.1:16686:16686" # UI
 
 volumes:
   pgdata:
