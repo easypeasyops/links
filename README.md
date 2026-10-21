@@ -87,7 +87,7 @@ rate(code_collisions_total[1h])                                              # c
 # 1. bump `version` in pyproject.toml in a PR, merge it
 # 2. tag the merge commit
 git switch main && git pull
-git tag v0.1.0 && git push origin v0.1.0
+git tag vX.Y.Z && git push origin vX.Y.Z      # e.g. v0.3.0
 ```
 
 `.github/workflows/release.yml` then: checks the tag matches `pyproject.toml`, builds and

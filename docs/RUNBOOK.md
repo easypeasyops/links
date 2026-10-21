@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-21 for chart 0.3.0 (app changes since v0.1.0 are unreleased). Mirrored at
+> Last updated 2026-10-21 for v0.2.0 / chart 0.3.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -12,7 +12,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | --- | --- |
 | Repo | [github.com/statsguy/shortly](https://github.com/statsguy/shortly) |
 | Image | `ghcr.io/statsguy/shortly` — deploy by digest, never by tag |
-| Current release | v0.1.0, `sha256:ef71dd3e544d6a3608d79aa063534510f4bc07c595484d8b0a15902fb30b8abb` |
+| Current release | v0.2.0, `sha256:18754ab5bcb04cff0a5f65ae13e0e9fdbf05793c151ba2923a8f7532e9405f04` (previous: v0.1.0, `sha256:ef71dd3e544d6a3608d79aa063534510f4bc07c595484d8b0a15902fb30b8abb`) |
 | Environments | kind cluster `shortly`; namespaces `staging` (1 replica), `prod` (HPA, 2–4 replicas) |
 | Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
@@ -25,7 +25,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 
 ```bash
 # Most-used commands
-D=sha256:ef71dd3e544d6a3608d79aa063534510f4bc07c595484d8b0a15902fb30b8abb
+D=sha256:18754ab5bcb04cff0a5f65ae13e0e9fdbf05793c151ba2923a8f7532e9405f04
 scripts/deploy.sh staging ghcr.io/statsguy/shortly@$D     # deploy (auto-rollback on failure)
 scripts/deploy.sh prod    ghcr.io/statsguy/shortly@$D
 helm -n prod history shortly                               # revisions you can roll back to
@@ -88,7 +88,7 @@ A release is a pushed `vX.Y.Z` tag on a `main` commit whose `pyproject.toml` ver
 
    ```bash
    git switch main && git pull
-   git tag v0.2.0 && git push origin v0.2.0
+   git tag v0.3.0 && git push origin v0.3.0
    ```
 3. Watch **Actions → Release**. It fails before publishing if the tag and version differ or the image scan finds a fixable HIGH/CRITICAL vulnerability.
 4. Copy the digest from the GitHub Release notes. Every deploy uses this digest.
@@ -99,7 +99,7 @@ A release is a pushed `vX.Y.Z` tag on a `main` commit whose `pyproject.toml` ver
    gh attestation verify oci://ghcr.io/statsguy/shortly@$D \
      --owner statsguy \
      --signer-workflow statsguy/shortly/.github/workflows/release.yml \
-     --source-ref refs/tags/v0.2.0
+     --source-ref refs/tags/v0.3.0
    ```
 
    It must exit 0. Add `--bundle-from-oci` if the GitHub API is unavailable.
