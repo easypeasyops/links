@@ -83,7 +83,7 @@ jobs:
   k8s:
     name: deploy to kind, rollback drill
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30 # + kube-prometheus-stack install and the alert drill
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -96,9 +96,16 @@ jobs:
       - name: Lint and schema-validate the chart
         run: |
           helm lint deploy/helm/shortly --set image.tag=ci
+          # --api-versions renders the ServiceMonitor/PrometheusRule (normally only rendered
+          # where the CRDs exist); their schemas come from the CRDs catalog, pinned by commit.
+          crds=https://raw.githubusercontent.com/datreeio/CRDs-catalog/501527ab9c40c827144c8f45945b25a023e344ce
           for env in staging prod; do
             helm template shortly deploy/helm/shortly -n "$env" -f "deploy/envs/$env.yaml" --set image.tag=ci \
-              | docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary -kubernetes-version 1.37.0 -
+              --api-versions monitoring.coreos.com/v1/ServiceMonitor \
+              --api-versions monitoring.coreos.com/v1/PrometheusRule \
+              | docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary -kubernetes-version 1.37.0 \
+                  -schema-location default \
+                  -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" -
           done
 
       - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1

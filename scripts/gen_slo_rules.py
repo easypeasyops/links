@@ -1,6 +1,6 @@
 """Generate Prometheus SLO rules from deploy/prometheus/slos.yaml.
 
-    uv run python scripts/gen_slo_rules.py           # (re)write deploy/prometheus/rules/slo.yaml
+    uv run python scripts/gen_slo_rules.py           # (re)write deploy/helm/shortly/rules/slo.yaml
     uv run python scripts/gen_slo_rules.py --check   # exit 1 if the committed file is stale
 
 Alerting method: multi-window, multi-burn-rate (Google SRE Workbook, "Alerting on SLOs").
@@ -18,7 +18,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 SPEC = ROOT / "deploy/prometheus/slos.yaml"
-OUT = ROOT / "deploy/prometheus/rules/slo.yaml"
+OUT = ROOT / "deploy/helm/shortly/rules/slo.yaml"  # shipped by the chart (PrometheusRule)
 RUNBOOK = "https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts"
 
 WINDOWS = ["5m", "30m", "1h", "2h", "6h", "1d", "3d", "30d"]

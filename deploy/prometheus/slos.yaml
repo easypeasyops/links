@@ -1,6 +1,6 @@
 # Service level objectives for shortly: the source of truth for SLO rules.
 #
-# scripts/gen_slo_rules.py turns this file into deploy/prometheus/rules/slo.yaml (committed,
+# scripts/gen_slo_rules.py turns this file into deploy/helm/shortly/rules/slo.yaml (committed,
 # so reviewers see the real PromQL). tests/test_alert_rules.py fails if the two drift apart.
 #
 # An SLO is a promise about what users experience, measured at the service:

@@ -61,13 +61,18 @@ spec:
             httpGet: { path: /healthz, port: http }
             periodSeconds: 2
             failureThreshold: 30
+          # Both probes are answered on the event loop, outside the request threadpool, so
+          # an overloaded pod is still "alive" and still reports its DB reachability. 2 s
+          # of timeout (default 1 s) absorbs CPU contention without hiding a wedged process.
           livenessProbe: # "restart me if wedged" — never checks the DB (see api.py)
             httpGet: { path: /healthz, port: http }
             periodSeconds: 10
+            timeoutSeconds: 2
             failureThreshold: 3
           readinessProbe: # "send me traffic?" — DB down ⇒ out of rotation, not restarted
             httpGet: { path: /readyz, port: http }
             periodSeconds: 5
+            timeoutSeconds: 2
             failureThreshold: 2
           lifecycle:
             preStop:

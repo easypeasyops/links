@@ -14,6 +14,8 @@
 #   4. a broken release is rolled back automatically, with ZERO failed requests meanwhile
 #   5. a manual `helm rollback` restores a previous revision
 #   6. under load, the HPA adds ready pods (scripts/hpa-drill.sh; skip with HPA_DRILL=0)
+#   7. monitoring works end to end: scrape, rules, dashboard queries, and a real alert routed
+#      by Alertmanager (scripts/monitoring-check.sh; skipped when the stack isn't installed)
 set -euo pipefail
 
 IMAGE="${IMAGE:?set IMAGE, e.g. IMAGE=shortly:e2e}"
@@ -144,6 +146,13 @@ pass "manual helm rollback to revision $good_rev restored the previous release"
 # ---------------------------------------------------------------- 6. autoscaling
 if [[ "${HPA_DRILL:-1}" != 0 ]]; then
   NS=prod "$ROOT/scripts/hpa-drill.sh"
+fi
+
+# ---------------------------------------------------------------- 7. monitoring
+if kubectl get crd prometheusrules.monitoring.coreos.com >/dev/null 2>&1; then
+  "$ROOT/scripts/monitoring-check.sh"
+else
+  echo "skip monitoring checks: kube-prometheus-stack not installed (MONITORING=0?)"
 fi
 
 echo "k8s e2e passed"

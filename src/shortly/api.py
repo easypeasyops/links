@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Annotated
 
+import anyio
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from opentelemetry.sdk.trace import TracerProvider
@@ -62,6 +63,7 @@ def create_app(
             tracer_provider.shutdown()  # flush buffered spans before the process exits
 
     app = FastAPI(title="shortly", lifespan=lifespan)
+    probe_limiter = anyio.CapacityLimiter(1)  # see readyz
     base = base_url.rstrip("/")
 
     # Saturated backend: fail fast and tell well-behaved clients when to come back,
@@ -79,19 +81,27 @@ def create_app(
     # fixes that. Readiness: "can I take traffic?" — a DB blip should pull the pod out of
     # rotation, NOT restart it (restarting every pod during a DB outage makes it worse).
     @app.get("/healthz", include_in_schema=False)
-    def healthz() -> dict[str, str]:
+    async def healthz() -> dict[str, str]:
+        # `async def`: answered on the event loop, never queued behind request work in the
+        # threadpool. A sync handler here timed out under overload, kubelet restarted every
+        # pod, and the outage fed itself (found by the CI autoscaling drill).
         return {"status": "ok"}
 
     @app.get("/readyz", include_in_schema=False)
-    def readyz() -> dict[str, str]:
-        if not shortener.is_ready():
+    async def readyz() -> dict[str, str]:
+        # The DB ping blocks, so it runs in a thread, but on its own one-thread limiter,
+        # not the request threadpool: an overloaded pod still answers "can I reach the DB?"
+        ready = await anyio.to_thread.run_sync(shortener.is_ready, limiter=probe_limiter)
+        if not ready:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "not ready")
         return {"status": "ready"}
 
     # Prometheus scrapes this. Not authenticated here: in production it should only be
     # reachable on the cluster network (a separate port or a NetworkPolicy), not the edge.
     @app.get("/metrics", include_in_schema=False)
-    def prometheus_metrics() -> Response:
+    async def prometheus_metrics() -> Response:
+        # On the event loop for the same reason as the probes: a scrape that queues behind
+        # overloaded requests times out, leaving a gap in the metrics exactly when needed.
         return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
 
     @app.post("/links", status_code=status.HTTP_201_CREATED)

@@ -104,7 +104,7 @@ gh attestation verify oci://ghcr.io/statsguy/shortly@sha256:<digest> --owner sta
 Requires Docker, [kind](https://kind.sigs.k8s.io), kubectl, and Helm 4.
 
 ```bash
-scripts/cluster.sh up                                          # kind + metrics-server + staging/prod namespaces + Postgres
+scripts/cluster.sh up                                          # kind + metrics-server + monitoring + staging/prod + Postgres
 scripts/deploy.sh staging ghcr.io/statsguy/shortly@sha256:<digest>
 scripts/deploy.sh prod    ghcr.io/statsguy/shortly@sha256:<digest>   # same digest: build once, deploy many
 helm -n prod history shortly                                   # what can I roll back to?
@@ -141,7 +141,8 @@ CPU-bound; prod autoscales on CPU from 2 pods. Method, numbers and sizing:
 | Creates under 100 ms | 99% |
 
 Declared in `deploy/prometheus/slos.yaml`; `scripts/gen_slo_rules.py` generates the
-recording rules and multi-window burn-rate alerts in `deploy/prometheus/rules/`. Every alert
+recording rules and multi-window burn-rate alerts in `deploy/helm/shortly/rules/`, which the
+chart ships as PrometheusRules along with a Grafana SLO dashboard. Every alert
 has promtool unit tests, and CI fails if a rule selects a metric the app doesn't export.
 Locally, `docker compose --profile app --profile obs up -d` and open
 http://localhost:9090/alerts. Details: [DESIGN.md, SLOs and alerting](docs/DESIGN.md#slos-and-alerting).

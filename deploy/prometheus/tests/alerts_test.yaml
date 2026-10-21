@@ -1,11 +1,11 @@
 # promtool unit tests for every alert: synthetic series in, expected alerts out.
-#   docker run --rm -v "$PWD/deploy/prometheus:/p:ro" --entrypoint promtool \
-#     prom/prometheus:v3.15.0 test rules /p/tests/alerts_test.yaml
+#   docker run --rm -v "$PWD/deploy:/d:ro" --entrypoint promtool \
+#     prom/prometheus:v3.15.0 test rules /d/prometheus/tests/alerts_test.yaml
 # Run in CI by tests/test_alert_rules.py. Each scenario proves an alert fires when it should
 # AND stays quiet when it shouldn't: an alert that is never tested is assumed broken.
 rule_files:
-  - ../rules/slo.yaml
-  - ../rules/shortly.yaml
+  - ../../helm/shortly/rules/slo.yaml
+  - ../../helm/shortly/rules/shortly.yaml
 
 evaluation_interval: 1m
 
@@ -183,6 +183,26 @@ tests:
         exp_alerts:
           - exp_labels: {job: shortly, severity: page}
             exp_annotations: *down
+
+  - name: a namespace with no available pods pages, the others stay quiet
+    interval: 1m
+    input_series:
+      - series: 'kube_deployment_status_replicas_available{namespace="staging",deployment="shortly"}'
+        values: '1 1 0x10'
+      - series: 'kube_deployment_status_replicas_available{namespace="prod",deployment="shortly"}'
+        values: '2x12'
+    alert_rule_test:
+      - eval_time: 2m # zero for 0 minutes: not yet
+        alertname: ShortlyNoAvailablePods
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: ShortlyNoAvailablePods
+        exp_alerts:
+          - exp_labels: {namespace: staging, deployment: shortly, severity: page}
+            exp_annotations:
+              summary: shortly has no available pods
+              description: The Deployment has zero available replicas in this namespace, so every request to it fails.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#shortlynoavailablepods
 
   - name: failing readiness pages
     interval: 1m

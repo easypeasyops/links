@@ -6,10 +6,13 @@ silently break has a test:
 - the generated SLO rules are stale vs deploy/prometheus/slos.yaml;
 - a rule is invalid, or doesn't fire / stay quiet as intended (promtool unit tests);
 - a selector matches nothing the app exports (a renamed metric, route, label or bucket);
-- a runbook link points at a section that doesn't exist.
+- a runbook link points at a section that doesn't exist;
+- a dashboard query selects nothing the app exports;
+- Alertmanager routes an alert to the wrong receiver (amtool).
 """
 
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -29,12 +32,15 @@ from tests.conftest import FakeClock, scripted_codes
 
 ROOT = Path(__file__).resolve().parent.parent
 PROM = ROOT / "deploy/prometheus"
-RULE_FILES = sorted((PROM / "rules").glob("*.yaml"))
+RULES = ROOT / "deploy/helm/shortly/rules"  # the chart ships them as PrometheusRules
+RULE_FILES = sorted(RULES.glob("*.yaml"))
 # Metrics that come from outside the app: Prometheus itself and kube-state-metrics.
 EXTERNAL = {
     "up",
     "kube_horizontalpodautoscaler_status_current_replicas",
     "kube_horizontalpodautoscaler_spec_max_replicas",
+    "kube_deployment_status_replicas_available",
+    "ALERTS",
 }
 
 # name{matchers}; quoted values may contain braces themselves, as in route="/{code}".
@@ -51,10 +57,17 @@ def _rules() -> list[dict[str, Any]]:
     ]
 
 
+Samples = list[tuple[str, dict[str, str]]]
+# Labels Prometheus attaches when it scrapes; the app itself never exports them.
+TARGET_LABELS = {"namespace", "job", "instance", "pod", "service", "endpoint", "container"}
+
+
 def _matches(labels: dict[str, str], matchers: str) -> bool:
     found = MATCHER.findall(matchers)
     assert len(found) == matchers.count('"') // 2, f"unparsed matchers: {matchers}"
     for name, op, value in found:
+        if name in TARGET_LABELS:
+            continue
         actual = labels.get(name, "")
         if op == "=" and actual != value:
             return False
@@ -67,7 +80,7 @@ def _matches(labels: dict[str, str], matchers: str) -> bool:
     return True
 
 
-def _exercised_metrics(clock: FakeClock) -> list[tuple[str, dict[str, str]]]:
+def _exercised_metrics(clock: FakeClock) -> Samples:
     """Drive every outcome the rules look for through real apps sharing one registry."""
 
     class BusyStore(InMemoryStore):
@@ -105,26 +118,43 @@ def test_generated_slo_rules_are_current() -> None:
     assert spec.loader is not None
     gen = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gen)
-    assert (PROM / "rules/slo.yaml").read_text() == gen.render(), (
-        "deploy/prometheus/rules/slo.yaml is stale: run `uv run python scripts/gen_slo_rules.py`"
+    assert (RULES / "slo.yaml").read_text() == gen.render(), (
+        "deploy/helm/shortly/rules/slo.yaml is stale: run `uv run python scripts/gen_slo_rules.py`"
     )
 
 
-def test_every_selector_matches_something_the_app_exports(clock: FakeClock) -> None:
-    samples = _exercised_metrics(clock)
-    rules = _rules()
-    recorded = {r["record"] for r in rules if "record" in r}
+def _check_selectors(where: str, expr: str, samples: Samples, recorded: set[str]) -> int:
     checked = 0
-    for rule in rules:
-        for name, matchers in SELECTOR.findall(rule["expr"]):
-            if ":" in name:  # a recording rule: must be defined here
-                assert name in recorded, f"{rule.get('alert') or rule['record']}: {name} undefined"
-            elif name not in EXTERNAL:
-                checked += 1
-                assert any(n == name and _matches(labels, matchers) for n, labels in samples), (
-                    f"{rule.get('alert') or rule['record']}: {name}{{{matchers}}} matches nothing"
-                )
+    for name, matchers in SELECTOR.findall(expr):
+        if ":" in name:  # a recording rule: must be defined in the rule files
+            assert name in recorded, f"{where}: {name} is not a recorded series"
+        elif name not in EXTERNAL:
+            checked += 1
+            assert any(n == name and _matches(labels, matchers) for n, labels in samples), (
+                f"{where}: {name}{{{matchers}}} matches nothing the app exports"
+            )
+    return checked
+
+
+def test_every_rule_selector_matches_something_the_app_exports(clock: FakeClock) -> None:
+    samples, rules = _exercised_metrics(clock), _rules()
+    recorded = {r["record"] for r in rules if "record" in r}
+    checked = sum(
+        _check_selectors(r.get("alert") or r["record"], r["expr"], samples, recorded) for r in rules
+    )
     assert checked > 20  # the parser really found the selectors
+
+
+def test_every_dashboard_query_matches_something_the_app_exports(clock: FakeClock) -> None:
+    samples = _exercised_metrics(clock)
+    recorded = {r["record"] for r in _rules() if "record" in r}
+    checked = 0
+    for path in sorted((ROOT / "deploy/helm/shortly/dashboards").glob("*.json")):
+        for panel in json.loads(path.read_text())["panels"]:
+            for target in panel.get("targets", []):
+                where = f"{path.name}: {panel['title']}"
+                checked += _check_selectors(where, target["expr"], samples, recorded)
+    assert checked >= 5  # requests, latency, pool size, pool in use, load shed
 
 
 def test_runbook_links_point_at_real_sections() -> None:
@@ -155,9 +185,66 @@ def test_promtool_unit_tests_pass() -> None:
     image = re.search(r"image: (prom/prometheus:\S+)", (ROOT / "compose.yaml").read_text())
     assert image is not None
     result = subprocess.run(
-        ["docker", "run", "--rm", "-v", f"{PROM}:/p:ro", "--entrypoint", "promtool", image[1],
-         "test", "rules", *[f"/p/tests/{p.name}" for p in sorted((PROM / "tests").glob("*.yaml"))]],
+        ["docker", "run", "--rm", "-v", f"{ROOT / 'deploy'}:/d:ro", "--entrypoint", "promtool",
+         image[1], "test", "rules",
+         *[f"/d/prometheus/tests/{p.name}" for p in sorted((PROM / "tests").glob("*.yaml"))]],
         capture_output=True,
         text=True,
     )  # fmt: skip
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# The Alertmanager that kube-prometheus-stack (scripts/cluster.sh) runs.
+ALERTMANAGER_IMAGE = "quay.io/prometheus/alertmanager:v0.34.1"
+
+
+@pytest.fixture(scope="module")
+def alertmanager_config(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    if not _docker():
+        if os.environ.get("CI"):
+            pytest.fail("Docker is required for the amtool tests in CI")
+        pytest.skip("Docker not available")
+    values = yaml.safe_load((ROOT / "deploy/kind/monitoring-values.yaml").read_text())
+    directory = tmp_path_factory.mktemp("alertmanager")
+    directory.chmod(0o755)  # the amtool container runs as nobody
+    config = directory / "alertmanager.yaml"
+    config.write_text(yaml.safe_dump(values["alertmanager"]["config"]))
+    config.chmod(0o644)
+    return config
+
+
+def _amtool(config: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["docker", "run", "--rm", "-v", f"{config.parent}:/c:ro", "--entrypoint", "amtool",
+         ALERTMANAGER_IMAGE, *args],
+        capture_output=True,
+        text=True,
+    )  # fmt: skip
+
+
+@pytest.mark.integration
+def test_alertmanager_config_is_valid(alertmanager_config: Path) -> None:
+    result = _amtool(alertmanager_config, "check-config", f"/c/{alertmanager_config.name}")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.integration
+@pytest.mark.parametrize(
+    ("labels", "receiver"),
+    [
+        (["namespace=prod", "severity=page"], "pager"),
+        (["namespace=prod", "severity=ticket"], "tickets"),
+        (["namespace=staging", "severity=page"], "staging"),  # staging never pages
+        (["alertname=Watchdog", "severity=none"], "null"),
+        (["namespace=monitoring", "severity=warning"], "null"),  # the stack's own alerts
+    ],
+)
+def test_alerts_route_to_the_right_receiver(
+    alertmanager_config: Path, labels: list[str], receiver: str
+) -> None:
+    result = _amtool(
+        alertmanager_config,
+        "config", "routes", "test", f"--config.file=/c/{alertmanager_config.name}",
+        f"--verify.receivers={receiver}", *labels,
+    )  # fmt: skip
+    assert result.returncode == 0, f"{labels} -> {result.stdout.strip()}, want {receiver}"
