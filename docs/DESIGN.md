@@ -309,6 +309,12 @@ CPU per request fell from 2.6–2.9 ms to 2.0–2.3 ms.
 - **CPU saturated.** These requests are not shed: they queue in the threadpool. The HPA is the defence. A concurrency limit that returns 503 is future work.
 - **CI coverage.** `scripts/hpa-drill.sh` runs in CI and proves the HPA adds pods under load. It does not measure capacity.
 
+**Autoscaling, first CI run (PR #11).** 600 req/s from inside the cluster against 2 pods:
+
+- CPU reached 72% of the request. A third pod was ready after 51 s, and CPU then settled at 53%.
+- Latency stayed low: p99 7.5 ms, and 0 of 90,101 requests failed.
+- That works out to about 1.2 ms of CPU per request on the GitHub runner, against 2.0 ms on the measuring host. The same pod costs different amounts on different hardware, which is why the sizing must be re-measured on the hardware prod actually runs on.
+
 ## Security
 
 The controls concentrate on the supply chain and the runtime blast radius; abuse prevention is the main open gap.
