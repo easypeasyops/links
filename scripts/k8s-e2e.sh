@@ -49,6 +49,11 @@ forward() {
   fail "port-forward to $ns never became ready"
 }
 
+# GET a path through the Service from INSIDE the cluster (kube-proxy load-balancing, like a
+# real client). Port-forward can't be used for this: it pins one pod and dies with it.
+# Uses busybox wget in the Postgres pod; exit 0 only on a 2xx.
+in_cluster() { kubectl -n "$1" exec postgres-0 -- wget -q -O /dev/null -T 2 "http://shortly$2" 2>/dev/null; }
+
 revision() { helm -n "$1" status shortly -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'; }
 deployed_image() { kubectl -n "$1" get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}'; }
 
@@ -74,22 +79,20 @@ kubectl -n prod get pdb shortly >/dev/null || fail "prod PodDisruptionBudget mis
 [[ "$(deployed_image prod)" == "$(deployed_image staging)" ]] || fail "prod runs a different image than staging"
 pass "promoted the same image to prod: 2/2 ready, PDB present"
 
-forward prod 18081
-P=http://127.0.0.1:18081
+in_cluster prod /readyz || fail "prod not reachable through its Service"
 good_rev=$(revision prod)
 good_image=$(deployed_image prod)
 
 # ---------------------------------------------------------------- 4. automatic rollback
 # A bad config value makes the new pods fail at boot (Settings validation). They never
 # become ready, so the rollout can't progress; maxUnavailable=0 keeps the old pods serving;
-# helm times out and rolls back. Meanwhile we hammer prod and count failures.
+# helm times out and rolls back. Meanwhile we hit prod's Service and count failures.
 errors_file=$(mktemp)
 (
   errors=0
   end=$((SECONDS + 75))
   while ((SECONDS < end)); do
-    c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "$P/readyz" || echo 000)
-    [[ "$c" == 200 ]] || errors=$((errors + 1))
+    in_cluster prod /readyz || errors=$((errors + 1))
     sleep 0.2
   done
   echo "$errors" >"$errors_file"
@@ -116,7 +119,9 @@ pass "broken release auto-rolled back (now revision $(revision prod)); 0 failed 
 helm -n prod rollback shortly "$good_rev" --wait --timeout 2m >/dev/null
 level=$(kubectl -n prod get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SHORTLY_LOG_LEVEL")].value}')
 [[ "$level" == INFO ]] || fail "rollback didn't restore config (log level $level)"
-[[ "$(curl -s -o /dev/null -w '%{http_code}' $P/readyz)" == 200 ]] || fail "prod unhealthy after rollback"
+# The rollback replaced every pod; wait for the rollout, then check via the Service.
+kubectl -n prod rollout status deploy/shortly --timeout=90s >/dev/null
+in_cluster prod /readyz || fail "prod unhealthy after rollback"
 pass "manual helm rollback to revision $good_rev restored the previous release"
 
 echo "k8s e2e passed"
