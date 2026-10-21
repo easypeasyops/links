@@ -1,0 +1,8 @@
+# Staging: same chart, same image digest prod will get; smaller and chattier.
+replicaCount: 1
+config:
+  baseUrl: "http://staging.sho.rt.localhost"
+  logLevel: DEBUG
+resources:
+  requests: { cpu: 25m, memory: 96Mi }
+  limits: { memory: 192Mi }

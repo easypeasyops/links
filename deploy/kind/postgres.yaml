@@ -1,0 +1,54 @@
+# LOCAL ONLY: a single-instance Postgres per namespace so staging and prod each have their
+# own database, like real environments. Production would use a managed database (RDS,
+# Cloud SQL) or an operator (CloudNativePG) — never a hand-rolled StatefulSet.
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector: { app: postgres }
+  ports: [{ port: 5432 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app: postgres }
+  template:
+    metadata:
+      labels: { app: postgres }
+    spec:
+      # Satisfies the "restricted" Pod Security Standard enforced on the namespace.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70 # the postgres user in the alpine image
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: POSTGRES_USER, value: shortly }
+            - { name: POSTGRES_DB, value: shortly }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres-auth, key: password } }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports: [{ containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "shortly", "-d", "shortly"] }
+            periodSeconds: 2
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: 1Gi } }

@@ -76,6 +76,43 @@ histogram_quantile(0.99, sum by (le, route) (rate(http_request_duration_seconds_
 rate(code_collisions_total[1h])                                              # code space filling up?
 ```
 
+## Release
+
+```bash
+# 1. bump `version` in pyproject.toml in a PR, merge it
+# 2. tag the merge commit
+git switch main && git pull
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+`.github/workflows/release.yml` then: checks the tag matches `pyproject.toml`, builds and
+**scans before publishing**, pushes a multi-arch (amd64 + arm64) image to
+`ghcr.io/statsguy/shortly` with an SBOM and provenance, signs a provenance attestation
+(Sigstore, keyless), and creates a GitHub Release whose notes contain the image **digest**.
+
+```bash
+gh attestation verify oci://ghcr.io/statsguy/shortly@sha256:<digest> --owner statsguy
+```
+
+## Deploy (local Kubernetes)
+
+Requires Docker, [kind](https://kind.sigs.k8s.io), kubectl, and Helm 4.
+
+```bash
+scripts/cluster.sh up                                          # kind + staging/prod namespaces + Postgres
+scripts/deploy.sh staging ghcr.io/statsguy/shortly@sha256:<digest>
+scripts/deploy.sh prod    ghcr.io/statsguy/shortly@sha256:<digest>   # same digest: build once, deploy many
+helm -n prod history shortly                                   # what can I roll back to?
+helm -n prod rollback shortly <revision>
+```
+
+A failed rollout rolls back automatically (`--rollback-on-failure`); `maxUnavailable: 0`
+keeps old pods serving throughout. Namespaces enforce the **restricted** Pod Security
+Standard. `scripts/k8s-e2e.sh` (run in CI on every PR) deploys, promotes, breaks a release
+on purpose, and asserts it rolled back with zero failed requests.
+
+Local image instead of a release: `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev`
+
 ## Migrations
 
 ```bash

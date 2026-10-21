@@ -79,3 +79,47 @@ jobs:
         run: scripts/smoke.sh
         env:
           SHORTLY_IMAGE: shortly:ci
+  
+  k8s:
+    name: deploy to kind, rollback drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.3.1 # deploy.sh uses Helm 4 flags (--rollback-on-failure)
+
+      - name: Lint and schema-validate the chart
+        run: |
+          helm lint deploy/helm/shortly --set image.tag=ci
+          for env in staging prod; do
+            helm template shortly deploy/helm/shortly -n "$env" -f "deploy/envs/$env.yaml" --set image.tag=ci \
+              | docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary -kubernetes-version 1.37.0 -
+          done
+
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          cluster_name: shortly
+          config: deploy/kind/cluster.yaml
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: shortly:e2e
+          cache-from: type=gha
+
+      - name: Namespaces, Postgres, secrets
+        run: scripts/cluster.sh up
+
+      - name: Deploy, promote, rollback drill
+        run: scripts/k8s-e2e.sh
+        env:
+          IMAGE: shortly:e2e

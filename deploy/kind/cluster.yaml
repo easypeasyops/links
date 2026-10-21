@@ -1,0 +1,6 @@
+# Local cluster: `scripts/cluster.sh up`. One node is plenty for staging + prod namespaces.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: shortly
+nodes:
+  - role: control-plane
