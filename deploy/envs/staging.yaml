@@ -1,5 +1,7 @@
 # Staging: same chart, same image digest prod will get; smaller and chattier.
 replicaCount: 1
+autoscaling:
+  enabled: false # one fixed, small pod: staging proves correctness, not capacity
 config:
   baseUrl: "http://staging.sho.rt.localhost"
   logLevel: DEBUG

@@ -22,7 +22,7 @@ from typing import Any, Final
 
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
-from prometheus_client import CollectorRegistry, Counter, Histogram
+from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 REQUEST_ID_HEADER: Final = "x-request-id"
@@ -125,6 +125,19 @@ class Metrics:
             "code_collisions",
             "Generated codes that were already taken. A rising rate means the code space "
             "is filling up — time to lengthen codes.",
+            registry=self.registry,
+        )
+        # Saturation signals for the DB pool. in_use / size near 1 with rising
+        # load_shed is the "add replicas" signal; see docs/RUNBOOK.md.
+        self.db_pool_size = Gauge(
+            "db_pool_size", "Connections in this process's DB pool.", registry=self.registry
+        )
+        self.db_pool_in_use = Gauge(
+            "db_pool_in_use", "DB pool connections checked out now.", registry=self.registry
+        )
+        self.load_shed = Counter(
+            "load_shed",
+            "Requests rejected with 503 because the backend was saturated.",
             registry=self.registry,
         )
 

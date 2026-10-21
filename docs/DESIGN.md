@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-20 for v0.1.0 / chart 0.1.1. Mirrored at
+> Last updated 2026-10-20 for chart 0.2.0 (app changes since v0.1.0 are unreleased). Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -24,7 +24,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.1.0 and chart 0.1.1. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of chart 0.2.0: v0.1.0 plus the unreleased capacity work (autocommit, load shedding, HPA). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -36,7 +36,7 @@ flowchart TB
   subgraph ns[Namespace prod · restricted Pod Security enforced]
     direction LR
     svc[Service<br/>port 80 → 8000] --> http
-    subgraph pod[Pod × 2 · non-root]
+    subgraph pod[Pod × 2–10, HPA on CPU · non-root]
       direction TB
       http[HTTP layer · api.py<br/>routes, request ID, metrics] --> core[Shortener · service.py<br/>codes, retries, expiry]
       core --> store[PostgresStore<br/>insert-and-catch on PK]
@@ -91,10 +91,12 @@ The HTTP layer only parses input, calls the service and maps outcomes to status 
 | Method + path | Success | Errors | Notes |
 | --- | --- | --- | --- |
 | `POST /links` | 201 `{code, short_url, target, expires_at}` | 422 invalid URL or TTL; 503 code space exhausted | Body `{"url": "https://…", "ttl_seconds": 1..31536000}` (TTL optional) |
-| `GET /{code}` | 307, `Location: <target>` | 404 unknown; 410 expired | Sync endpoint: blocking DB calls run in the threadpool |
+| `GET /{code}` | 307, `Location: <target>` | 404 unknown; 410 expired; 503 + `Retry-After: 1` when the DB pool is exhausted | Sync endpoint: blocking DB calls run in the threadpool |
 | `GET /healthz` | 200 | — | Liveness: process is responsive. Never touches the DB |
 | `GET /readyz` | 200 | 503 when the DB ping fails | Readiness: can this pod take traffic |
 | `GET /metrics` | 200, Prometheus text | — | Should be reachable only from inside the cluster |
+
+Any endpoint that touches the database returns **503 with `Retry-After: 1`** when no pooled connection frees up within `SHORTLY_DB_POOL_TIMEOUT_SECONDS`. The store raises `StoreBusyError` (overload, not failure), and the API maps it in one place and counts it in `load_shed_total`.
 
 **307, not 301.** Browsers cache a 301 indefinitely, so an expired link would keep redirecting and future click analytics would never see repeat visits.
 
@@ -120,7 +122,9 @@ CREATE TABLE links (
 
 **Access path.** Writes are single-row inserts; reads are primary-key lookups. No secondary indexes are needed yet. `PostgresStore` maps only `psycopg.errors.UniqueViolation` to `CodeConflictError`.
 
-**Connection pool.** SQLAlchemy `QueuePool`, `pool_size` from `SHORTLY_DB_POOL_SIZE` (default 5), `pool_pre_ping=True` so a DB restart costs a reconnect, not a failed request per stale connection. One-shot processes (migrations) use `NullPool`.
+**Connection pool.** SQLAlchemy `QueuePool` with a **fixed** size: `pool_size` from `SHORTLY_DB_POOL_SIZE` (default 5) and `max_overflow=0`, so each pod's connection count is a known number for the Postgres budget (see Capacity). `pool_timeout` comes from `SHORTLY_DB_POOL_TIMEOUT_SECONDS` (default 1 s, instead of SQLAlchemy's 30 s): a request waits at most that long for a connection and then gets a 503. `pool_pre_ping=True` means a DB restart costs a reconnect rather than one failed request per stale connection; it costs one round trip per checkout and is kept on purpose. One-shot processes (migrations) use `NullPool`.
+
+**Autocommit.** The app's engine runs with `isolation_level="AUTOCOMMIT"`. Every query the app issues is a single statement, which Postgres already executes atomically, so the implicit `BEGIN … COMMIT/ROLLBACK` added two round trips per request for no safety gain. Removing them raised one pod's capacity by about 25% (see Capacity). An integration test checks the behaviour (a write is visible to another connection without `commit()`). A future multi-statement unit of work must opt back in explicitly with `conn.execution_options(isolation_level="READ COMMITTED")`. Migrations use their own engine and stay transactional.
 
 **Migrations** are Alembic revisions in `migrations/versions/`. The database URL comes from the same `Settings` as the app. New revisions are formatted by ruff via a post-write hook.
 
@@ -142,7 +146,8 @@ All configuration comes from environment variables, parsed by `pydantic-settings
 | --- | --- | --- |
 | `SHORTLY_DATABASE_URL` | required | Postgres DSN; always from a Kubernetes Secret |
 | `SHORTLY_BASE_URL` | `http://localhost:8000` | Public base for `short_url` |
-| `SHORTLY_DB_POOL_SIZE` | `5` | Connections per pod |
+| `SHORTLY_DB_POOL_SIZE` | `5` | Connections per pod (fixed, no overflow) |
+| `SHORTLY_DB_POOL_TIMEOUT_SECONDS` | `1.0` | Longest wait for a pooled connection before a 503 |
 | `SHORTLY_LOG_LEVEL` | `INFO` | One of DEBUG, INFO, WARNING, ERROR |
 | `SHORTLY_LOG_JSON` | `true` | `false` for human-readable local logs |
 | `SHORTLY_SERVICE_NAME` | `shortly` | `service.name` on traces |
@@ -171,6 +176,9 @@ Probe and scrape requests (`/healthz`, `/readyz`, `/metrics`) log at DEBUG so th
 | `links_created_total` | counter | — | Write volume |
 | `link_resolutions_total` | counter | outcome = hit, not_found, expired | Redirect outcomes |
 | `code_collisions_total` | counter | — | A rising rate means codes need to get longer |
+| `db_pool_size` | gauge | — | Configured connections per pod |
+| `db_pool_in_use` | gauge | — | Connections checked out now; near `db_pool_size` means the pool is the bottleneck |
+| `load_shed_total` | counter | — | Requests rejected with 503 because the backend was saturated |
 
 **Cardinality rule.** The `route` label is the route template (`/{code}`), never the raw path. Raw paths would create one time series per link ever made. A test asserts that 50 distinct codes produce one series; unmatched paths share `route="unmatched"`.
 
@@ -186,7 +194,7 @@ No change reaches `main` without passing three CI jobs, and no image is publishe
 | --- | --- | --- |
 | `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~88 tests incl. real Postgres; coverage floor 90% (currently ~98%) |
 | `build, scan, smoke-test image` | every PR, push to main | Image builds; Trivy finds no fixable HIGH/CRITICAL; black-box smoke test (non-root, readiness, create → 307, request IDs, metrics, JSON logs, SIGTERM → exit 0) |
-| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works |
+| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods |
 | Release workflow | tag `vX.Y.Z` | Tag equals `pyproject.toml` version; scan before publish; multi-arch push; SBOM; signed provenance; GitHub Release with digest |
 
 **Image.** Multi-stage: uv builds the virtualenv in a builder stage, and only the venv reaches the runtime stage. Dependencies are a separate cached layer from the code. Runtime runs as UID 10001 with code owned by root (read-only to the app), pip removed (its vendored urllib3/msgpack/setuptools were the only HIGH findings), exec-form `CMD` so uvicorn is PID 1 and receives SIGTERM.
@@ -208,10 +216,10 @@ One Helm chart (`deploy/helm/shortly`, Helm 4) deploys the same image digest to 
 
 | | staging | prod |
 | --- | --- | --- |
-| Replicas | 1 | 2 |
+| Replicas | 1, fixed | HPA, 2–4 on CPU (chart default 2–10) |
 | PodDisruptionBudget | none (would block drains) | `minAvailable: 1` |
 | Log level | DEBUG | INFO |
-| Requests / memory limit | 25m CPU, 96Mi / 192Mi | 50m CPU, 128Mi / 256Mi |
+| Requests / memory limit | 25m CPU, 96Mi / 192Mi | 500m CPU, 128Mi / 256Mi |
 
 **Build once, deploy many.** `scripts/deploy.sh <env> <image-ref>` takes a digest reference (`repo@sha256:…`) for released images; the bits tested in staging are the bits promoted to prod. A tag reference is accepted for local images and is loaded into kind first. The chart refuses to render with neither digest nor tag.
 
@@ -223,7 +231,9 @@ One Helm chart (`deploy/helm/shortly`, Helm 4) deploys the same image digest to 
 
 **Pod hardening.** Pod and Job run as UID/GID 10001, `runAsNonRoot`, `readOnlyRootFilesystem` (a 16 Mi `emptyDir` at `/tmp`), all capabilities dropped, no privilege escalation, `seccompProfile: RuntimeDefault`, `automountServiceAccountToken: false`. Both namespaces **enforce** the restricted Pod Security Standard, so the API server rejects a regression.
 
-**Resources.** Memory limit set (a leak OOM-kills one pod, not the node); no CPU limit (avoids CFS throttling on an idle node). Replicas spread across nodes with a topology spread constraint.
+**Resources.** The CPU request (500m) is the measured usage at the per-pod design load, and it is what the HPA's percentage is computed against (see Capacity). Memory limit set (a leak OOM-kills one pod, not the node); no CPU limit (avoids CFS throttling on an idle node). Replicas spread across nodes with a topology spread constraint.
+
+**Autoscaling.** When `autoscaling.enabled` (the default; off in staging), the chart renders a `HorizontalPodAutoscaler` and leaves `replicas` out of the Deployment, because a value there would reset the live count on every `helm upgrade`. Rendering fails if CPU requests are missing (the HPA would never scale) or if `maxReplicas × dbPoolSize` exceeds `autoscaling.maxDbConnections`. The PodDisruptionBudget is rendered when the minimum replica count (HPA floor or fixed count) is above 1. `scripts/cluster.sh` installs metrics-server (pinned version, checksum-verified manifest) so the HPA has CPU data in kind.
 
 **Labels.** `app.kubernetes.io/version` is the tag, or the first 12 hex characters of the digest. Chart 0.1.0 put `sha256:…` in the label, which the API server rejected (`:` is illegal); kubeconform missed it because JSON schemas don't encode label syntax. The e2e now server-side dry-runs the digest-mode render.
 
@@ -241,10 +251,69 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | Code collisions rising | Transparent retries (up to 5); then 503 | `rate(code_collisions_total[1h])` |
 | Code space exhausted (5 collisions in a row) | `POST /links` 503 | 503s on `route="/links"` |
 | Invalid config | Process exits at boot with a validation error | CrashLoopBackOff; first log line names the field |
+| Database slow or hung | Requests holding connections wait on it; all others wait at most 1 s for a connection, then get **503 + `Retry-After`** instead of queueing for 30 s | `load_shed_total` rising, `db_pool_in_use` = `db_pool_size`, 503s on all DB routes |
+| Load above capacity (CPU) | Latency rises with no errors (requests queue in the threadpool); HPA adds pods within about a minute, up to `maxReplicas` | p99 up, HPA `desiredReplicas` rising or pinned at max |
 | Tracing backend down | Spans dropped by the batch exporter; requests unaffected | Exporter warnings in logs |
 | Vulnerable dependency published | CI image scan fails; release workflow refuses to publish | Red `build, scan` job |
 
-**Capacity.** Not yet measured. Each request is one primary-key query; the expected bottleneck is the DB connection pool (`5 × replicas` connections). Run a load test before setting replica counts or an HPA. A link created in v0.1.0 has no deletion path, so the table grows without bound.
+Links have no deletion path, so the table grows without bound.
+
+## Capacity
+
+One pod handles about **250 requests per second within the latency SLO**. It is limited by its own CPU, not the database or the pool. Prod scales on CPU from 2 to 10 pods.
+
+**Method.** `scripts/loadtest.sh` runs k6 (`loadtest/k6/mixed.js`) against the compose stack at increasing fixed arrival rates:
+
+- **Open model** (`constant-arrival-rate`). The rate does not slow down when the server does, so overload shows up as latency.
+- **Traffic mix:** 90% redirects, 10% creates, over 500 seeded links.
+- **CPU:** the app is pinned to 1 CPU with `docker update --cpus`. CPU per request comes from the container's cgroup counters.
+- **A step passes** only if redirect p99 < 50 ms, create p99 < 100 ms, errors < 1% and k6 dropped no iterations.
+
+The measuring host had 2 cores and about 14% steal, so treat the figures as ±15% and re-measure on target hardware.
+
+**Before and after autocommit** (one pod, 1 CPU, same host and session):
+
+| Offered req/s | v0.1.0: redirect p99 | Autocommit: redirect p99 |
+| --- | --- | --- |
+| 200 | 36.5 ms PASS | 25.0 ms PASS |
+| 250 | 402 ms FAIL | 19.2 ms PASS |
+| 300 | 537 ms FAIL | 344 ms FAIL (35 ms PASS in a later run: this is the knee) |
+| 350 | 1,563 ms FAIL | 1,489 ms FAIL |
+
+CPU per request fell from 2.6–2.9 ms to 2.0–2.3 ms.
+
+**Findings**
+
+1. **The ceiling is app CPU.** A saturated pod uses about 0.9 core and no more: one uvicorn worker means one GIL. At 250 req/s Postgres used 0.09 cores (about 0.4 ms per request), so one Postgres core can serve roughly 10 pods.
+2. **Round trips were the waste.** py-spy showed each redirect making 4 DB round trips: pre-ping, implicit `BEGIN`, the `SELECT`, and `ROLLBACK`. Autocommit removes two of them.
+3. **The pool is not the bottleneck.** At about 300 req/s, a median of 1 connection was in use, with a peak of 4. A pool of 1 tripled p95 latency, so the pool stays at 5.
+4. **Overload queued silently.** Past the knee, latency reached seconds with zero errors. With the old 30 s `pool_timeout`, a slow database would have done the same. Now it sheds after 1 s.
+
+**Sizing** (chart 0.2.0, `deploy/helm/shortly/values.yaml`):
+
+| Setting | Value | Derivation |
+| --- | --- | --- |
+| CPU request | 500m | Measured usage at 250 req/s |
+| HPA target | 70% of the request ≈ 350m ≈ 170 req/s per pod | About 30% headroom below the knee for traffic that grows while a pod is added. Adding one takes 30–60 s: 15 s metric resolution, 15 s HPA sync, then start-up and readiness. |
+| minReplicas | 2 | For availability, not load: survives a pod loss or a drain, and the PDB keeps 1 up |
+| maxReplicas | 10 (4 in the kind prod env) | 10 × 170 ≈ 1,700 req/s at target and about 2,500 at the knee, which is also roughly one Postgres core |
+| DB connections | 10 × 5 = 50 ≤ `maxDbConnections` 60 | Postgres defaults to `max_connections` 100. The margin covers migrations, psql sessions and headroom. |
+| Scale-up | Immediate; at most double, or +4 pods, every 15 s | Spikes are the risk |
+| Scale-down | 1 pod per minute, after 5 stable minutes | Avoids flapping |
+
+**Rule of thumb:** replicas needed = ⌈peak req/s ÷ 170⌉. Re-run the load test after a change to the request path (a new query, middleware, or a FastAPI, SQLAlchemy or psycopg upgrade) and on new hardware, then adjust the CPU request and target together.
+
+**Overload behaviour.**
+
+- **Database slow or hung.** Verified by pausing Postgres under load. The requests already holding the pool's 5 connections hung until it resumed. Every other request got a 503 in 1.0 s, and the service recovered by itself on resume.
+- **CPU saturated.** These requests are not shed: they queue in the threadpool. The HPA is the defence. A concurrency limit that returns 503 is future work.
+- **CI coverage.** `scripts/hpa-drill.sh` runs in CI and proves the HPA adds pods under load. It does not measure capacity.
+
+**Autoscaling, first CI run (PR #11).** 600 req/s from inside the cluster against 2 pods:
+
+- CPU reached 72% of the request. A third pod was ready after 51 s, and CPU then settled at 53%.
+- Latency stayed low: p99 7.5 ms, and 0 of 90,101 requests failed.
+- That works out to about 1.2 ms of CPU per request on the GitHub runner, against 2.0 ms on the measuring host. The same pod costs different amounts on different hardware, which is why the sizing must be re-measured on the hardware prod actually runs on.
 
 ## Security
 
@@ -271,7 +340,10 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | --- | --- | --- | --- |
 | Code generation | Random base62 + retry on conflict | Sequential IDs (hashids), hash of URL | Unguessable; no coordination between replicas; same URL can get different codes |
 | Collision handling | Insert-and-catch on PK | Check-then-insert | Atomic; no race under concurrency |
-| Storage access | SQLAlchemy Core, sync, psycopg 3 | ORM; async driver | One table; sync in threadpool is simple; async deferred to a load test |
+| Storage access | SQLAlchemy Core, sync, psycopg 3 | ORM; async driver | One table; sync in threadpool is simple. The load test shows a CPU ceiling, which an async driver would not raise |
+| Transactions | Autocommit for the app; transactions for migrations | Implicit transaction per request | Every app query is one atomic statement; saves 2 round trips per request (about +25% capacity) |
+| Pool | Fixed size 5, no overflow, 1 s timeout → 503 | SQLAlchemy defaults (overflow 10, 30 s wait) | Known Postgres connection budget; overload fails fast instead of piling up |
+| Scaling | HPA on CPU, 2–10 pods | Fixed replicas; scaling on request rate or latency | CPU is the measured bottleneck and needs no custom-metrics adapter |
 | Storage abstraction | `LinkStore` Protocol + contract tests | Direct DB calls in service | Postgres and in-memory pass the same suite; fast unit tests |
 | Redirect status | 307 | 301, 302 | Not cached permanently; preserves method |
 | Probes | Separate liveness and readiness | One `/health` checking the DB | DB outage must not trigger restarts |
@@ -294,6 +366,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Milestone 5 | certifi CRITICAL arrived transitively via `requests` | Image scan gate (caught it) |
 | Milestone 6 | Port-forward pinned one pod; drill measured the wrong thing | Drill checks through the Service from inside the cluster |
 | v0.1.0 deploy | `sha256:` in a label rejected by the API server | Server-side dry run of digest-mode render |
+| Milestone 7 | Implicit transactions doubled DB round trips per request | Autocommit engine; integration test of the behaviour |
+| Milestone 7 | 30 s pool wait would turn a slow DB into a silent pile-up | 1 s `pool_timeout` → 503; test asserts it fails fast |
 
 ## Known limitations and future work
 
@@ -303,18 +377,20 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - No link deletion or expiry cleanup; expired rows stay in the table.
 - `/metrics` is on the public port; no NetworkPolicy restricts it.
 - Provenance is verified by hand; nothing stops `deploy.sh` or the cluster from running an unverified image.
-- Capacity is unmeasured; replica counts and pool size are guesses.
+- CPU overload is not shed: past capacity, requests queue until the HPA catches up or `maxReplicas` is reached.
+- A request holding a connection to a hung (not dead) database has no client-side timeout.
+- Capacity was measured on a small, in-memory dataset; Postgres cost per request will rise with table size.
 - No alerting or SLOs; dashboards are ad-hoc PromQL.
 - Local kind only; no production cluster, backups or disaster recovery for Postgres.
 
 **Next steps, in rough priority order**
 
-1. Load test (k6) to find the throughput limit; then size the pool, replicas and an HPA.
-2. SLOs and burn-rate alerts: availability of `GET /{code}` and p99 latency.
-3. Enforce provenance: `deploy.sh` runs the strict `gh attestation verify`; Kyverno or Sigstore policy-controller in-cluster.
-4. Rate limiting per client on `POST /links`; Safe Browsing check on targets.
-5. Move `/metrics` to a separate port; add a NetworkPolicy.
-6. Expired-link cleanup job and an index on `expires_at`.
+1. SLOs and burn-rate alerts: availability of `GET /{code}` and p99 latency (the load test's 50 ms gate is the candidate). Alert on `load_shed_total` and on the HPA at `maxReplicas`.
+2. Enforce provenance: `deploy.sh` runs the strict `gh attestation verify`; Kyverno or Sigstore policy-controller in-cluster.
+3. Rate limiting per client on `POST /links`; Safe Browsing check on targets.
+4. Move `/metrics` to a separate port; add a NetworkPolicy.
+5. Expired-link cleanup job and an index on `expires_at`.
+6. A concurrency limit that sheds CPU overload; a statement or socket timeout for a hung database.
 7. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys.
 
 **Open questions**

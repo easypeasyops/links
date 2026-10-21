@@ -51,6 +51,8 @@ max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
   value: {{ .Values.config.logLevel | quote }}
 - name: SHORTLY_DB_POOL_SIZE
   value: {{ .Values.config.dbPoolSize | quote }}
+- name: SHORTLY_DB_POOL_TIMEOUT_SECONDS
+  value: {{ .Values.config.dbPoolTimeoutSeconds | quote }}
 {{- if .Values.otel.endpoint }}
 - name: OTEL_EXPORTER_OTLP_ENDPOINT
   value: {{ .Values.otel.endpoint | quote }}
@@ -74,4 +76,9 @@ allowPrivilegeEscalation: false
 readOnlyRootFilesystem: true
 capabilities:
   drop: ["ALL"]
+{{- end -}}
+
+{{/* The fewest replicas that can be running: the HPA floor, or the fixed count. */}}
+{{- define "shortly.minReplicas" -}}
+{{- if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }}
 {{- end -}}

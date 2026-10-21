@@ -10,13 +10,41 @@ image:
 
 imagePullSecrets: []
 
+# Used only when autoscaling is disabled.
 replicaCount: 2
+
+# Sizing comes from the load test (docs/DESIGN.md, Capacity; re-run scripts/loadtest.sh
+# when the request path changes). One pod: ~2 ms CPU per request, meets the latency SLO up
+# to ~250 req/s, saturates near 1 core. Target 70% of a 500m request = ~170 req/s per pod,
+# leaving ~30% headroom for traffic that grows while new pods start.
+autoscaling:
+  enabled: true
+  minReplicas: 2 # survive one pod loss / a drain; the PDB keeps 1 up
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  # Rendering fails if maxReplicas x config.dbPoolSize exceeds this. Postgres default
+  # max_connections is 100; keep room for migrations, admin sessions and the other env.
+  maxDbConnections: 60
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0 # react to a spike at once
+      policies:
+        - { type: Percent, value: 100, periodSeconds: 15 } # at most double every 15 s
+        - { type: Pods, value: 4, periodSeconds: 15 }
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300 # scale in only after 5 quiet minutes: no flapping
+      policies:
+        - { type: Pods, value: 1, periodSeconds: 60 }
 
 # Non-secret config. Becomes SHORTLY_* environment variables.
 config:
   baseUrl: "https://sho.rt"
   logLevel: INFO
+  # Measured: median 1, peak 4 connections in use at ~300 req/s per pod; 1 was too few.
   dbPoolSize: 5
+  # Wait this long for a free connection, then shed with 503 + Retry-After (not 30 s).
+  dbPoolTimeoutSeconds: 1
 
 # The database URL is a secret and is NEVER put in values files (they live in git).
 # Create it out of band (kubectl, External Secrets, Sealed Secrets, Vault...) and point here.
@@ -41,7 +69,7 @@ service:
 
 resources:
   requests:
-    cpu: 50m
+    cpu: 500m # measured ~0.5 cores at 250 req/s; also the HPA's 100%
     memory: 128Mi
   limits:
     # No CPU limit on purpose: CPU limits cause throttling even when the node is idle.

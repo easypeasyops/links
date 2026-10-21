@@ -1,5 +1,8 @@
-# Production: at least two replicas so a rollout, drain, or crash never drops to zero.
-replicaCount: 2
+# Production: autoscaled (chart defaults), never below two replicas so a rollout, drain,
+# or crash never drops to zero. maxReplicas is capped to what a laptop kind node can hold.
+autoscaling:
+  minReplicas: 2
+  maxReplicas: 4
 config:
   baseUrl: "http://sho.rt.localhost"
   logLevel: INFO

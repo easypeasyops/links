@@ -104,7 +104,7 @@ gh attestation verify oci://ghcr.io/statsguy/shortly@sha256:<digest> --owner sta
 Requires Docker, [kind](https://kind.sigs.k8s.io), kubectl, and Helm 4.
 
 ```bash
-scripts/cluster.sh up                                          # kind + staging/prod namespaces + Postgres
+scripts/cluster.sh up                                          # kind + metrics-server + staging/prod namespaces + Postgres
 scripts/deploy.sh staging ghcr.io/statsguy/shortly@sha256:<digest>
 scripts/deploy.sh prod    ghcr.io/statsguy/shortly@sha256:<digest>   # same digest: build once, deploy many
 helm -n prod history shortly                                   # what can I roll back to?
@@ -114,9 +114,22 @@ helm -n prod rollback shortly <revision>
 A failed rollout rolls back automatically (`--rollback-on-failure`); `maxUnavailable: 0`
 keeps old pods serving throughout. Namespaces enforce the **restricted** Pod Security
 Standard. `scripts/k8s-e2e.sh` (run in CI on every PR) deploys, promotes, breaks a release
-on purpose, and asserts it rolled back with zero failed requests.
+on purpose, asserts it rolled back with zero failed requests, then loads prod and checks
+that the HorizontalPodAutoscaler adds pods.
 
 Local image instead of a release: `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev`
+
+## Load testing and capacity
+
+```bash
+SHORTLY_IMAGE=shortly:dev docker compose --profile app up -d --wait
+scripts/loadtest.sh                          # k6 step test, app pinned to 1 CPU; prints PASS/FAIL per rate
+RATES="200 250 300" scripts/loadtest.sh
+```
+
+One pod sustains about 250 req/s within the latency SLO (redirect p99 < 50 ms) and is
+CPU-bound; prod autoscales on CPU from 2 pods. Method, numbers and sizing:
+[DESIGN.md, Capacity](docs/DESIGN.md#capacity).
 
 ## Migrations
 
