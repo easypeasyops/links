@@ -1,0 +1,45 @@
+# Service level objectives for shortly: the source of truth for SLO rules.
+#
+# scripts/gen_slo_rules.py turns this file into deploy/prometheus/rules/slo.yaml (committed,
+# so reviewers see the real PromQL). tests/test_alert_rules.py fails if the two drift apart.
+#
+# An SLO is a promise about what users experience, measured at the service:
+#   SLI  = good events / valid events          (what we measure)
+#   SLO  = SLI target over a rolling window    (what we promise)
+#   budget = 1 - SLO                           (how much failure we can afford)
+#
+# 404 and 410 are correct answers (unknown or expired link), so they count as good.
+# 5xx, including 503 from load shedding, counts as bad: the user did not get an answer.
+
+window: 30d # burn-rate factors in the generator assume a 30-day window
+
+slos:
+  - name: redirect-availability
+    description: GET /{code} answers without a server error
+    objective: 0.999 # budget: 0.1% of redirects, about 43 minutes of full outage in 30 days
+    sli:
+      type: availability
+      selector: 'method="GET", route="/{code}"'
+
+  - name: redirect-latency
+    description: GET /{code} answers in under 50 ms
+    objective: 0.99 # the load test's gate: p99 < 50 ms at the per-pod design load
+    sli:
+      type: latency
+      selector: 'method="GET", route="/{code}"'
+      threshold_seconds: 0.05 # must be a histogram bucket edge (observability.py)
+
+  - name: create-availability
+    description: POST /links answers without a server error
+    objective: 0.995 # creates matter less than redirects: a retry is cheap for the caller
+    sli:
+      type: availability
+      selector: 'method="POST", route="/links"'
+
+  - name: create-latency
+    description: POST /links answers in under 100 ms
+    objective: 0.99
+    sli:
+      type: latency
+      selector: 'method="POST", route="/links"'
+      threshold_seconds: 0.1

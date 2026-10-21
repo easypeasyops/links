@@ -12,6 +12,8 @@ must stay true. Any PR that changes behaviour they describe updates them **in th
 - Version, digest or chart version in the headers and Quick reference → RUNBOOK
 - Anything on the request path, CPU requests, the HPA or the DB pool → re-run
   `scripts/loadtest.sh` and update DESIGN (Capacity) with the new numbers
+- SLOs or alert rules → DESIGN (SLOs and alerting) and RUNBOOK (a playbook section per
+  `runbook_url`); edit `deploy/prometheus/slos.yaml` and regenerate, never `rules/slo.yaml`
 
 They are mirrored as Claude Docs (links in each file's header). When editing with Claude,
 update the Claude Docs copy in the same session so the two don't drift; the repo copy is

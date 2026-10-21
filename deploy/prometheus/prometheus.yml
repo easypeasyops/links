@@ -1,0 +1,14 @@
+# Local-only Prometheus config for `docker compose --profile app --profile obs up`.
+global:
+  scrape_interval: 5s # short for local feedback; 15-60s is typical in production
+  evaluation_interval: 15s
+
+# SLO rules (generated from slos.yaml) and cause-based alerts. Firing alerts show at
+# http://localhost:9090/alerts; there is no Alertmanager locally, so nothing is sent.
+rule_files:
+  - /etc/prometheus/rules/*.yaml
+
+scrape_configs:
+  - job_name: shortly # the alert rules select job="shortly"
+    static_configs:
+      - targets: ["app:8000"]

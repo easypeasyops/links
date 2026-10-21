@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-20 for chart 0.2.0 (app changes since v0.1.0 are unreleased). Mirrored at
+> Last updated 2026-10-21 for chart 0.2.0 (app changes since v0.1.0 are unreleased). Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -24,7 +24,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of chart 0.2.0: v0.1.0 plus the unreleased capacity work (autocommit, load shedding, HPA). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of chart 0.2.0: v0.1.0 plus the unreleased capacity work (autocommit, load shedding, HPA) and SLOs with burn-rate alerts. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -184,6 +184,63 @@ Probe and scrape requests (`/healthz`, `/readyz`, `/metrics`) log at DEBUG so th
 
 **Traces** (OpenTelemetry, OTLP/HTTP) are enabled only when `OTEL_EXPORTER_OTLP_ENDPOINT` is set. FastAPI instrumentation creates the server span (probes excluded; per-ASGI-message send/receive spans excluded, which cut span volume about 3×). Database spans come from **psycopg driver** instrumentation. The SQLAlchemy instrumentation was tried first and silently did nothing: it supports SQLAlchemy < 2.1 and we run 2.1.4. An integration test now fails if SQL spans stop appearing in the request's trace. Buffered spans are flushed on shutdown.
 
+## SLOs and alerting
+
+Four SLOs say what users can expect from shortly. Alerts fire when the error budget is being spent too fast, not whenever a metric looks unusual.
+
+| SLO | SLI (good events ÷ valid events) | Objective, 30 days | Budget |
+| --- | --- | --- | --- |
+| `redirect-availability` | `GET /{code}` responses that are not 5xx | 99.9% | 0.1%: about 43 minutes of full outage |
+| `redirect-latency` | `GET /{code}` responses faster than 50 ms | 99% | 1% |
+| `create-availability` | `POST /links` responses that are not 5xx | 99.5% | 0.5% |
+| `create-latency` | `POST /links` responses faster than 100 ms | 99% | 1% |
+
+**What counts as good.** 404 (unknown link) and 410 (expired) are correct answers, so they are good events. Every 5xx is bad, including the 503 from load shedding: the user did not get an answer. The redirect latency target is the load test's gate (p99 < 50 ms). Redirects get the stricter objectives because every click depends on them, while a failed create can be retried by its caller.
+
+**Source of truth.** The SLOs are declared in `deploy/prometheus/slos.yaml`. `scripts/gen_slo_rules.py` turns that file into Prometheus rules in `deploy/prometheus/rules/slo.yaml`, which is committed so reviewers see the real PromQL. For each SLO the generator emits:
+
+- `slo:sli_error:ratio_rate<window>`: the error ratio over 5m, 30m, 1h, 2h, 6h, 1d, 3d and 30d.
+- `slo:objective:ratio`: the target itself.
+- `slo:error_budget_remaining:ratio`: the share of the 30-day budget left. A negative value means the budget is overspent.
+- Two burn-rate alerts, one paging and one ticketing.
+
+All series are per `namespace`, so staging and prod keep separate budgets.
+
+**Burn-rate alerts** (multi-window, multi-burn-rate, from the Google SRE Workbook). The burn rate is how fast the budget is being spent; at 1x it lasts exactly 30 days. An alert fires only when a long window shows the burn is significant **and** a short window shows it is still happening. That makes it fire within minutes of a real incident, and clear once the short windows are clean again: after 5 minutes for the 14.4x pair, 30 minutes for the 6x pair.
+
+| Severity | Fires when (either pair) | Budget spent by then | `for` |
+| --- | --- | --- | --- |
+| page | 14.4x over 1h and 5m, or 6x over 6h and 30m | 2% or 5% | 2m |
+| ticket | 3x over 1d and 2h, or 1x over 3d and 6h | 10% | 15m |
+
+**Cause-based alerts** in `deploy/prometheus/rules/shortly.yaml` (hand-written) cover what an SLO computed from the app's own metrics cannot see, or warn before the budget is spent:
+
+| Alert | Severity | Why the SLO alerts miss it |
+| --- | --- | --- |
+| `ShortlyDown` | page | No pod scraped means no traffic data; every ratio is empty and no burn-rate alert can fire |
+| `ShortlyNotReady` | page | Pods out of rotation fail requests at the load balancer, which the app never counts |
+| `ShortlyLoadShedding` | ticket | It burns the budget too, but this alert names the cause: the DB pool is exhausted |
+| `ShortlyAtMaxReplicas` | ticket | The HPA has no headroom left; needs kube-state-metrics, which isn't in the local stack |
+
+**How the rules are kept honest** (`tests/test_alert_rules.py`, which runs in CI):
+
+1. The committed `slo.yaml` must equal what the generator produces from `slos.yaml`.
+2. promtool unit tests (`deploy/prometheus/tests/alerts_test.yaml`) feed in synthetic series. They check that each alert fires when it should and stays quiet when it shouldn't: within budget, 404s, one pod down, too early for `for`, and staging versus prod.
+3. Every selector in every rule must match a sample the app actually exports, after the test has driven every outcome through the app (201, 307, 404, shed 503, readiness 503, exhausted code space). So a renamed route, metric, label or histogram bucket fails the build instead of silently disabling an alert.
+4. Every `runbook_url` must point at a heading that exists in RUNBOOK.md.
+
+**Live drill.** Prometheus in the compose `obs` profile loads both rule files; firing alerts show at `http://localhost:9090/alerts` (there is no Alertmanager locally). The drill ran k6 at 100 req/s and paused Postgres for 6 minutes. What happened, with times measured from the pause:
+
+| Time after pause | What happened |
+| --- | --- |
+| +30 s | The 5-minute error ratio started climbing (3%). Every burn-rate alert went to `pending` |
+| +2.5 min | `RedirectAvailabilityBudgetBurn` (page) **fired**, along with the create and latency SLO pages. Shed requests take the full 1 s pool timeout, so they burn the latency budget too |
+| +5.5 min | `ShortlyLoadShedding` (ticket) fired: its `for: 5m` had elapsed |
+| Resume +5.5 min | The 5-minute error ratio was back to 0, and `ShortlyLoadShedding` resolved |
+| Resume +7.5 min (end of drill) | The pages were **still firing**, which is correct. The 6x pair's short window is 30 minutes, so a page clears about 30 minutes after recovery, not 5 |
+
+The drill also corrected the runbook. It had said a page clears within about 5 minutes; the real figure is about 30. `ShortlyNotReady` didn't fire because nothing probes `/readyz` in compose, while kubelet does in Kubernetes. The ticket alerts stayed `pending`: their `for: 15m` hadn't elapsed by the end of the drill.
+
 ## Build, CI and supply chain
 
 No change reaches `main` without passing three CI jobs, and no image is published without passing a vulnerability scan first.
@@ -192,7 +249,7 @@ No change reaches `main` without passing three CI jobs, and no image is publishe
 
 | Gate | When | What it proves |
 | --- | --- | --- |
-| `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~88 tests incl. real Postgres; coverage floor 90% (currently ~98%) |
+| `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~93 tests incl. real Postgres and promtool alert-rule tests; coverage floor 90% (currently ~98%) |
 | `build, scan, smoke-test image` | every PR, push to main | Image builds; Trivy finds no fixable HIGH/CRITICAL; black-box smoke test (non-root, readiness, create → 307, request IDs, metrics, JSON logs, SIGTERM → exit 0) |
 | `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods |
 | Release workflow | tag `vX.Y.Z` | Tag equals `pyproject.toml` version; scan before publish; multi-arch push; SBOM; signed provenance; GitHub Release with digest |
@@ -253,6 +310,7 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | Invalid config | Process exits at boot with a validation error | CrashLoopBackOff; first log line names the field |
 | Database slow or hung | Requests holding connections wait on it; all others wait at most 1 s for a connection, then get **503 + `Retry-After`** instead of queueing for 30 s | `load_shed_total` rising, `db_pool_in_use` = `db_pool_size`, 503s on all DB routes |
 | Load above capacity (CPU) | Latency rises with no errors (requests queue in the threadpool); HPA adds pods within about a minute, up to `maxReplicas` | p99 up, HPA `desiredReplicas` rising or pinned at max |
+| Every pod down, or not scraped | No metrics at all, so the SLO ratios are empty and no burn-rate alert can fire | `ShortlyDown` (from `up`, not from app metrics) |
 | Tracing backend down | Spans dropped by the batch exporter; requests unaffected | Exporter warnings in logs |
 | Vulnerable dependency published | CI image scan fails; release workflow refuses to publish | Red `build, scan` job |
 
@@ -354,6 +412,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Image tags | Semver + digest, no `latest` | `latest` | "What is in prod?" must be answerable |
 | Deploy target (now) | Local kind, staging + prod namespaces | Cloud cluster; PaaS | Free, realistic, chart portable to EKS/GKE |
 | Rollback | Helm `--rollback-on-failure` + rehearsed `helm rollback` | Manual only | Tested on every PR |
+| Alerting | Multi-window burn-rate alerts on SLOs, plus a few cause-based alerts | Threshold alerts on error rate or latency | Pages scale with user impact: a 1-minute blip doesn't page, a slow leak still opens a ticket |
+| SLO rules | A small generator from `slos.yaml`, output committed | Hand-written rules; Sloth or Pyrra | 4 SLOs × 8 windows is too repetitive to write by hand. The generator is about 170 lines that are easy to review, and needs no extra binary or CRD |
 
 **Issues found while building**, each now covered by a test:
 
@@ -368,6 +428,9 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | v0.1.0 deploy | `sha256:` in a label rejected by the API server | Server-side dry run of digest-mode render |
 | Milestone 7 | Implicit transactions doubled DB round trips per request | Autocommit engine; integration test of the behaviour |
 | Milestone 7 | 30 s pool wait would turn a slow DB into a silent pile-up | 1 s `pool_timeout` → 503; test asserts it fails fast |
+| Milestone 8 | First draft of the availability SLI, `1 − good/total`, returned *nothing* for a namespace with 100% errors (it has no "good" series), so a total outage could not alert | `bad/total`, with `or 0 × total` for no errors; promtool test "budgets are per namespace" |
+| Milestone 8 | The HPA drill flaked: 600 req/s produced 75% CPU against a 70% target, and the HPA does nothing within 10% of its target | Drill load raised to 1000 req/s; on failure the drill reports whether the load was too light or the HPA failed to act |
+| Milestone 8 | The selector check let `le="0.04"` pass because `route="/{code}"` contains braces | Quote-aware selector parser; the test fails on any matcher it can't parse |
 
 ## Known limitations and future work
 
@@ -380,12 +443,15 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - CPU overload is not shed: past capacity, requests queue until the HPA catches up or `maxReplicas` is reached.
 - A request holding a connection to a hung (not dead) database has no client-side timeout.
 - Capacity was measured on a small, in-memory dataset; Postgres cost per request will rise with table size.
-- No alerting or SLOs; dashboards are ad-hoc PromQL.
+- Alerts are evaluated but not delivered: there is no Alertmanager, and no Prometheus in the kind cluster (rules run in the compose `obs` stack only).
+- The SLIs are measured in the app. Requests that never reach it (ingress or network failures) are invisible except through `ShortlyDown` and `ShortlyNotReady`; a load-balancer SLI would be more complete.
+- At very low traffic one error is a large ratio, so burn-rate alerts can be noisy; a minimum-request-rate guard is not implemented.
+- No dashboards; the error budget is read with PromQL.
 - Local kind only; no production cluster, backups or disaster recovery for Postgres.
 
 **Next steps, in rough priority order**
 
-1. SLOs and burn-rate alerts: availability of `GET /{code}` and p99 latency (the load test's 50 ms gate is the candidate). Alert on `load_shed_total` and on the HPA at `maxReplicas`.
+1. Deliver alerts: kube-prometheus-stack in kind (Prometheus, Alertmanager, kube-state-metrics, Grafana), a ServiceMonitor and a PrometheusRule from the same rule files, and an SLO dashboard.
 2. Enforce provenance: `deploy.sh` runs the strict `gh attestation verify`; Kyverno or Sigstore policy-controller in-cluster.
 3. Rate limiting per client on `POST /links`; Safe Browsing check on targets.
 4. Move `/metrics` to a separate port; add a NetworkPolicy.
@@ -395,5 +461,5 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 
 **Open questions**
 
-- What availability and latency targets should the SLOs commit to?
+- Are 99.9% / 99.5% the right objectives? Revisit after 30 days of real traffic, from the measured `slo:error_budget_remaining:ratio`.
 - Should repeated shortening of the same URL return the existing code (requires an index on `target`)?
