@@ -69,4 +69,5 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
 CMD ["uvicorn", "shortly.api:create_app_from_env", "--factory", \
      "--host", "0.0.0.0", "--port", "8000", \
      "--timeout-graceful-shutdown", "20", \
+     "--no-access-log", \
      "--no-server-header"]

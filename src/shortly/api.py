@@ -3,15 +3,18 @@
 No business logic lives here, so the service stays testable without HTTP.
 """
 
-from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import AbstractContextManager, asynccontextmanager, contextmanager, nullcontext
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Annotated
 
 from fastapi import FastAPI, HTTPException, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
+from opentelemetry.sdk.trace import TracerProvider
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import AwareDatetime, BaseModel, Field, HttpUrl
 
+from shortly.observability import Metrics, RequestContextMiddleware
 from shortly.service import (
     CodeSpaceExhaustedError,
     LinkExpiredError,
@@ -38,18 +41,24 @@ def create_app(
     shortener: Shortener,
     *,
     base_url: str,
-    lifespan_resource: Callable[[], AbstractContextManager[object]] = nullcontext,
+    metrics: Metrics | None = None,
+    tracer_provider: TracerProvider | None = None,
+    on_shutdown: Callable[[], None] = lambda: None,
 ) -> FastAPI:
     """Build the app around an already-wired ``Shortener``.
 
     Taking dependencies as arguments (instead of reading globals or env vars here) is
-    what lets tests build the app with an in-memory store and a fake clock.
+    what lets tests build the app with an in-memory store, a fake clock, a private
+    metrics registry, and an in-memory span exporter.
     """
+    metrics = metrics or Metrics()
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        with lifespan_resource():  # e.g. dispose the DB pool on shutdown
-            yield
+        yield
+        on_shutdown()  # runs after uvicorn has drained in-flight requests
+        if tracer_provider is not None:
+            tracer_provider.shutdown()  # flush buffered spans before the process exits
 
     app = FastAPI(title="shortly", lifespan=lifespan)
     base = base_url.rstrip("/")
@@ -67,6 +76,12 @@ def create_app(
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "not ready")
         return {"status": "ready"}
 
+    # Prometheus scrapes this. Not authenticated here: in production it should only be
+    # reachable on the cluster network (a separate port or a NetworkPolicy), not the edge.
+    @app.get("/metrics", include_in_schema=False)
+    def prometheus_metrics() -> Response:
+        return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
+
     @app.post("/links", status_code=status.HTTP_201_CREATED)
     def create_link(body: CreateLink) -> LinkOut:
         ttl = timedelta(seconds=body.ttl_seconds) if body.ttl_seconds else None
@@ -74,6 +89,7 @@ def create_app(
             link = shortener.shorten(str(body.url), ttl=ttl)
         except CodeSpaceExhaustedError as exc:
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "try again") from exc
+        metrics.links_created.inc()
         return LinkOut(
             code=link.code,
             short_url=f"{base}/{link.code}",
@@ -88,12 +104,28 @@ def create_app(
         try:
             target = shortener.resolve(code)
         except LinkNotFoundError as exc:
+            metrics.resolutions.labels("not_found").inc()
             raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown link") from exc
         except LinkExpiredError as exc:
+            metrics.resolutions.labels("expired").inc()
             raise HTTPException(status.HTTP_410_GONE, "link expired") from exc
+        metrics.resolutions.labels("hit").inc()
         # 307, not 301: 301 is cached by browsers forever, so expiry and analytics break.
         return RedirectResponse(target, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
+    if tracer_provider is not None:
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+        FastAPIInstrumentor.instrument_app(
+            app,
+            tracer_provider=tracer_provider,
+            excluded_urls="healthz,readyz,metrics",  # probes would drown real traffic
+            exclude_spans=["send", "receive"],  # per-ASGI-message spans: ~3x volume, no insight
+        )
+    # The OTel instrumentation wraps the entire middleware stack, so this middleware runs
+    # *inside* the request span: its access log line carries the trace ID (verified in
+    # tests/test_observability.py). It sees the final status, including unhandled 500s.
+    app.add_middleware(RequestContextMiddleware, metrics=metrics)
     return app
 
 
@@ -101,21 +133,28 @@ def create_app_from_env() -> FastAPI:
     """Production wiring. Run with: uvicorn --factory shortly.api:create_app_from_env"""
     # Imported here so tests of the HTTP layer never need a database driver configured.
     from shortly.db import make_engine
+    from shortly.observability import configure_logging, tracer_provider_from_env
     from shortly.pg_store import PostgresStore
     from shortly.settings import Settings
 
     settings = Settings()  # fields come from the environment; fails fast if missing
+    configure_logging(settings.log_level, json_output=settings.log_json)
     engine = make_engine(str(settings.database_url), pool_size=settings.db_pool_size)
+    metrics = Metrics()
+    provider = tracer_provider_from_env(settings.service_name)
+    if provider is not None:
+        from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
 
-    @contextmanager
-    def dispose_on_exit() -> Iterator[None]:
-        try:
-            yield
-        finally:
-            engine.dispose()  # close pooled connections cleanly on graceful shutdown
+        # One span per query, as a child of the request span: "which query was slow?"
+        # Instrumented at the *driver* (psycopg), not SQLAlchemy: the SQLAlchemy
+        # instrumentation silently no-ops on SQLAlchemy 2.1, and the driver sees every
+        # query regardless of what issued it. tests/test_postgres.py proves spans appear.
+        PsycopgInstrumentor().instrument(tracer_provider=provider)
 
     return create_app(
-        Shortener(PostgresStore(engine)),
+        Shortener(PostgresStore(engine), on_collision=metrics.code_collisions.inc),
         base_url=settings.base_url,
-        lifespan_resource=dispose_on_exit,
+        metrics=metrics,
+        tracer_provider=provider,
+        on_shutdown=engine.dispose,  # close pooled connections cleanly
     )

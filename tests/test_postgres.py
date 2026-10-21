@@ -9,9 +9,11 @@ from pydantic import HttpUrl
 from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 
-from shortly.api import create_app_from_env
+from shortly.api import create_app, create_app_from_env
+from shortly.db import make_engine
 from shortly.models import ShortLink
 from shortly.pg_store import PostgresStore
+from shortly.service import Shortener
 from tests.conftest import T0, alembic_config
 
 pytestmark = pytest.mark.integration
@@ -48,6 +50,7 @@ def test_ping_false_when_db_unreachable() -> None:
     assert PostgresStore(dead).ping() is False
 
 
+@pytest.mark.usefixtures("restore_logging")  # create_app_from_env reconfigures logging
 def test_production_wiring_end_to_end(
     pg_url: str, pg_store: PostgresStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -59,3 +62,37 @@ def test_production_wiring_end_to_end(
         code = client.post("/links", json={"url": "https://example.com/x"}).json()["code"]
         assert client.get(f"/{code}").headers["location"] == "https://example.com/x"
     assert pg_store.get(code) is not None  # really persisted, not in memory
+
+
+def test_db_queries_are_child_spans_of_the_request(pg_url: str, pg_store: PostgresStore) -> None:
+    # The question tracing answers: "this request was slow — which query?" That needs
+    # SQL spans in the same trace as the HTTP span. This test exists because the first
+    # attempt (SQLAlchemy instrumentation) produced *no* spans and raised no error.
+    from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    PsycopgInstrumentor().instrument(tracer_provider=provider)
+    engine = make_engine(pg_url)  # fresh engine, so its connections are instrumented
+    app = create_app(
+        Shortener(PostgresStore(engine)), base_url="https://sho.rt", tracer_provider=provider
+    )
+    try:
+        TestClient(app, follow_redirects=False).get("/nope")
+    finally:
+        engine.dispose()
+        PsycopgInstrumentor().uninstrument()  # global patch: undo it for other tests
+        provider.shutdown()
+
+    spans = exporter.get_finished_spans()
+    (server,) = [s for s in spans if s.kind.name == "SERVER"]
+    sql = [s for s in spans if s.kind.name == "CLIENT" and s.name.startswith("SELECT")]
+    assert sql, f"no SQL spans; got {[s.name for s in spans]}"
+    assert server.context is not None
+    for s in sql:
+        assert s.context is not None
+        assert s.context.trace_id == server.context.trace_id  # same trace as the request

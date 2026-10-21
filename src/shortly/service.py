@@ -41,6 +41,7 @@ class Shortener:
         code_gen: Callable[[], str] = generate_code,
         clock: Callable[[], datetime] = utc_now,
         max_attempts: int = MAX_ATTEMPTS,
+        on_collision: Callable[[], None] = lambda: None,
     ) -> None:
         if max_attempts < 1:
             raise ValueError("max_attempts must be >= 1")
@@ -48,6 +49,8 @@ class Shortener:
         self._code_gen = code_gen
         self._clock = clock
         self._max_attempts = max_attempts
+        # A hook, not a metrics client: the domain layer stays free of Prometheus.
+        self._on_collision = on_collision
 
     def shorten(self, target: str, *, ttl: timedelta | None = None) -> ShortLink:
         url = HttpUrl(target)  # validate once, before any retries; raises ValidationError
@@ -66,6 +69,7 @@ class Shortener:
                 # under concurrency. The store's add() is the single atomic decision point.
                 self._store.add(link)
             except CodeConflictError:
+                self._on_collision()
                 continue
             return link
         raise CodeSpaceExhaustedError(f"no free code after {self._max_attempts} attempts")
