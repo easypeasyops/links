@@ -17,6 +17,18 @@ groups:
           description: Prometheus has no healthy shortly target, so the SLO alerts are blind. Treat it as a full outage until proven otherwise.
           runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#shortlydown
 
+      # Needs kube-state-metrics. One environment with zero available pods is down, even
+      # though another one is still being scraped (ShortlyDown only catches "nothing anywhere").
+      - alert: ShortlyNoAvailablePods
+        expr: kube_deployment_status_replicas_available{deployment="shortly"} == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: shortly has no available pods
+          description: The Deployment has zero available replicas in this namespace, so every request to it fails.
+          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#shortlynoavailablepods
+
       # Pods that fail readiness are removed from the Service. Users then get errors at the
       # load balancer, which the app never sees, so the availability SLI stays green.
       - alert: ShortlyNotReady

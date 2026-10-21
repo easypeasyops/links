@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-21 for chart 0.2.0 (app changes since v0.1.0 are unreleased). Mirrored at
+> Last updated 2026-10-21 for chart 0.3.0 (app changes since v0.1.0 are unreleased). Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -24,7 +24,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of chart 0.2.0: v0.1.0 plus the unreleased capacity work (autocommit, load shedding, HPA) and SLOs with burn-rate alerts. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of chart 0.3.0: v0.1.0 plus the unreleased capacity work (autocommit, load shedding, HPA), and SLOs with burn-rate alerts delivered through kube-prometheus-stack. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -44,15 +44,19 @@ flowchart TB
     store --> pg[(Postgres 17<br/>table: links)]
     job[Migrate Job<br/>pre-upgrade hook] -->|before rollout| pg
   end
-  subgraph tel[Telemetry]
+  subgraph tel[Telemetry · namespace monitoring]
     direction LR
-    prom[Prometheus<br/>RED + domain metrics]
+    prom[Prometheus<br/>scrapes via ServiceMonitor<br/>evaluates the chart's rules]
+    am[Alertmanager<br/>routes pages and tickets]
+    graf[Grafana<br/>SLO dashboard]
     jaeger[Jaeger<br/>request span → SQL spans]
     logs[Log collector<br/>one JSON line per event]
   end
   http -.->|OTLP spans| jaeger
   http -.->|JSON on stdout| logs
   prom -.->|scrape /metrics| http
+  prom -->|firing alerts| am
+  graf -->|PromQL| prom
 ```
 
 The layers depend inward only: `api.py` knows the `Shortener`, which knows the `LinkStore` Protocol, never Postgres. `PostgresStore` and `InMemoryStore` are interchangeable adapters that pass the same contract test suite. The migration Job runs from the same image before new pods start.
@@ -197,7 +201,7 @@ Four SLOs say what users can expect from shortly. Alerts fire when the error bud
 
 **What counts as good.** 404 (unknown link) and 410 (expired) are correct answers, so they are good events. Every 5xx is bad, including the 503 from load shedding: the user did not get an answer. The redirect latency target is the load test's gate (p99 < 50 ms). Redirects get the stricter objectives because every click depends on them, while a failed create can be retried by its caller.
 
-**Source of truth.** The SLOs are declared in `deploy/prometheus/slos.yaml`. `scripts/gen_slo_rules.py` turns that file into Prometheus rules in `deploy/prometheus/rules/slo.yaml`, which is committed so reviewers see the real PromQL. For each SLO the generator emits:
+**Source of truth.** The SLOs are declared in `deploy/prometheus/slos.yaml`. `scripts/gen_slo_rules.py` turns that file into Prometheus rules in `deploy/helm/shortly/rules/slo.yaml`, which is committed so reviewers see the real PromQL. The rules live in the chart because the chart ships them (see Delivery below). For each SLO the generator emits:
 
 - `slo:sli_error:ratio_rate<window>`: the error ratio over 5m, 30m, 1h, 2h, 6h, 1d, 3d and 30d.
 - `slo:objective:ratio`: the target itself.
@@ -213,14 +217,15 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 | page | 14.4x over 1h and 5m, or 6x over 6h and 30m | 2% or 5% | 2m |
 | ticket | 3x over 1d and 2h, or 1x over 3d and 6h | 10% | 15m |
 
-**Cause-based alerts** in `deploy/prometheus/rules/shortly.yaml` (hand-written) cover what an SLO computed from the app's own metrics cannot see, or warn before the budget is spent:
+**Cause-based alerts** in `deploy/helm/shortly/rules/shortly.yaml` (hand-written) cover what an SLO computed from the app's own metrics cannot see, or warn before the budget is spent:
 
 | Alert | Severity | Why the SLO alerts miss it |
 | --- | --- | --- |
 | `ShortlyDown` | page | No pod scraped means no traffic data; every ratio is empty and no burn-rate alert can fire |
+| `ShortlyNoAvailablePods` | page | One environment with zero pods produces no metrics of its own, while another environment keeps `up` non-empty; this uses kube-state-metrics |
 | `ShortlyNotReady` | page | Pods out of rotation fail requests at the load balancer, which the app never counts |
 | `ShortlyLoadShedding` | ticket | It burns the budget too, but this alert names the cause: the DB pool is exhausted |
-| `ShortlyAtMaxReplicas` | ticket | The HPA has no headroom left; needs kube-state-metrics, which isn't in the local stack |
+| `ShortlyAtMaxReplicas` | ticket | The HPA has no headroom left; uses kube-state-metrics |
 
 **How the rules are kept honest** (`tests/test_alert_rules.py`, which runs in CI):
 
@@ -228,8 +233,39 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 2. promtool unit tests (`deploy/prometheus/tests/alerts_test.yaml`) feed in synthetic series. They check that each alert fires when it should and stays quiet when it shouldn't: within budget, 404s, one pod down, too early for `for`, and staging versus prod.
 3. Every selector in every rule must match a sample the app actually exports, after the test has driven every outcome through the app (201, 307, 404, shed 503, readiness 503, exhausted code space). So a renamed route, metric, label or histogram bucket fails the build instead of silently disabling an alert.
 4. Every `runbook_url` must point at a heading that exists in RUNBOOK.md.
+5. Every query on the SLO dashboard must select something the app exports or a recorded series.
+6. amtool validates the Alertmanager config and checks where each kind of alert is routed.
 
-**Live drill.** Prometheus in the compose `obs` profile loads both rule files; firing alerts show at `http://localhost:9090/alerts` (there is no Alertmanager locally). The drill ran k6 at 100 req/s and paused Postgres for 6 minutes. What happened, with times measured from the pause:
+**Delivery in Kubernetes.** `scripts/cluster.sh` installs kube-prometheus-stack 91.9.0 (pinned by version and digest) into a `monitoring` namespace: Prometheus Operator, Prometheus, Alertmanager, kube-state-metrics and Grafana. Pieces that can't work in kind are disabled: control-plane scraping, and node-exporter, which needs host namespaces that the namespace's `baseline` Pod Security level forbids. The shortly chart then ships its own monitoring:
+
+| Object | Rendered in | Why |
+| --- | --- | --- |
+| ServiceMonitor | every release with `monitoring.enabled` | Prometheus scrapes each pod's `/metrics` through the Service; `job="shortly"`, plus the pod's `namespace` |
+| PrometheusRule, one per file in `rules/` | prod only (`monitoring.clusterWide`) | The rules aggregate `by (namespace)` and so already cover every environment. A second copy would evaluate every recording rule twice and collide |
+| Dashboard ConfigMap (`dashboards/slo.json`) | prod only | Grafana's sidecar loads it from any namespace; an environment drop-down picks staging or prod |
+
+The CRD-backed objects are rendered only where the Prometheus Operator CRDs exist (`.Capabilities.APIVersions`), so the chart still installs on a cluster without them.
+
+Alertmanager routing (`deploy/kind/monitoring-values.yaml`):
+
+| Alert | Receiver |
+| --- | --- |
+| anything in `staging` | `staging`: staging never pages anyone |
+| `severity="page"` | `pager` |
+| `severity="ticket"` | `tickets` |
+| the stack's own alerts and its `Watchdog` heartbeat | `null` |
+
+Two inhibitions cut the noise. A page silences the ticket for the same alert, SLO and namespace. `ShortlyNoAvailablePods` silences the burn-rate, readiness and shedding alerts in its namespace, because they are symptoms of the same cause. The receivers are placeholders with no integration, so nothing leaves the cluster; in a real setup `pager` gets PagerDuty and `tickets` gets Slack, with credentials in a Secret.
+
+**Proven on every PR.** `scripts/monitoring-check.sh`, the last step of the kind e2e, checks the whole path in the cluster:
+
+- Prometheus scrapes the prod pods through the ServiceMonitor.
+- All five rule groups load, and every rule reports `health=ok`.
+- The SLO recording rules produce series for prod.
+- Every dashboard query is valid PromQL.
+- A real alert completes the path. The script scales staging to zero; `ShortlyNoAvailablePods` fires and reaches Alertmanager, which routes it to the `staging` receiver. Then staging is restored.
+
+**Live drill.** Prometheus in the compose `obs` profile loads the same rule files; firing alerts show at `http://localhost:9090/alerts` (the compose stack has no Alertmanager). The drill ran k6 at 100 req/s and paused Postgres for 6 minutes. What happened, with times measured from the pause:
 
 | Time after pause | What happened |
 | --- | --- |
@@ -249,9 +285,9 @@ No change reaches `main` without passing three CI jobs, and no image is publishe
 
 | Gate | When | What it proves |
 | --- | --- | --- |
-| `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~93 tests incl. real Postgres and promtool alert-rule tests; coverage floor 90% (currently ~98%) |
+| `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~100 tests incl. real Postgres, promtool and amtool; coverage floor 90% (currently ~98%) |
 | `build, scan, smoke-test image` | every PR, push to main | Image builds; Trivy finds no fixable HIGH/CRITICAL; black-box smoke test (non-root, readiness, create → 307, request IDs, metrics, JSON logs, SIGTERM → exit 0) |
-| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods |
+| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager |
 | Release workflow | tag `vX.Y.Z` | Tag equals `pyproject.toml` version; scan before publish; multi-arch push; SBOM; signed provenance; GitHub Release with digest |
 
 **Image.** Multi-stage: uv builds the virtualenv in a builder stage, and only the venv reaches the runtime stage. Dependencies are a separate cached layer from the code. Runtime runs as UID 10001 with code owned by root (read-only to the app), pip removed (its vendored urllib3/msgpack/setuptools were the only HIGH findings), exec-form `CMD` so uvicorn is PID 1 and receives SIGTERM.
@@ -274,6 +310,7 @@ One Helm chart (`deploy/helm/shortly`, Helm 4) deploys the same image digest to 
 | | staging | prod |
 | --- | --- | --- |
 | Replicas | 1, fixed | HPA, 2–4 on CPU (chart default 2–10) |
+| Monitoring | ServiceMonitor | ServiceMonitor, PrometheusRules, SLO dashboard (`clusterWide`) |
 | PodDisruptionBudget | none (would block drains) | `minAvailable: 1` |
 | Log level | DEBUG | INFO |
 | Requests / memory limit | 25m CPU, 96Mi / 192Mi | 500m CPU, 128Mi / 256Mi |
@@ -414,6 +451,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Rollback | Helm `--rollback-on-failure` + rehearsed `helm rollback` | Manual only | Tested on every PR |
 | Alerting | Multi-window burn-rate alerts on SLOs, plus a few cause-based alerts | Threshold alerts on error rate or latency | Pages scale with user impact: a 1-minute blip doesn't page, a slow leak still opens a ticket |
 | SLO rules | A small generator from `slos.yaml`, output committed | Hand-written rules; Sloth or Pyrra | 4 SLOs × 8 windows is too repetitive to write by hand. The generator is about 170 lines that are easy to review, and needs no extra binary or CRD |
+| Who ships the rules | The app chart, from its prod release only | Every release, scoped with the operator's `enforcedNamespaceLabel`; a separate monitoring repo | Rules change with the code they describe and are reviewed in the same PR. One cluster-wide copy avoids duplicate series without the operator's multi-tenancy machinery |
+| Monitoring stack | kube-prometheus-stack | Hand-rolled Prometheus manifests; a hosted service | The standard way to run the Prometheus Operator; CRDs make scrape config and rules part of each app's chart |
 
 **Issues found while building**, each now covered by a test:
 
@@ -443,21 +482,20 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - CPU overload is not shed: past capacity, requests queue until the HPA catches up or `maxReplicas` is reached.
 - A request holding a connection to a hung (not dead) database has no client-side timeout.
 - Capacity was measured on a small, in-memory dataset; Postgres cost per request will rise with table size.
-- Alerts are evaluated but not delivered: there is no Alertmanager, and no Prometheus in the kind cluster (rules run in the compose `obs` stack only).
+- Alert receivers are placeholders: alerts are routed but not delivered to a person (no PagerDuty or Slack integration).
+- Prometheus keeps 2 days of data in kind and has no persistent volume, so 30-day error budgets reset when its pod restarts.
 - The SLIs are measured in the app. Requests that never reach it (ingress or network failures) are invisible except through `ShortlyDown` and `ShortlyNotReady`; a load-balancer SLI would be more complete.
 - At very low traffic one error is a large ratio, so burn-rate alerts can be noisy; a minimum-request-rate guard is not implemented.
-- No dashboards; the error budget is read with PromQL.
 - Local kind only; no production cluster, backups or disaster recovery for Postgres.
 
 **Next steps, in rough priority order**
 
-1. Deliver alerts: kube-prometheus-stack in kind (Prometheus, Alertmanager, kube-state-metrics, Grafana), a ServiceMonitor and a PrometheusRule from the same rule files, and an SLO dashboard.
-2. Enforce provenance: `deploy.sh` runs the strict `gh attestation verify`; Kyverno or Sigstore policy-controller in-cluster.
-3. Rate limiting per client on `POST /links`; Safe Browsing check on targets.
-4. Move `/metrics` to a separate port; add a NetworkPolicy.
-5. Expired-link cleanup job and an index on `expires_at`.
-6. A concurrency limit that sheds CPU overload; a statement or socket timeout for a hung database.
-7. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys.
+1. Enforce provenance: `deploy.sh` runs the strict `gh attestation verify`; Kyverno or Sigstore policy-controller in-cluster.
+2. Rate limiting per client on `POST /links`; Safe Browsing check on targets.
+3. Move `/metrics` to a separate port; add a NetworkPolicy.
+4. Expired-link cleanup job and an index on `expires_at`.
+5. A concurrency limit that sheds CPU overload; a statement or socket timeout for a hung database.
+6. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
 
 **Open questions**
 

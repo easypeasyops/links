@@ -1,0 +1,21 @@
+{{- /* Rendered only where the Prometheus Operator CRDs exist, so the chart still installs on
+       a cluster without them. `helm template` checks the kind offline:
+       --api-versions monitoring.coreos.com/v1/ServiceMonitor */}}
+{{- if and .Values.monitoring.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
+# Prometheus finds the pods through the Service's endpoints and scrapes each one. The job
+# label becomes the Service name ("shortly"), which the alert rules select on.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "shortly.fullname" . }}
+  labels:
+    {{- include "shortly.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "shortly.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.monitoring.scrapeInterval }}
+{{- end }}

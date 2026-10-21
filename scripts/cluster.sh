@@ -2,7 +2,8 @@
 # Local Kubernetes for shortly: one kind cluster, two namespaces (staging, prod), each with
 # its own Postgres and secrets — the shape of real environments, on a laptop.
 #
-#   scripts/cluster.sh up      # idempotent
+#   scripts/cluster.sh up              # idempotent
+#   MONITORING=0 scripts/cluster.sh up # skip kube-prometheus-stack (saves ~1 GB of RAM)
 #   scripts/cluster.sh down
 set -euo pipefail
 
@@ -13,6 +14,11 @@ ENVS=(staging prod)
 # a manifest fetched at runtime is code you run with cluster-admin.
 METRICS_SERVER_VERSION=v0.9.0
 METRICS_SERVER_SHA256=1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b
+# kube-prometheus-stack: Prometheus Operator, Prometheus, Alertmanager, kube-state-metrics,
+# Grafana. Pinned by version AND digest: the tag says what it is, the digest that it can't change.
+MONITORING_CHART=oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
+MONITORING_VERSION=91.9.0
+MONITORING_DIGEST=sha256:04047e500c803dc8d2bc284ecb43e9229bb32b5c36bd13fc89592c8a2f3cdc72
 
 up() {
   if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
@@ -20,6 +26,9 @@ up() {
   fi
   kubectl config use-context "kind-$CLUSTER" >/dev/null
   install_metrics_server
+  # Before the app namespaces: the shortly chart's ServiceMonitor and PrometheusRule need
+  # the stack's CRDs to exist.
+  if [[ "${MONITORING:-1}" != 0 ]]; then install_monitoring; fi
 
   for ns in "${ENVS[@]}"; do
     kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -62,6 +71,22 @@ install_metrics_server() {
       -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]' >/dev/null
   fi
   kubectl -n kube-system rollout status deploy/metrics-server --timeout=120s >/dev/null
+}
+
+install_monitoring() {
+  kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  # "baseline", not "restricted": some of the stack's pods don't meet "restricted" yet.
+  # baseline still forbids privileged pods and host namespaces (hence no node-exporter).
+  kubectl label namespace monitoring --overwrite pod-security.kubernetes.io/enforce=baseline >/dev/null
+  if ! kubectl -n monitoring get secret grafana-admin >/dev/null 2>&1; then
+    pw=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24 || true)
+    kubectl -n monitoring create secret generic grafana-admin \
+      --from-literal=admin-user=admin --from-literal=admin-password="$pw" >/dev/null
+  fi
+  helm upgrade --install monitoring "$MONITORING_CHART@$MONITORING_DIGEST" \
+    --version "$MONITORING_VERSION" --namespace monitoring \
+    --values "$ROOT/deploy/kind/monitoring-values.yaml" --wait --timeout 10m >/dev/null
+  echo "monitoring ready: kube-prometheus-stack $MONITORING_VERSION in namespace monitoring"
 }
 
 down() {

@@ -86,6 +86,16 @@ podDisruptionBudget:
   enabled: true
   minAvailable: 1
 
+# Prometheus Operator integration (kube-prometheus-stack; scripts/cluster.sh installs it in
+# kind). Off by default because the ServiceMonitor and PrometheusRule kinds need its CRDs.
+monitoring:
+  enabled: false # a ServiceMonitor: Prometheus scrapes /metrics on every pod
+  scrapeInterval: 15s
+  # The alert rules and the SLO dashboard are cluster-wide: every rule already aggregates
+  # `by (namespace)`, so they cover all environments. Exactly ONE release per cluster may
+  # ship them (prod); two copies would evaluate every recording rule twice and collide.
+  clusterWide: false
+
 nodeSelector: {}
 tolerations: []
 affinity: {}

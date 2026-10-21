@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-21 for chart 0.2.0 (app changes since v0.1.0 are unreleased). Mirrored at
+> Last updated 2026-10-21 for chart 0.3.0 (app changes since v0.1.0 are unreleased). Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -20,7 +20,8 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Endpoints | `/healthz` liveness · `/readyz` readiness · `/metrics` Prometheus |
 | Logs | JSON on stdout; `request_id` and `trace_id` on every line |
 | SLOs | redirects 99.9% available and 99% < 50 ms; creates 99.5% and 99% < 100 ms; 30-day window (`deploy/prometheus/slos.yaml`) |
-| Alerts | `deploy/prometheus/rules/`; local: `http://localhost:9090/alerts` (compose `obs` profile, no Alertmanager) |
+| Alerts | Rules in `deploy/helm/shortly/rules/` (shipped by the prod release). kind: Prometheus, Alertmanager and Grafana in namespace `monitoring` (see Local cluster operations). Compose: `http://localhost:9090/alerts` |
+| Alert routing | anything in `staging` → `staging`; `severity=page` → `pager`; `severity=ticket` → `tickets` (`deploy/kind/monitoring-values.yaml`) |
 
 ```bash
 # Most-used commands
@@ -279,7 +280,25 @@ kubectl -n prod exec postgres-0 -- wget -q -O- http://shortly/readyz   # does th
 ```
 
 - Pods are missing or crash-looping: see CrashLoopBackOff, or Deploy stuck or failed.
-- Pods are fine and the Service answers: the problem is the scrape (Prometheus target config or a NetworkPolicy), not the app. Fix it anyway: until scraping works, nothing else can page.
+- Pods are fine and the Service answers: the problem is the scrape, not the app. Check the target in Prometheus (Status → Targets, `serviceMonitor/prod/shortly`), the ServiceMonitor (`kubectl -n prod get servicemonitor shortly`), and any NetworkPolicy. Fix it anyway: until scraping works, nothing else can page.
+
+### ShortlyNoAvailablePods
+
+One environment's Deployment has zero available pods, so every request to it fails. The alert carries the `namespace`; the burn-rate and readiness alerts for that namespace are inhibited, because they are symptoms of the same thing.
+
+```bash
+NS=prod
+kubectl -n $NS get deploy,rs,pods -l app.kubernetes.io/name=shortly
+kubectl -n $NS get events --sort-by=.lastTimestamp | tail -20
+helm -n $NS history shortly
+```
+
+| You see | Cause | Fix |
+| --- | --- | --- |
+| `READY 0/0`, desired 0 | Someone (or something) scaled it to zero | `helm -n $NS rollback shortly <last good rev>`, or `kubectl -n $NS scale deploy/shortly --replicas=2` |
+| Pods crash-looping | Bad release or config | CrashLoopBackOff playbook; roll back |
+| Pods Pending | No room on the nodes | Deploy stuck or failed playbook (`Insufficient cpu/memory`) |
+| Pods Running but not Ready | Database unreachable | Pods not Ready playbook |
 
 ### Pods not Ready, `/readyz` returns 503
 
@@ -369,8 +388,8 @@ Check whether the running digest is affected (the SBOM is attached to the image)
 Every CI step can be reproduced locally with the same command; reproduce before you guess.
 
 | Job → step | Usual cause | Reproduce and fix |
-| test → `test_generated_slo_rules_are_current` | `slos.yaml` or the generator changed without regenerating | `uv run python scripts/gen_slo_rules.py`, commit `deploy/prometheus/rules/slo.yaml` |
-| test → `test_every_selector_matches_something_the_app_exports` | A metric, route, label or histogram bucket changed, and an alert now selects nothing | Update the rule (or `slos.yaml`) to the new name, or revert the rename |
+| test → `test_generated_slo_rules_are_current` | `slos.yaml` or the generator changed without regenerating | `uv run python scripts/gen_slo_rules.py`, commit `deploy/helm/shortly/rules/slo.yaml` |
+| test → `test_every_rule_selector_matches_something_the_app_exports` | A metric, route, label or histogram bucket changed, and an alert now selects nothing | Update the rule (or `slos.yaml`) to the new name, or revert the rename |
 | test → `test_promtool_unit_tests_pass` | A rule's behaviour changed, or its annotations no longer match the test | Run promtool (command in `deploy/prometheus/tests/alerts_test.yaml`); fix the rule or update the expected alert |
 | test → `test_runbook_links_point_at_real_sections` | A RUNBOOK heading was renamed | Rename it back, or update `runbook_url` in the rules |
 | --- | --- | --- |
@@ -384,6 +403,9 @@ Every CI step can be reproduced locally with the same command; reproduce before 
 | image → Scan image | New fixable HIGH/CRITICAL CVE, often transitive | Find the package in the Trivy table; `uv lock --upgrade-package <pkg>` or bump the base digest |
 | image → Smoke test | The container misbehaves | `docker build -t shortly:dev . && scripts/smoke.sh`; on failure it prints container logs |
 | k8s → digest-mode render | API server rejects a manifest (e.g. an invalid label) | `helm template … --set image.digest=sha256:<64 hex> \| kubectl apply --dry-run=server -f -` against kind |
+| k8s → monitoring checks | `scrapes 0 healthy prod pods` (ServiceMonitor or labels), `rule groups loaded` (PrometheusRule missing: is `monitoring.clusterWide` on for prod?), `rules not evaluating cleanly` (a PromQL error), `a dashboard query is invalid`, or the staging alert never reached Alertmanager or went to the wrong receiver | `scripts/monitoring-check.sh` against kind; for the alert, check Prometheus → Alerts, then Alertmanager → Status → Config |
+| test → `test_alertmanager_config_is_valid` / `test_alerts_route_to_the_right_receiver` | The Alertmanager config in `deploy/kind/monitoring-values.yaml` is invalid, or a route changed | `amtool config routes test --config.file=… namespace=prod severity=page` (the test prints the receiver it got) |
+| test → `test_every_dashboard_query_matches_something_the_app_exports` | A dashboard query selects a metric or label the app doesn't export | Fix the query in `deploy/helm/shortly/dashboards/slo.json` |
 | k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready); `load too light` (CPU never got 10% past the target: raise the drill's `RATE`); or no scale-up despite high CPU (a real HPA problem) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
 | k8s → drill | Deploy, promotion or rollback broke | `scripts/cluster.sh up && docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh`; diagnostics print on failure |
 
@@ -404,12 +426,18 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step) |
 | Autoscaling drill only | `scripts/hpa-drill.sh` (`RATE=1500 DURATION=240s` for a longer push) |
 | Watch autoscaling | `kubectl -n prod get hpa shortly -w` |
+| Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 scripts/cluster.sh up` |
+| Prometheus UI (targets, rules, alerts) | `kubectl -n monitoring port-forward svc/kps-prometheus 9090` → http://localhost:9090 |
+| Alertmanager UI (routing, silences) | `kubectl -n monitoring port-forward svc/kps-alertmanager 9093` → http://localhost:9093 |
+| Grafana (dashboard "shortly / SLOs") | `kubectl -n monitoring port-forward svc/grafana 3000:80` → http://localhost:3000, user `admin` |
+| Grafana password | `kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' \| base64 -d` |
+| Monitoring checks only | `scripts/monitoring-check.sh` (scales staging to 0 for about 2 minutes) |
 | Open psql | `kubectl -n prod exec -it postgres-0 -- psql -U shortly shortly` |
 | Show the generated DB URL | `kubectl -n prod get secret shortly-db -o jsonpath='{.data.url}' \| base64 -d` |
 | Which image is running | `kubectl -n prod get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}'` |
 | Uninstall the app only | `helm -n prod uninstall shortly` (data stays in the PVC) |
 
-`cluster.sh up` installs metrics-server (pinned, checksum-verified, `--kubelet-insecure-tls` for kind only), creates the `staging` and `prod` namespaces enforcing the restricted Pod Security Standard, generates a random password per namespace into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`. It never overwrites existing Secrets.
+`cluster.sh up` installs metrics-server (pinned, checksum-verified, `--kubelet-insecure-tls` for kind only) and kube-prometheus-stack (pinned by version and digest, values in `deploy/kind/monitoring-values.yaml`, namespace `monitoring` at the `baseline` Pod Security level), creates the `staging` and `prod` namespaces enforcing the restricted Pod Security Standard, generates a random password per namespace into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`. It never overwrites existing Secrets.
 
 Without a cluster, the fastest full-stack check is Docker Compose: `docker compose --profile app up -d --build --wait && scripts/smoke.sh`.
 
@@ -441,11 +469,11 @@ Don't run load tests against prod. The drill runs against the kind `prod` namesp
 
 ## Change an SLO or an alert
 
-1. SLOs: edit `deploy/prometheus/slos.yaml`, then run `uv run python scripts/gen_slo_rules.py`. Never edit `rules/slo.yaml` by hand. Cause-based alerts: edit `deploy/prometheus/rules/shortly.yaml`.
+1. SLOs: edit `deploy/prometheus/slos.yaml`, then run `uv run python scripts/gen_slo_rules.py`. Never edit `deploy/helm/shortly/rules/slo.yaml` by hand. Cause-based alerts: edit `deploy/helm/shortly/rules/shortly.yaml`. Both ship with the chart, so a rule change is deployed like code: staging is not affected, and prod picks it up on its next release.
 2. Add or update a promtool test in `deploy/prometheus/tests/alerts_test.yaml`. It needs one case where the alert fires and one where it must stay quiet.
 3. Give every alert a `runbook_url` pointing at a section of this runbook. Write the section first.
 4. Run `uv run pytest tests/test_alert_rules.py`; it needs Docker for the promtool step.
-5. Check it live: `docker compose --profile app --profile obs up -d`, cause the condition, and watch `http://localhost:9090/alerts` go from pending to firing.
+5. Check it live: in kind, `scripts/deploy.sh prod …` and watch Prometheus → Alerts, then Alertmanager. Or without Kubernetes: `docker compose --profile app --profile obs up -d` and `http://localhost:9090/alerts`. Cause the condition and watch the alert go from pending to firing.
 6. Update DESIGN.md (SLOs and alerting) and the Quick reference above in the same PR.
 
 ## Incident process
