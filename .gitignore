@@ -17,3 +17,6 @@ wheels/
 
 # Local config (may hold secrets); .env.example is the committed template
 .env
+
+# macOS Finder metadata
+.DS_Store
