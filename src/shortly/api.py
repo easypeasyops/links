@@ -8,8 +8,8 @@ from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, status
-from fastapi.responses import RedirectResponse, Response
+from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from opentelemetry.sdk.trace import TracerProvider
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import AwareDatetime, BaseModel, Field, HttpUrl
@@ -21,6 +21,7 @@ from shortly.service import (
     LinkNotFoundError,
     Shortener,
 )
+from shortly.store import StoreBusyError
 
 MAX_TTL_SECONDS = 365 * 24 * 3600
 
@@ -62,6 +63,17 @@ def create_app(
 
     app = FastAPI(title="shortly", lifespan=lifespan)
     base = base_url.rstrip("/")
+
+    # Saturated backend: fail fast and tell well-behaved clients when to come back,
+    # rather than holding the request until it times out somewhere upstream.
+    @app.exception_handler(StoreBusyError)
+    def shed(_: Request, __: StoreBusyError) -> JSONResponse:
+        metrics.load_shed.inc()
+        return JSONResponse(
+            {"detail": "overloaded, retry shortly"},
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": "1"},
+        )
 
     # Probes are separate on purpose. Liveness: "is the process wedged?" — restarting
     # fixes that. Readiness: "can I take traffic?" — a DB blip should pull the pod out of
@@ -132,15 +144,21 @@ def create_app(
 def create_app_from_env() -> FastAPI:
     """Production wiring. Run with: uvicorn --factory shortly.api:create_app_from_env"""
     # Imported here so tests of the HTTP layer never need a database driver configured.
-    from shortly.db import make_engine
+    from shortly.db import make_engine, pool_in_use
     from shortly.observability import configure_logging, tracer_provider_from_env
     from shortly.pg_store import PostgresStore
     from shortly.settings import Settings
 
     settings = Settings()  # fields come from the environment; fails fast if missing
     configure_logging(settings.log_level, json_output=settings.log_json)
-    engine = make_engine(str(settings.database_url), pool_size=settings.db_pool_size)
+    engine = make_engine(
+        str(settings.database_url),
+        pool_size=settings.db_pool_size,
+        pool_timeout=settings.db_pool_timeout_seconds,
+    )
     metrics = Metrics()
+    metrics.db_pool_size.set(settings.db_pool_size)
+    metrics.db_pool_in_use.set_function(pool_in_use(engine))
     provider = tracer_provider_from_env(settings.service_name)
     if provider is not None:
         from opentelemetry.instrumentation.psycopg import PsycopgInstrumentor

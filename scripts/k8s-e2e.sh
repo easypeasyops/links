@@ -10,9 +10,10 @@
 #   0. the digest-mode render (how releases deploy) passes API-server validation
 #   1. the chart deploys under the "restricted" Pod Security Standard, migrations run as a hook
 #   2. the app works in-cluster (readiness, create → redirect, metrics)
-#   3. the SAME image promotes to prod with 2 replicas + a PodDisruptionBudget
+#   3. the SAME image promotes to prod: autoscaled (HPA, min 2) + a PodDisruptionBudget
 #   4. a broken release is rolled back automatically, with ZERO failed requests meanwhile
 #   5. a manual `helm rollback` restores a previous revision
+#   6. under load, the HPA adds ready pods (scripts/hpa-drill.sh; skip with HPA_DRILL=0)
 set -euo pipefail
 
 IMAGE="${IMAGE:?set IMAGE, e.g. IMAGE=shortly:e2e}"
@@ -91,8 +92,9 @@ pass "staging: migrated, ready, create → 307, metrics"
 ready=$(kubectl -n prod get deploy shortly -o jsonpath='{.status.readyReplicas}')
 [[ "$ready" == 2 ]] || fail "prod has $ready ready replicas, want 2"
 kubectl -n prod get pdb shortly >/dev/null || fail "prod PodDisruptionBudget missing"
+kubectl -n prod get hpa shortly >/dev/null || fail "prod HorizontalPodAutoscaler missing"
 [[ "$(deployed_image prod)" == "$(deployed_image staging)" ]] || fail "prod runs a different image than staging"
-pass "promoted the same image to prod: 2/2 ready, PDB present"
+pass "promoted the same image to prod: 2/2 ready, PDB and HPA present"
 
 in_cluster prod /readyz || fail "prod not reachable through its Service"
 good_rev=$(revision prod)
@@ -138,5 +140,10 @@ level=$(kubectl -n prod get deploy shortly -o jsonpath='{.spec.template.spec.con
 kubectl -n prod rollout status deploy/shortly --timeout=90s >/dev/null
 in_cluster prod /readyz || fail "prod unhealthy after rollback"
 pass "manual helm rollback to revision $good_rev restored the previous release"
+
+# ---------------------------------------------------------------- 6. autoscaling
+if [[ "${HPA_DRILL:-1}" != 0 ]]; then
+  NS=prod "$ROOT/scripts/hpa-drill.sh"
+fi
 
 echo "k8s e2e passed"

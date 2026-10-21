@@ -4,8 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from shortly.api import create_app
+from shortly.observability import Metrics
 from shortly.service import Shortener
-from shortly.store import InMemoryStore
+from shortly.store import InMemoryStore, StoreBusyError
 from tests.conftest import FakeClock
 
 BASE = "https://sho.rt"
@@ -74,3 +75,19 @@ def test_readyz_reflects_store(clock: FakeClock) -> None:
     down = TestClient(create_app(Shortener(DownStore(), clock=clock), base_url=BASE))
     assert up.get("/readyz").status_code == 200
     assert down.get("/readyz").status_code == 503
+
+
+def test_saturated_store_is_shed_with_503_and_retry_after(clock: FakeClock) -> None:
+    class BusyStore(InMemoryStore):
+        def get(self, code: str) -> None:
+            raise StoreBusyError("pool exhausted")
+
+    metrics = Metrics()
+    c = TestClient(
+        create_app(Shortener(BusyStore(), clock=clock), base_url=BASE, metrics=metrics),
+        follow_redirects=False,
+    )
+    resp = c.get("/abc1234")
+    assert resp.status_code == 503
+    assert resp.headers["retry-after"] == "1"
+    assert metrics.registry.get_sample_value("load_shed_total") == 1

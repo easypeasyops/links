@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-20 for v0.1.0 / chart 0.1.1. Mirrored at
+> Last updated 2026-10-20 for chart 0.2.0 (app changes since v0.1.0 are unreleased). Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -13,7 +13,8 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Repo | [github.com/statsguy/shortly](https://github.com/statsguy/shortly) |
 | Image | `ghcr.io/statsguy/shortly` — deploy by digest, never by tag |
 | Current release | v0.1.0, `sha256:ef71dd3e544d6a3608d79aa063534510f4bc07c595484d8b0a15902fb30b8abb` |
-| Environments | kind cluster `shortly`; namespaces `staging` (1 replica), `prod` (2 replicas) |
+| Environments | kind cluster `shortly`; namespaces `staging` (1 replica), `prod` (HPA, 2–4 replicas) |
+| Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
 | Database | `postgres` StatefulSet per namespace; URL in Secret `shortly-db` key `url` |
 | Endpoints | `/healthz` liveness · `/readyz` readiness · `/metrics` Prometheus |
@@ -30,6 +31,7 @@ kubectl -n prod get pods -l app.kubernetes.io/name=shortly # pod status
 kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=100
 kubectl -n prod rollout status deploy/shortly
 kubectl -n prod get events --sort-by=.lastTimestamp | tail -20
+kubectl -n prod get hpa shortly                            # current CPU % vs target, replicas
 kubectl -n prod port-forward svc/shortly 8080:80          # then curl localhost:8080/readyz
 ```
 
@@ -39,7 +41,8 @@ shortly is healthy when every desired pod is Ready, `/readyz` returns 200 throug
 
 ```bash
 NS=prod
-kubectl -n $NS get deploy shortly                          # READY must equal desired (2/2)
+kubectl -n $NS get deploy shortly                          # READY must equal desired
+kubectl -n $NS get hpa shortly                             # TARGETS like "12%/70%", never "<unknown>"
 kubectl -n $NS get pods -l app.kubernetes.io/name=shortly -o wide   # restarts, node placement
 kubectl -n $NS exec postgres-0 -- wget -q -O- http://shortly/readyz # through the Service, in-cluster
 helm -n $NS status shortly                                # STATUS: deployed
@@ -57,6 +60,8 @@ Do not judge health through `kubectl port-forward svc/...`: it attaches to one p
 | Redirect outcomes | `sum by (outcome) (rate(link_resolutions_total[5m]))` |
 | Code space filling up | `rate(code_collisions_total[1h])` |
 | Readiness failing | `rate(http_requests_total{route="/readyz",status="503"}[5m])` |
+| Load being shed | `sum(rate(load_shed_total[5m]))` |
+| Pool saturation per pod | `db_pool_in_use / db_pool_size` |
 
 **Logs.** Filter structured fields with `jq`:
 
@@ -134,9 +139,11 @@ Deploy the verified digest to staging, check it, then promote the identical dige
 
    ```bash
    scripts/deploy.sh prod ghcr.io/statsguy/shortly@$D
-   kubectl -n prod get deploy shortly    # READY 2/2
+   kubectl -n prod get deploy shortly    # READY = desired (at least 2)
    ```
 5. Watch for 15 minutes: 5xx ratio, p99 latency, restarts. If anything regresses, roll back (next section).
+
+**First upgrade onto chart 0.2.0** (the HPA arrives): the chart stops setting `replicas`, so Kubernetes may briefly set an existing prod Deployment to 1 replica until the HPA restores its minimum of 2, typically within 15 s. Do this upgrade at a quiet time, then check `kubectl -n prod get hpa,deploy shortly`. Fresh installs are not affected.
 
 **What `deploy.sh` does:** `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the environment's values file. Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
 
@@ -231,10 +238,12 @@ flowchart TD
   C -- yes --> D[Database playbook<br/>check postgres-0; app recovers itself]
   C -- no --> E{Pods restarting?}
   E -- yes --> F[CrashLoop playbook<br/>logs --previous: config, OOM or bug]
-  E -- no --> G[Errors or latency<br/>open a request_id trace]
+  E -- no --> S{"load_shed_total rising,<br/>or HPA at max?"}
+  S -- yes --> T[Saturation playbook<br/>DB slow, or out of capacity]
+  S -- no --> G[Errors or latency<br/>open a request_id trace]
 ```
 
-Ask the three questions in order; the first yes picks the playbook below.
+Ask the questions in order; the first yes picks the playbook below.
 
 ### Pods not Ready, `/readyz` returns 503
 
@@ -276,7 +285,7 @@ kubectl -n prod get events --sort-by=.lastTimestamp | tail -30
 | `ImagePullBackOff` | Wrong digest, or the GHCR package is private | Check the digest; make the package public or add `imagePullSecrets` |
 | `violates PodSecurity "restricted"` | A chart change dropped a security setting | Restore the `securityContext` in the chart |
 | Migrate Job `Failed` | Migration error | `kubectl -n prod logs job/shortly-migrate-<REV>`; fix the migration in a new release |
-| `Pending`, `Insufficient cpu/memory` | Node is full | Lower requests or add capacity |
+| `Pending`, `Insufficient cpu/memory` | Node is full (the HPA may have asked for more pods than fit) | Add nodes, or lower `autoscaling.maxReplicas`; don't lower the CPU request without re-measuring |
 
 ### 5xx rate rising
 
@@ -284,12 +293,32 @@ kubectl -n prod get events --sort-by=.lastTimestamp | tail -30
 kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=1000 | jq -c 'select(.status>=500)' | tail -20
 ```
 
-- 503 on `route="/links"`: code space exhausted (5 collisions in a row). Check `rate(code_collisions_total[1h])`; the fix is longer codes (`DEFAULT_LENGTH`) in a release.
+- 503 with `Retry-After` on every DB route, and `load_shed_total` rising: the DB pool is exhausted. See Saturation.
+- 503 on `route="/links"` only: code space exhausted (5 collisions in a row). Check `rate(code_collisions_total[1h])`; the fix is longer codes (`DEFAULT_LENGTH`) in a release.
 - 500s with an `exc` field: an unhandled bug. Find the `request_id`, open its trace, roll back if it started with a release.
 
 ### Latency up
 
-Check p99 by route. Open a slow request's trace in Jaeger: a long `SELECT`/`INSERT` span points at the database; a long gap before it points at pool exhaustion (raise `config.dbPoolSize` or replicas, within the DB's `max_connections`).
+Check p99 by route, then `kubectl -n prod get hpa shortly`.
+
+- **CPU above target and replicas rising:** the HPA is catching up with a spike. Latency should recover within about a minute.
+- **Pinned at `maxReplicas`:** out of capacity; see Saturation.
+- **Neither:** open a slow request's trace in Jaeger. A long `SELECT` or `INSERT` span points at the database; a gap before it points at the pool (`db_pool_in_use`).
+
+### Saturation: load shed or HPA at max
+
+| Signal | Cause | Fix |
+| --- | --- | --- |
+| `load_shed_total` rising; `db_pool_in_use` = `db_pool_size`; CPU low | Database slow or hung: queries hold connections | Database first (`pg_stat_activity`, locks, disk). Don't raise the pool: more connections to a struggling DB make it worse |
+| HPA `REPLICAS` = max; CPU above target; p99 up; no shedding | Traffic above provisioned capacity | Raise `autoscaling.maxReplicas` and keep `maxReplicas × dbPoolSize` within `maxDbConnections` and Postgres `max_connections`; add nodes if pods go Pending |
+| HPA `TARGETS` shows `<unknown>` | No CPU metrics: metrics-server down, or no CPU request | `kubectl -n kube-system get deploy metrics-server`; `kubectl top pods -n prod`; `kubectl -n prod describe hpa shortly` |
+
+```bash
+kubectl -n prod describe hpa shortly | sed -n '/Conditions/,$p'    # why it did or didn't scale
+kubectl top pods -n prod -l app.kubernetes.io/name=shortly
+kubectl -n prod exec postgres-0 -- psql -U shortly shortly -c \
+  "select state, wait_event_type, count(*) from pg_stat_activity group by 1,2"
+```
 
 ### Code collisions rising
 
@@ -315,6 +344,7 @@ Every CI step can be reproduced locally with the same command; reproduce before 
 | image → Scan image | New fixable HIGH/CRITICAL CVE, often transitive | Find the package in the Trivy table; `uv lock --upgrade-package <pkg>` or bump the base digest |
 | image → Smoke test | The container misbehaves | `docker build -t shortly:dev . && scripts/smoke.sh`; on failure it prints container logs |
 | k8s → digest-mode render | API server rejects a manifest (e.g. an invalid label) | `helm template … --set image.digest=sha256:<64 hex> \| kubectl apply --dry-run=server -f -` against kind |
+| k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready) or no scale-up under load (runner too slow, or CPU request changed) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
 | k8s → drill | Deploy, promotion or rollback broke | `scripts/cluster.sh up && docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh`; diagnostics print on failure |
 
 A test that fails with warnings as errors (`filterwarnings = error`) usually means a dependency deprecated something. Fix the call site; don't silence the warning globally.
@@ -331,15 +361,43 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Tear down everything | `scripts/cluster.sh down` |
 | Reset one environment's data (then redeploy so migrations recreate the schema) | `kubectl -n staging delete statefulset postgres && kubectl -n staging delete pvc data-postgres-0 && scripts/cluster.sh up` |
 | Deploy a local build | `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev` |
-| Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` |
+| Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step) |
+| Autoscaling drill only | `scripts/hpa-drill.sh` (`RATE=900 DURATION=240s` for a longer push) |
+| Watch autoscaling | `kubectl -n prod get hpa shortly -w` |
 | Open psql | `kubectl -n prod exec -it postgres-0 -- psql -U shortly shortly` |
 | Show the generated DB URL | `kubectl -n prod get secret shortly-db -o jsonpath='{.data.url}' \| base64 -d` |
 | Which image is running | `kubectl -n prod get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}'` |
 | Uninstall the app only | `helm -n prod uninstall shortly` (data stays in the PVC) |
 
-`cluster.sh up` creates the `staging` and `prod` namespaces enforcing the restricted Pod Security Standard, generates a random password per namespace into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`. It never overwrites existing Secrets.
+`cluster.sh up` installs metrics-server (pinned, checksum-verified, `--kubelet-insecure-tls` for kind only), creates the `staging` and `prod` namespaces enforcing the restricted Pod Security Standard, generates a random password per namespace into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`. It never overwrites existing Secrets.
 
 Without a cluster, the fastest full-stack check is Docker Compose: `docker compose --profile app up -d --build --wait && scripts/smoke.sh`.
+
+## Load test and capacity check
+
+Measure capacity before changing CPU requests, the HPA target or the pool, and after any change to the request path. The method and the current numbers are in DESIGN.md, Capacity.
+
+1. Start the stack with the image under test, and write down the baseline you're comparing against:
+
+   ```bash
+   docker build -t shortly:dev .
+   SHORTLY_IMAGE=shortly:dev docker compose --profile app up -d --no-build --wait
+   ```
+2. Run the step test. The app is pinned to `APP_CPUS` (default 1) so the result means "per core":
+
+   ```bash
+   scripts/loadtest.sh                                  # steps 100 … 1200 req/s, 30 s each
+   RATES="200 250 300 350" DURATION=30s scripts/loadtest.sh
+   SHORTLY_DB_POOL_SIZE=2 SHORTLY_IMAGE=shortly:dev docker compose --profile app up -d --no-build --wait  # vary the pool
+   ```
+
+   Each step prints achieved rate, p50/p95/p99, errors, cores used and CPU ms per request, and appends to `loadtest/results/<timestamp>-cpus<N>.csv` (git-ignored).
+3. Read the result. **Capacity is the highest step that PASSes**. A FAIL with 0% errors and climbing p99 is queueing past the knee. A FAIL with errors is a bug, so investigate before trusting the numbers.
+4. Compare A/B on the same machine in the same session, and run each side twice: the noise between runs is about ±15%.
+5. If capacity per pod changed, set `resources.requests.cpu` to the cores used at the new passing rate and keep the HPA target at about 70%. Then update DESIGN.md, Capacity, and the Quick reference above in the same PR.
+6. Prove that autoscaling still works in-cluster: `scripts/hpa-drill.sh`.
+
+Don't run load tests against prod. The drill runs against the kind `prod` namespace only because it is disposable.
 
 ## Incident process
 

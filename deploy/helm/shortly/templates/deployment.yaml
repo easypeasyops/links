@@ -5,7 +5,11 @@ metadata:
   labels:
     {{- include "shortly.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  # With autoscaling on, `replicas` is left out ON PURPOSE: the HPA owns it, and a value
+  # here would reset the live count on every `helm upgrade` (mid-spike, too).
   revisionHistoryLimit: 5
   strategy:
     type: RollingUpdate

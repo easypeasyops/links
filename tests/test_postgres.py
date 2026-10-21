@@ -1,19 +1,21 @@
 """Postgres-specific behaviour that the shared contract suite can't express."""
 
+import time
 from datetime import timedelta
 
 import pytest
 from alembic import command
 from fastapi.testclient import TestClient
 from pydantic import HttpUrl
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import IntegrityError
 
 from shortly.api import create_app, create_app_from_env
-from shortly.db import make_engine
+from shortly.db import make_engine, pool_in_use
 from shortly.models import ShortLink
 from shortly.pg_store import PostgresStore
 from shortly.service import Shortener
+from shortly.store import StoreBusyError
 from tests.conftest import T0, alembic_config
 
 pytestmark = pytest.mark.integration
@@ -96,3 +98,46 @@ def test_db_queries_are_child_spans_of_the_request(pg_url: str, pg_store: Postgr
     for s in sql:
         assert s.context is not None
         assert s.context.trace_id == server.context.trace_id  # same trace as the request
+
+
+def test_app_engine_autocommits_each_statement(pg_url: str, pg_store: PostgresStore) -> None:
+    # Autocommit is what saves two round trips per request (no BEGIN/ROLLBACK). Prove the
+    # behaviour, not the flag: a write is visible to another connection with no commit().
+    engine = make_engine(pg_url)
+    try:
+        with engine.connect() as conn:
+            assert conn.connection.dbapi_connection.autocommit  # type: ignore[union-attr]
+            conn.execute(
+                text("INSERT INTO links (code, target, created_at) VALUES (:c, :t, now())"),
+                {"c": "ac1", "t": "https://a.example/"},
+            )
+            assert pg_store.get("ac1") is not None  # seen from the store's own pool
+    finally:
+        engine.dispose()
+
+
+def test_exhausted_pool_raises_busy_fast(pg_url: str) -> None:
+    engine = make_engine(pg_url, pool_size=1, pool_timeout=0.1)
+    store = PostgresStore(engine)
+    try:
+        with engine.connect():  # hold the only connection
+            start = time.perf_counter()
+            with pytest.raises(StoreBusyError):
+                store.get("anything")
+            assert time.perf_counter() - start < 1  # fails fast, not after 30 s
+        assert pool_in_use(engine)() == 0
+        assert store.get("anything") is None  # recovers once a connection is free
+    finally:
+        engine.dispose()
+
+
+def test_pool_in_use_counts_checked_out_connections(pg_url: str) -> None:
+    engine = make_engine(pg_url, pool_size=2)
+    read = pool_in_use(engine)
+    try:
+        with engine.connect(), engine.connect():
+            assert read() == 2
+        assert read() == 0
+        assert pool_in_use(make_engine(pg_url, pooled=False))() == 0
+    finally:
+        engine.dispose()

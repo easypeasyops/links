@@ -9,12 +9,17 @@ set -euo pipefail
 CLUSTER=shortly
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENVS=(staging prod)
+# metrics-server feeds CPU usage to the HorizontalPodAutoscaler. Pinned version + checksum:
+# a manifest fetched at runtime is code you run with cluster-admin.
+METRICS_SERVER_VERSION=v0.9.0
+METRICS_SERVER_SHA256=1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f72c79b
 
 up() {
   if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
     kind create cluster --config "$ROOT/deploy/kind/cluster.yaml" --wait 120s
   fi
   kubectl config use-context "kind-$CLUSTER" >/dev/null
+  install_metrics_server
 
   for ns in "${ENVS[@]}"; do
     kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -39,6 +44,24 @@ up() {
     kubectl -n "$ns" rollout status statefulset/postgres --timeout=180s
   done
   echo "cluster ready: namespaces ${ENVS[*]}"
+}
+
+install_metrics_server() {
+  local manifest
+  manifest=$(mktemp)
+  curl -sSfL -o "$manifest" \
+    "https://github.com/kubernetes-sigs/metrics-server/releases/download/$METRICS_SERVER_VERSION/components.yaml"
+  echo "$METRICS_SERVER_SHA256  $manifest" | sha256sum -c --quiet - \
+    || { echo "metrics-server manifest checksum mismatch" >&2; exit 1; }
+  kubectl apply -f "$manifest" >/dev/null
+  rm -f "$manifest"
+  # kind kubelets serve self-signed certs. Local clusters only: never do this in a real one.
+  if ! kubectl -n kube-system get deploy metrics-server -o jsonpath='{.spec.template.spec.containers[0].args}' \
+    | grep -q kubelet-insecure-tls; then
+    kubectl -n kube-system patch deployment metrics-server --type=json \
+      -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]' >/dev/null
+  fi
+  kubectl -n kube-system rollout status deploy/metrics-server --timeout=120s >/dev/null
 }
 
 down() {

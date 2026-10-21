@@ -13,9 +13,20 @@ class CodeConflictError(Exception):
     """The code is already taken. Raised atomically by ``add``, never by a separate check."""
 
 
+class StoreBusyError(Exception):
+    """No backend capacity within the configured wait (e.g. the DB pool is exhausted).
+
+    Overload, not failure: the API sheds the request with 503 + Retry-After instead of
+    queueing it until the client gives up.
+    """
+
+
 class LinkStore(Protocol):
     def add(self, link: ShortLink) -> None:
-        """Insert ``link``; raise ``CodeConflictError`` if its code exists."""
+        """Insert ``link``; raise ``CodeConflictError`` if its code exists.
+
+        Any method may raise ``StoreBusyError`` when the backend is saturated.
+        """
         ...
 
     def get(self, code: str) -> ShortLink | None: ...
