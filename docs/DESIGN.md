@@ -365,7 +365,7 @@ flowchart LR
 **Recovery objectives (local setup).**
 
 - **RPO, the data you can lose: up to 1 hour**, the backup interval. Everything written since the last dump is gone. Continuous WAL archiving (pgBackRest, WAL-G, or a managed database's point-in-time recovery) brings it down to seconds; that is the production answer, not hourly dumps.
-- **RTO, the time to restore: about __RTO__ s** for the drill's database (download, empty Postgres, `pg_restore`, checks), measured in CI. Restore time grows with the database: a logical restore rebuilds every index, so a large table takes minutes to hours. Re-measure as data grows; RUNBOOK has the procedure for a real restore into prod.
+- **RTO, the time to restore: about 5 s** for the drill's database in CI (2,967 links, a 78 KB dump: download, empty Postgres, `pg_restore`, checks). That figure is mostly fixed overhead. Restore time grows with the database: a logical restore rebuilds every index, so a large table takes minutes to hours. Re-measure as data grows; RUNBOOK has the procedure for a real restore into prod.
 
 ## Configuration and secrets
 
