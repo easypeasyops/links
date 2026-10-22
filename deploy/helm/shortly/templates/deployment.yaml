@@ -24,6 +24,7 @@ spec:
       labels:
         {{- include "shortly.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/version: {{ include "shortly.version" . | quote }}
+        app.kubernetes.io/part-of: shortly
       annotations:
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .Values.config.metricsPort | quote }}

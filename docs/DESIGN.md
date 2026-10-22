@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-21 for v0.4.0 / chart 0.5.0. Mirrored at
+> Last updated 2026-10-22 for v0.4.0 plus unreleased expired-link cleanup on main / chart 0.6.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -24,7 +24,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.4.0 and chart 0.5.0: the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, and the metrics port with network policies. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.4.0 plus main (chart 0.6.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, and expired-link cleanup (not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -148,6 +148,8 @@ CREATE TABLE links (
   expires_at  TIMESTAMPTZ NULL,
   CONSTRAINT expiry_after_creation CHECK (expires_at IS NULL OR expires_at > created_at)
 );
+CREATE INDEX ix_links_expires_at ON links (expires_at)
+  WHERE expires_at IS NOT NULL;                  -- for the cleanup job; built CONCURRENTLY
 
 CREATE TABLE rate_limits (    -- GCRA state (see Rate limiting); short-lived rows
   key  VARCHAR(64) PRIMARY KEY,  -- client IP, or IPv6 /64
@@ -155,11 +157,25 @@ CREATE TABLE rate_limits (    -- GCRA state (see Rate limiting); short-lived row
 );
 ```
 
-**Access path.** Writes are single-row inserts; reads are primary-key lookups. No secondary indexes are needed yet. `PostgresStore` maps only `psycopg.errors.UniqueViolation` to `CodeConflictError`.
+**Access path.** Writes are single-row inserts; reads are primary-key lookups. The one secondary index, `ix_links_expires_at`, serves the cleanup job. It is partial, so links without a TTL (most of them) never enter it and their inserts don't pay for it. `PostgresStore` maps only `psycopg.errors.UniqueViolation` to `CodeConflictError`.
 
 **Connection pool.** SQLAlchemy `QueuePool` with a **fixed** size: `pool_size` from `SHORTLY_DB_POOL_SIZE` (default 5) and `max_overflow=0`, so each pod's connection count is a known number for the Postgres budget (see Capacity). `pool_timeout` comes from `SHORTLY_DB_POOL_TIMEOUT_SECONDS` (default 1 s, instead of SQLAlchemy's 30 s): a request waits at most that long for a connection and then gets a 503. `pool_pre_ping=True` means a DB restart costs a reconnect rather than one failed request per stale connection; it costs one round trip per checkout and is kept on purpose. One-shot processes (migrations) use `NullPool`.
 
 **Autocommit.** The app's engine runs with `isolation_level="AUTOCOMMIT"`. Every query the app issues is a single statement, which Postgres already executes atomically, so the implicit `BEGIN … COMMIT/ROLLBACK` added two round trips per request for no safety gain. Removing them raised one pod's capacity by about 25% (see Capacity). An integration test checks the behaviour (a write is visible to another connection without `commit()`). A future multi-statement unit of work must opt back in explicitly with `conn.execution_options(isolation_level="READ COMMITTED")`. Migrations use their own engine and stay transactional.
+
+**Expired-link cleanup.** A link past its expiry answers 410 Gone, but its row would stay forever. A CronJob (`templates/cleanup-cronjob.yaml`, hourly at :17) runs `python -m shortly.cleanup`, which deletes links that expired more than `SHORTLY_CLEANUP_GRACE_DAYS` ago (7). Until then, a link still answers 410 rather than 404. Deletion is designed to be harmless on a busy table:
+
+| Property | How |
+| --- | --- |
+| No long locks, no huge transaction | Batches of 1,000 (`DELETE … WHERE code IN (SELECT … LIMIT n)`), each one statement that commits on its own, with a short pause between batches |
+| Bounded run | At most 100 batches per run; a bigger backlog is finished by the next runs, and the log says `"complete": false` |
+| Safe to overlap or to stop | `FOR UPDATE SKIP LOCKED`: a manual run during the scheduled one splits the work; a killed run keeps what it already deleted |
+| Never a full table scan | The query walks the partial index; a test asserts the planner can use it for exactly this query |
+| Failure is visible | No metrics to push: kube-state-metrics reports the CronJob's last success, and `ShortlyCleanupNotRunning` opens a ticket after 3 missed hours. Each run logs one JSON line (`deleted`, `batches`, `complete`, `duration_ms`) |
+
+The Job runs the release image, so Kyverno verifies its provenance (CronJob templates are checked too), and it runs under the restricted Pod Security Standard. Its pods carry their own labels (`app.kubernetes.io/name: shortly-cleanup`), not the app's selector labels: a pod matching those would be counted by the HPA, skewing average CPU, and by the PodDisruptionBudget. A NetworkPolicy of its own lets it reach only DNS and the database. Postgres accepts `app.kubernetes.io/part-of: shortly`, now on every pod of the chart, as well as the old `name` label during the transition.
+
+**The index was built CONCURRENTLY.** A plain `CREATE INDEX` blocks every write to the table until it finishes, which on a large table is an outage. `CONCURRENTLY` cannot run in a transaction, so the migration uses Alembic's `autocommit_block()`. A concurrent build that fails leaves an *invalid* index behind, which `IF NOT EXISTS` would then silently keep, so the migration drops an invalid one before building. The e2e checks that the index is valid after the real migration Job ran.
 
 **Migrations** are Alembic revisions in `migrations/versions/`. The database URL comes from the same `Settings` as the app. New revisions are formatted by ruff via a post-write hook.
 
@@ -185,6 +201,8 @@ All configuration comes from environment variables, parsed by `pydantic-settings
 | `SHORTLY_DB_POOL_TIMEOUT_SECONDS` | `1.0` | Longest wait for a pooled connection before a 503 |
 | `SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE` | `60` | Sustained `POST /links` rate per client; `0` turns limiting off |
 | `SHORTLY_RATE_LIMIT_BURST` | `20` | Creates a quiet client may make at once |
+| `SHORTLY_CLEANUP_GRACE_DAYS` | `7` | Cleanup keeps links that expired less than this long ago (they still answer 410) |
+| `SHORTLY_CLEANUP_BATCH_SIZE` / `SHORTLY_CLEANUP_MAX_BATCHES` | `1000` / `100` | Rows per delete statement, and statements per run |
 | `SHORTLY_METRICS_PORT` | `9100` | Port for `/metrics`, served by its own thread; `0` serves it on the app port instead (tests, local runs) |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Read by uvicorn: peers whose `X-Forwarded-For` is believed. Must be exactly the ingress |
 | `SHORTLY_LOG_LEVEL` | `INFO` | One of DEBUG, INFO, WARNING, ERROR |
@@ -262,6 +280,7 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 | `ShortlyNotReady` | page | Pods out of rotation fail requests at the load balancer, which the app never counts |
 | `ShortlyLoadShedding` | ticket | It burns the budget too, but this alert names the cause: the DB pool is exhausted |
 | `ShortlyAtMaxReplicas` | ticket | The HPA has no headroom left; uses kube-state-metrics |
+| `ShortlyCleanupNotRunning` | ticket | The cleanup CronJob's last success is over 3 hours old, or it has never succeeded; uses kube-state-metrics |
 | `ShortlyRateLimiting` | ticket | Over 10% of creates refused with 429 for 30 minutes: abuse, or a limit too tight for real users. 429s never burn the SLO, so without this a bad limit would be invisible |
 
 **How the rules are kept honest** (`tests/test_alert_rules.py`, which runs in CI):
@@ -326,7 +345,7 @@ No change reaches `main` without passing three CI jobs, and no image is publishe
 | --- | --- | --- |
 | `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~150 tests incl. real Postgres, promtool, amtool and the Kyverno CLI; coverage floor 90% (currently ~98%) |
 | `build, scan, smoke-test image` | every PR, push to main | Image builds; Trivy finds no fixable HIGH/CRITICAL; black-box smoke test (non-root, readiness, create → 307, request IDs, metrics, JSON logs, SIGTERM → exit 0) |
-| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; the rate limit holds exactly across its replicas; network policies refuse what they should; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager; the API server refuses shortly images without release provenance |
+| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; the rate limit holds exactly across its replicas; network policies refuse what they should; the cleanup Job deletes exactly the links past their grace period; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager; the API server refuses shortly images without release provenance |
 | Release workflow | tag `vX.Y.Z` | Tag equals `pyproject.toml` version; scan before publish; multi-arch push; SBOM; signed provenance; GitHub Release with digest |
 
 **Image.** Multi-stage: uv builds the virtualenv in a builder stage, and only the venv reaches the runtime stage. Dependencies are a separate cached layer from the code. Runtime runs as UID 10001 with code owned by root (read-only to the app), pip removed (its vendored urllib3/msgpack/setuptools were the only HIGH findings), exec-form `CMD` so uvicorn is PID 1 and receives SIGTERM.
@@ -433,10 +452,12 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | Registry or Sigstore (Rekor, TUF) unreachable | New shortly pods are refused (verification can't run); other images and running pods unaffected | Admission errors naming the provenance policy |
 | CNI doesn't enforce NetworkPolicy (a new cluster, a CNI change) | Nothing breaks, and nothing is isolated: every policy is silently ignored | e2e step 9 fails: a refused connection succeeds |
 | A new outbound dependency (collector, external API) | Its connections time out: the app's egress allows DNS and the database only | Timeouts to the new host; add a `networkPolicy.extraEgress` rule |
+| Cleanup job failing or not scheduled | Expired rows accumulate; requests unaffected (expired links still answer 410) | `ShortlyCleanupNotRunning` after 3 missed hours; failed Jobs in `kubectl get jobs` |
+| Index build fails halfway (lock timeout, disk) | The migration Job fails and the release is aborted; an invalid index is left, which the next run drops and rebuilds | Failed `shortly-migrate-<rev>` Job; `indisvalid = false` in `pg_index` |
 | Tracing backend down | Spans dropped by the batch exporter; requests unaffected | Exporter warnings in logs |
 | Vulnerable dependency published | CI image scan fails; release workflow refuses to publish | Red `build, scan` job |
 
-Links have no deletion path, so the table grows without bound.
+Expired links are deleted by the cleanup job after their grace period. Links without a TTL are kept forever, so the table still grows with every permanent link.
 
 ## Capacity
 
@@ -535,6 +556,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Storage access | SQLAlchemy Core, sync, psycopg 3 | ORM; async driver | One table; sync in threadpool is simple. The load test shows a CPU ceiling, which an async driver would not raise |
 | Transactions | Autocommit for the app; transactions for migrations | Implicit transaction per request | Every app query is one atomic statement; saves 2 round trips per request (about +25% capacity) |
 | Pool | Fixed size 5, no overflow, 1 s timeout → 503 | SQLAlchemy defaults (overflow 10, 30 s wait) | Known Postgres connection budget; overload fails fast instead of piling up |
+| Expired-link cleanup | A CronJob running bounded, autocommitted batches with `SKIP LOCKED`, through a partial index | Postgres partitioning by expiry month (drop whole partitions); `pg_cron`; deleting on read | Small and testable with what we already run. Partitioning is the scale answer, but it needs every query and the primary key reworked. `pg_cron` is unavailable on most managed Postgres plans without extensions. Deleting on read leaves never-read links forever |
 | Metrics port and network policy | `/metrics` on port 9100, own thread; NetworkPolicies with default-deny ingress and closed app egress | `/metrics` on the app port behind auth; policies only in a real cluster | One rule keeps internal data off the public API, and the scrape can't queue behind requests. Policies tested in kind catch an unenforcing CNI before prod would |
 | Rate limiting | GCRA, state in Postgres, per client IP (IPv6 /64), creates only | Per-pod in-memory counters; Redis; fixed-window counters; limiting at the ingress only | Exact across replicas with one upsert and no new service; no window-edge bursts. Ingress limits are usually per ingress replica and untested by the app's suite; coarse flood protection at the edge can still be added on top |
 | Scaling | HPA on CPU, 2–10 pods | Fixed replicas; scaling on request rate or latency | CPU is the measured bottleneck and needs no custom-metrics adapter |
@@ -582,7 +604,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - No URL reputation check: shortly can still be used to mask phishing links, only more slowly.
 - The rate limit is per IP address, so it is no defence against many addresses (a botnet), and it groups users behind one NAT. With accounts, it would be per user.
 - In kind, prod trusts `X-Forwarded-For` from every pod, so any pod there can choose its client address.
-- No link deletion or expiry cleanup; expired rows stay in the table.
+- No way for a user to delete a link; links without a TTL live forever.
+- The Postgres policy still accepts the old `app.kubernetes.io/name: shortly` label beside `part-of: shortly`. Drop it (the contract step) once no pod from chart 0.5.0 or older runs.
 - Postgres's egress is open (the e2e uses its pod as an in-cluster client), and the app port accepts any pod: on a real cluster, `networkPolicy.httpFrom` should name the ingress.
 - The image allowlist is Audit-only in kind, so a non-shortly image can still run in the app namespaces; it is reported, not refused.
 - Provenance is checked when a pod is admitted, not continuously: a policy change doesn't evict running pods.
@@ -600,9 +623,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 **Next steps, in rough priority order**
 
 1. URL reputation check on targets (Google Safe Browsing or similar).
-2. Expired-link cleanup job and an index on `expires_at`.
-3. A concurrency limit that sheds CPU overload; a statement or socket timeout for a hung database.
-4. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
+2. A concurrency limit that sheds CPU overload; a statement or socket timeout for a hung database.
+3. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
 
 **Open questions**
 

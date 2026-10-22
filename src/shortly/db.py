@@ -12,11 +12,13 @@ from sqlalchemy import (
     DateTime,
     Double,
     Engine,
+    Index,
     MetaData,
     String,
     Table,
     Text,
     create_engine,
+    text,
 )
 from sqlalchemy.pool import NullPool, QueuePool
 
@@ -31,6 +33,13 @@ links = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("expires_at", DateTime(timezone=True), nullable=True),
     CheckConstraint("expires_at IS NULL OR expires_at > created_at", name="expiry_after_creation"),
+    # For the cleanup job: finds expired links without scanning the table. Partial: links
+    # without a TTL (most of them) are never in it, so their inserts don't pay for it.
+    Index(
+        "ix_links_expires_at",
+        "expires_at",
+        postgresql_where=text("expires_at IS NOT NULL"),
+    ),
 )
 
 # GCRA state for per-client rate limiting (shortly.ratelimit): one row per client active in

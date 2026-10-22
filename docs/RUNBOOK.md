@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-21 for v0.4.0 / chart 0.5.0. Mirrored at
+> Last updated 2026-10-22 for v0.4.0 plus unreleased expired-link cleanup on main / chart 0.6.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -18,6 +18,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
 | Database | `postgres` StatefulSet per namespace; URL in Secret `shortly-db` key `url` |
 | Endpoints | `/healthz` liveness · `/readyz` readiness on port 8000 · `/metrics` on port **9100** (Prometheus only, by NetworkPolicy) |
+| Cleanup | CronJob `shortly-cleanup`, hourly at :17 UTC: deletes links expired more than 7 days ago (`cleanup:` in the chart values) |
 | Network | Default-deny ingress per namespace; Postgres accepts shortly only; the app may reach DNS and Postgres only (`networkPolicy` values, `deploy/kind/network-policies.yaml`) |
 | Logs | JSON on stdout; `request_id` and `trace_id` on every line |
 | SLOs | redirects 99.9% available and 99% < 50 ms; creates 99.5% and 99% < 100 ms; 30-day window (`deploy/prometheus/slos.yaml`) |
@@ -447,6 +448,38 @@ kubectl -n prod exec postgres-0 -- psql -U shortly shortly -c \
   "select state, wait_event_type, count(*) from pg_stat_activity group by 1,2"
 ```
 
+### Cleanup job not running
+
+`ShortlyCleanupNotRunning` (ticket) means the `shortly-cleanup` CronJob hasn't succeeded for over 3 hours, or never has. Nothing user-facing breaks: expired links keep answering 410 Gone. But expired rows pile up, and the longer it stays broken, the bigger the backlog the next runs must work through (at most 100,000 rows per run).
+
+```bash
+kubectl -n prod get cronjob shortly-cleanup               # SUSPEND, LAST SCHEDULE, LAST SUCCESSFUL
+kubectl -n prod get jobs -l app.kubernetes.io/name=shortly-cleanup
+kubectl -n prod logs job/<the latest one> --tail=30        # one JSON line per run, or the error
+```
+
+| What you see | Cause | Fix |
+| --- | --- | --- |
+| Jobs fail with `cleanup failed` and a connection error | Postgres unreachable, or the network policy doesn't admit the Job (labels changed) | Database first (Pods not Ready playbook); else compare the pod's labels with the `postgres` NetworkPolicy |
+| Jobs fail with a timeout (`DeadlineExceeded`) | A huge backlog, or a slow database: 900 s wasn't enough | Check the DB; the next runs continue where it stopped. To catch up faster, run it by hand (below) |
+| No Jobs at all; `SUSPEND` is `True` | Someone suspended it | `kubectl -n prod patch cronjob shortly-cleanup -p '{"spec":{"suspend":false}}'` |
+| No Jobs, not suspended | Created by Kyverno? Check events: an image without release provenance is refused | `kubectl -n prod get events --sort-by=.lastTimestamp \| grep -i cleanup`; see Admission policy refuses pods |
+| Jobs succeed but the alert fires | kube-state-metrics down or not scraping | `kubectl -n monitoring get pods`; the alert can't see successes without it |
+
+**Run it now**, for example after fixing the cause, or to work off a backlog. It's safe while a scheduled run is going: the two split the work.
+
+```bash
+kubectl -n prod create job cleanup-manual-$(date +%s) --from=cronjob/shortly-cleanup
+kubectl -n prod logs -f job/cleanup-manual-<that number>   # "cleanup finished", deleted=…, complete=…
+```
+
+**How big is the backlog?**
+
+```bash
+kubectl -n prod exec postgres-0 -- psql -U shortly shortly -c \
+  "select count(*) from links where expires_at < now() - interval '7 days'"
+```
+
 ### Rate limiting: 429 on POST /links
 
 Each client (IP address, IPv6 by /64) may create `config.rateLimit.burst` links at once (default 20), then `createsPerMinute` per minute (default 60). Beyond that it gets **429 + `Retry-After`**. Redirects are never limited, and a 429 is a client error, so it doesn't burn the availability SLO. `ShortlyRateLimiting` (ticket) means more than 10% of creates were refused for 30 minutes. Find out who:
@@ -503,6 +536,7 @@ Every CI step can be reproduced locally with the same command; reproduce before 
 | test → `test_ratelimit.py` | The limiter's semantics changed (burst, sustained rate, retry time), or the in-memory and Postgres limiters disagree | `uv run pytest tests/test_ratelimit.py -v`; the contract tests run both limiters on the same fake clock |
 | test → other `test_deploy_gate.py` tests | `deploy.sh` or `verify-image.sh` lost a check | Read the failing case: each one names the image that must be refused |
 | k8s → Lint and schema-validate | A chart manifest or a policy in `deploy/policies/` fails its schema | Run the step's `kubeconform` command locally; the error names the field |
+| k8s → expired-link cleanup | `index … missing or invalid` (the concurrent index build failed: see the migrate Job's logs), `the Job did not complete` (its logs print above: DB access, provenance, Pod Security), `left …, want e2efut1,e2enew1` (the cutoff or grace period changed) | `kubectl -n staging logs job/cleanup-e2e`; `uv run pytest tests/test_cleanup.py -v` |
 | k8s → network policies | `a non-Prometheus pod scraped prod's metrics port` or `a pod that isn't shortly reached Postgres` (a policy missing, or the CNI not enforcing NetworkPolicy), or a `control:` line (the allowed path broke: check labels and `networkPolicy` values) | `kubectl -n prod get networkpolicy`; the step's commands in `scripts/k8s-e2e.sh` |
 | k8s → admission checks | `was ADMITTED, expected refused` (the policy isn't enforcing), `was refused, expected admitted` (the release no longer verifies in-cluster: often no network to Sigstore), `not by the provenance policy` (Pod Security or a manifest error), or no allowlist reports | `scripts/admission-check.sh` against kind; `kubectl -n kyverno logs deploy/kyverno-admission-controller` |
 | k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready); `load too light` (CPU never got 10% past the target: raise the drill's `RATE`); or no scale-up despite high CPU (a real HPA problem) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
@@ -535,6 +569,7 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Alertmanager UI (routing, silences) | `kubectl -n monitoring port-forward svc/kps-alertmanager 9093` → http://localhost:9093 |
 | Grafana (dashboard "shortly / SLOs") | `kubectl -n monitoring port-forward svc/grafana 3000:80` → http://localhost:3000, user `admin` |
 | Grafana password | `kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' \| base64 -d` |
+| Run the expired-link cleanup now | `kubectl -n prod create job cleanup-manual-$(date +%s) --from=cronjob/shortly-cleanup` |
 | Read a pod's metrics (port 9100) | `kubectl -n prod port-forward svc/shortly 9100` → http://localhost:9100/metrics |
 | Monitoring checks only | `scripts/monitoring-check.sh` (scales staging to 0 for about 2 minutes) |
 | Open psql | `kubectl -n prod exec -it postgres-0 -- psql -U shortly shortly` |

@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     # `burst` links at once, then one every 60/per_minute seconds. 0 turns limiting off.
     rate_limit_creates_per_minute: float = Field(default=60.0, ge=0)
     rate_limit_burst: int = Field(default=20, ge=1)
+    # Expired-link cleanup (python -m shortly.cleanup, run by a CronJob). A link expired less
+    # than grace_days ago is kept, so it still answers 410 Gone rather than 404.
+    cleanup_grace_days: int = Field(default=7, ge=0)
+    cleanup_batch_size: int = Field(default=1000, ge=1, le=100_000)
+    cleanup_max_batches: int = Field(default=100, ge=1)
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_json: bool = True  # set SHORTLY_LOG_JSON=false for human-readable local logs
     service_name: str = "shortly"  # the service.name on every trace

@@ -295,3 +295,55 @@ tests:
       - eval_time: 60m
         alertname: ShortlyRateLimiting
         exp_alerts: []
+
+  - name: cleanup that stopped succeeding opens a ticket
+    interval: 1m
+    input_series:
+      # Last success at t=0, never again: 3 hours later it is stale.
+      - series: 'kube_cronjob_status_last_successful_time{namespace="prod",cronjob="shortly-cleanup"}'
+        values: '0x300'
+      - series: 'kube_cronjob_created{namespace="prod",cronjob="shortly-cleanup"}'
+        values: '0x300'
+    alert_rule_test:
+      - eval_time: 3h
+        alertname: ShortlyCleanupNotRunning
+        exp_alerts: []
+      - eval_time: 3h20m
+        alertname: ShortlyCleanupNotRunning
+        exp_alerts:
+          - exp_labels: {namespace: prod, severity: ticket}
+            exp_annotations:
+              summary: Expired-link cleanup hasn't succeeded for over 3 hours
+              description: The shortly-cleanup CronJob has missed at least 3 runs, or has never succeeded. Expired links pile up until it runs again.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#cleanup-job-not-running
+
+  - name: cleanup that never succeeded opens a ticket
+    interval: 1m
+    input_series:
+      - series: 'kube_cronjob_created{namespace="prod",cronjob="shortly-cleanup"}'
+        values: '0x300'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: ShortlyCleanupNotRunning
+        exp_alerts: []
+      - eval_time: 3h20m
+        alertname: ShortlyCleanupNotRunning
+        exp_alerts:
+          - exp_labels: {namespace: prod, severity: ticket}
+            exp_annotations:
+              summary: Expired-link cleanup hasn't succeeded for over 3 hours
+              description: The shortly-cleanup CronJob has missed at least 3 runs, or has never succeeded. Expired links pile up until it runs again.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#cleanup-job-not-running
+
+  - name: cleanup succeeding every hour stays quiet
+    interval: 1m
+    input_series:
+      # The last success moves forward every hour: 0, 3600, 7200, ...
+      - series: 'kube_cronjob_status_last_successful_time{namespace="prod",cronjob="shortly-cleanup"}'
+        values: '0x59 3600x59 7200x59 10800x59 14400x59'
+      - series: 'kube_cronjob_created{namespace="prod",cronjob="shortly-cleanup"}'
+        values: '0x299'
+    alert_rule_test:
+      - eval_time: 4h50m
+        alertname: ShortlyCleanupNotRunning
+        exp_alerts: []

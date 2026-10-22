@@ -14,7 +14,7 @@ A URL shortener built as a hands-on DevOps practice project: uv, strict typing, 
 | Method | Path       | Result                                                     |
 |--------|------------|------------------------------------------------------------|
 | POST   | `/links`   | `{"url": "...", "ttl_seconds": 3600}` → 201 with `code`, `short_url` · 429 + `Retry-After` over the per-client limit (burst 20, then 60/min) |
-| GET    | `/{code}`  | 307 redirect · 404 unknown · 410 expired                   |
+| GET    | `/{code}`  | 307 redirect · 404 unknown · 410 expired (for 7 days; then the cleanup job deletes it and it's 404) |
 | GET    | `/healthz` | Liveness: process is up (no dependencies checked)          |
 | GET    | `/readyz`  | Readiness: 503 if the database is unreachable              |
 

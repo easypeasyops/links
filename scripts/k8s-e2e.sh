@@ -20,6 +20,7 @@
 #   8. admission refuses shortly images without release provenance, even from hand-run
 #      kubectl (scripts/admission-check.sh; skipped when Kyverno isn't installed)
 #   9. network policies are enforced: the metrics port and Postgres refuse other pods
+#  10. the cleanup CronJob deletes links past their grace period, and only those
 set -euo pipefail
 
 IMAGE="${IMAGE:?set IMAGE, e.g. IMAGE=shortly:e2e}"
@@ -228,5 +229,34 @@ if probe_pg stranger app=stranger; then
   fail "network policy: a pod that isn't shortly reached Postgres"
 fi
 pass "network policy: Postgres accepts shortly's pods only"
+
+# ---------------------------------------------------------------- 10. expired-link cleanup
+# Plant links in staging's database, run the CronJob now, and check that exactly the right
+# rows went: expired 30 days ago (past the 7-day grace) gone; expired yesterday (410 Gone
+# still) and not yet expired kept. The Job runs the release image, under the restricted
+# PSS and its own NetworkPolicy, so this also proves it can reach Postgres.
+psql_staging() { kubectl -n staging exec postgres-0 -- psql -U shortly -d shortly -v ON_ERROR_STOP=1 -tAc "$1"; }
+status_of() {
+  kubectl -n "$1" exec postgres-0 -- wget -S -O /dev/null -T 3 "http://shortly$2" 2>&1 \
+    | grep -m1 -oE 'HTTP/1\.[01] [0-9]{3}' | cut -d' ' -f2
+}
+[[ "$(psql_staging "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'ix_links_expires_at'")" == t ]] \
+  || fail "cleanup: index ix_links_expires_at missing or invalid (did the concurrent build fail?)"
+psql_staging "INSERT INTO links (code, target, created_at, expires_at) VALUES
+  ('e2eold1', 'https://example.com/old', now() - interval '40 days', now() - interval '30 days'),
+  ('e2enew1', 'https://example.com/new', now() - interval '2 days',  now() - interval '1 day'),
+  ('e2efut1', 'https://example.com/fut', now(),                      now() + interval '1 day')" >/dev/null
+[[ "$(status_of staging /e2eold1)" == 410 ]] || fail "cleanup: an expired link should answer 410 before cleanup"
+kubectl -n staging create job cleanup-e2e --from=cronjob/shortly-cleanup >/dev/null
+kubectl -n staging wait --for=condition=complete job/cleanup-e2e --timeout=180s >/dev/null \
+  || { kubectl -n staging logs job/cleanup-e2e --tail=20 || true; fail "cleanup: the Job did not complete"; }
+left=$(psql_staging "SELECT string_agg(code, ',' ORDER BY code) FROM links WHERE code LIKE 'e2e%'")
+[[ "$left" == "e2efut1,e2enew1" ]] || fail "cleanup: left $left, want e2efut1,e2enew1"
+[[ "$(status_of staging /e2eold1)" == 404 && "$(status_of staging /e2enew1)" == 410 ]] \
+  || fail "cleanup: want 404 for the deleted link and 410 for the one in its grace period"
+summary=$(kubectl -n staging logs job/cleanup-e2e | grep '"cleanup finished"' || true)
+[[ "$summary" == *'"deleted": 1'* ]] || fail "cleanup: no 'cleanup finished' log with deleted=1: $summary"
+kubectl -n staging delete job cleanup-e2e --wait=false >/dev/null
+pass "cleanup: the Job deleted only the link past its grace period (404), kept the rest (410, live)"
 
 echo "k8s e2e passed"

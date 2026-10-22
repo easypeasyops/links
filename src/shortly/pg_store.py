@@ -5,6 +5,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
+from datetime import datetime
 
 from psycopg.errors import UniqueViolation
 from sqlalchemy import Connection, Engine, insert, select, text
@@ -31,6 +32,20 @@ def connect(engine: Engine) -> Iterator[Connection]:
         raise StoreBusyError("database pool exhausted") from exc
     with conn:
         yield conn
+
+
+# One bounded batch, oldest first, through the partial index on expires_at. SKIP LOCKED: two
+# cleanup runs at once (a manual run during the scheduled one) split the work instead of
+# blocking each other. Autocommit: every batch commits on its own, so a run stopped halfway
+# keeps what it did and holds no lock for long.
+_DELETE_EXPIRED = text("""
+    DELETE FROM links WHERE code IN (
+        SELECT code FROM links
+         WHERE expires_at < :before
+         ORDER BY expires_at
+         LIMIT :limit
+           FOR UPDATE SKIP LOCKED)
+""")
 
 
 class PostgresStore:
@@ -61,6 +76,10 @@ class PostgresStore:
         with self._connect() as conn:
             row = conn.execute(select(links).where(links.c.code == code)).mappings().first()
         return None if row is None else ShortLink.model_validate(dict(row))
+
+    def delete_expired(self, before: datetime, limit: int) -> int:
+        with self._connect() as conn:
+            return conn.execute(_DELETE_EXPIRED, {"before": before, "limit": limit}).rowcount
 
     def ping(self) -> bool:
         try:
