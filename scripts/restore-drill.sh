@@ -5,6 +5,7 @@
 #   SOURCE=prod scripts/restore-drill.sh                 # newest prod dump, into a scratch DB
 #   SOURCE=prod DUMP=shortly-20261022T214100Z.dump scripts/restore-drill.sh
 #   KEEP=1 SOURCE=prod scripts/restore-drill.sh          # leave the scratch DB to poke at
+#   LIST=1 SOURCE=prod scripts/restore-drill.sh          # only list the backups (size, age)
 #
 # It never touches the source database. It creates a throwaway namespace (restore-drill)
 # with an empty Postgres, downloads the dump from the bucket (deploy/kind/backups.yaml),
@@ -37,6 +38,21 @@ dst_sql() { kubectl -n "$NS" exec "$POD" -c postgres -- psql -U shortly -d short
 
 kubectl -n "$SOURCE" get cronjob postgres-backup >/dev/null 2>&1 \
   || fail "no postgres-backup CronJob in $SOURCE (scripts/cluster.sh up)"
+if [[ "${LIST:-0}" == 1 ]]; then
+  # A one-off pod in the source namespace, labelled as a backup pod so the bucket admits it.
+  kubectl -n "$SOURCE" run backup-list --image="$RCLONE_IMAGE" --restart=Never --rm -i --quiet \
+    --labels=app.kubernetes.io/component=backup --overrides='{"spec":{"automountServiceAccountToken":false,
+      "securityContext":{"runAsNonRoot":true,"runAsUser":70,"seccompProfile":{"type":"RuntimeDefault"}},
+      "containers":[{"name":"list","image":"'"$RCLONE_IMAGE"'","args":["lsl","s3:shortly-backups/'"$SOURCE"'"],
+        "env":[{"name":"HOME","value":"/tmp"},{"name":"RCLONE_CONFIG_S3_TYPE","value":"s3"},
+          {"name":"RCLONE_CONFIG_S3_PROVIDER","value":"SeaweedFS"},
+          {"name":"RCLONE_CONFIG_S3_ENDPOINT","value":"http://seaweedfs.backups.svc:8333"},
+          {"name":"RCLONE_CONFIG_S3_ACCESS_KEY_ID","valueFrom":{"secretKeyRef":{"name":"backup-s3","key":"access-key"}}},
+          {"name":"RCLONE_CONFIG_S3_SECRET_ACCESS_KEY","valueFrom":{"secretKeyRef":{"name":"backup-s3","key":"secret-key"}}}],
+        "securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}'
+  exit 0
+fi
+
 s3_key=$(kubectl -n "$SOURCE" get secret backup-s3 -o jsonpath='{.data.access-key}' | base64 -d)
 s3_secret=$(kubectl -n "$SOURCE" get secret backup-s3 -o jsonpath='{.data.secret-key}' | base64 -d)
 
