@@ -1,6 +1,7 @@
 # shortly — Design Document
 
-> Last updated 2026-10-22 for v0.4.0 plus unreleased expired-link cleanup on main / chart 0.6.0. Mirrored at
+> Last updated 2026-10-22 for v0.4.0 plus unreleased expired-link cleanup on main / chart 0.6.0.
+> Expanded request data-flow and CI/CD "why each piece" sections. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -60,6 +61,140 @@ flowchart TB
 ```
 
 The layers depend inward only: `api.py` knows the `Shortener`, which knows the `LinkStore` Protocol, never Postgres. `PostgresStore` and `InMemoryStore` are interchangeable adapters that pass the same contract test suite. The migration Job runs from the same image before new pods start.
+
+## Request data flow
+
+Two paths matter for understanding the system: **create** (`POST /links`) and **redirect** (`GET /{code}`). Everything else (probes, metrics, migrations) exists to keep those paths safe under failure and load. The diagrams below show what runs on each hop and *why that hop is there*.
+
+### Create: `POST /links`
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Client
+  participant Svc as Service (kube-proxy)
+  participant API as api.py (threadpool)
+  participant RL as RateLimiter (Postgres)
+  participant SvcLayer as Shortener
+  participant Store as PostgresStore
+  participant PG as Postgres
+
+  C->>Svc: POST /links {"url","ttl_seconds?"}
+  Svc->>API: pick a ready pod
+  Note over API: RequestContextMiddleware<br/>assign/propagate x-request-id<br/>start latency timer
+  API->>RL: hit(client_key)
+  RL->>PG: atomic GCRA upsert on rate_limits
+  alt over limit
+    PG-->>RL: no row (refused)
+    RL-->>API: Decision(allowed=false, retry_after)
+    API-->>C: 429 + Retry-After
+  else allowed
+    PG-->>RL: tat
+    RL-->>API: Decision(allowed=true)
+    API->>SvcLayer: shorten(url, ttl)
+    loop up to 5 attempts
+      SvcLayer->>SvcLayer: draw code (CSPRNG)
+      SvcLayer->>Store: add(ShortLink)
+      Store->>PG: INSERT INTO links
+      alt UniqueViolation
+        PG-->>Store: conflict
+        Store-->>SvcLayer: CodeConflictError → retry
+      else ok
+        PG-->>Store: inserted
+        Store-->>SvcLayer: ok
+      end
+    end
+    SvcLayer-->>API: ShortLink
+    API-->>C: 201 {code, short_url, target, expires_at}
+  end
+  Note over API: access log (JSON) + counters + OTLP span
+```
+
+| Step | What happens | Why it is needed |
+| --- | --- | --- |
+| Service → pod | kube-proxy load-balances across ready endpoints | Clients never pin a pod; a dying pod is dropped from endpoints without the client knowing |
+| Request ID middleware | Propagate or mint `x-request-id`; record route template and latency | One ID ties the access log, the trace, and a support ticket; the route template keeps metric cardinality bounded |
+| Rate limit before write | One Postgres upsert of GCRA state keyed by client IP (/64 for IPv6) | Creates write forever and can mask abuse; shared state means two pods cannot each grant a full burst |
+| Validate URL once | `HttpUrl` before any insert retry | Reject `javascript:` / bad TTL without burning collision attempts |
+| Insert-and-catch | `INSERT`; only `UniqueViolation` → retry with a new code | A check-then-insert would race under concurrency; the PK is the atomic decision |
+| Build `short_url` from config | `base_url + "/" + code` | The request `Host` header is attacker-controlled; never trust it for the returned link |
+| Telemetry on the way out | Counters, JSON log, optional span | Operators see volume, collisions, and 429s without reading the DB |
+
+**Side paths that do not run on create, but protect it:**
+
+- **Pool timeout → 503.** If all five connections are busy for `pool_timeout` (1 s), the store raises `StoreBusyError` and the API returns 503 with `Retry-After: 1`. Without this, a slow DB turns into a silent queue of requests holding threads for up to 30 s.
+- **Autocommit.** Each statement is already atomic in Postgres; skipping the implicit `BEGIN`/`COMMIT` removes two round trips per request (~25% more capacity on one CPU).
+- **Migrate Job before new pods.** Schema expands first so old and new code can both talk to the DB during a rollout.
+
+### Redirect: `GET /{code}`
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Client / browser
+  participant Svc as Service
+  participant API as api.py (threadpool)
+  participant SvcLayer as Shortener
+  participant Store as PostgresStore
+  participant PG as Postgres
+
+  C->>Svc: GET /{code}
+  Svc->>API: ready pod only
+  API->>SvcLayer: resolve(code)
+  SvcLayer->>Store: get(code)
+  Store->>PG: SELECT by primary key
+  alt no row
+    PG-->>Store: empty
+    Store-->>SvcLayer: None
+    SvcLayer-->>API: LinkNotFoundError
+    API-->>C: 404
+  else expired (expires_at ≤ now)
+    SvcLayer-->>API: LinkExpiredError
+    API-->>C: 410 Gone
+  else hit
+    SvcLayer-->>API: target URL
+    API-->>C: 307 Location: target
+  end
+```
+
+| Step | What happens | Why it is needed |
+| --- | --- | --- |
+| No rate limit | Redirects are not counted against the create limiter | Reads are cheap; flooding redirects is an edge/DoS problem, not something a pod fixes by counting |
+| Sync handler in threadpool | Blocking `SELECT` runs off the event loop | An `async def` with a sync driver would stall every other request on that worker |
+| PK lookup only | `WHERE code = …` | No secondary index on the request path (the one index serves the cleanup job); the hot path stays one round trip (+ optional pre-ping) |
+| Expiry in the app | Compare `expires_at` to the injected clock | Tests can freeze time; DB still enforces `expires_at > created_at` at write time |
+| **307, not 301** | Temporary redirect | Browsers cache 301 forever, which would ignore later expiry and hide repeat clicks from any future analytics |
+| Outcome metrics | `link_resolutions_total{outcome=hit\|not_found\|expired}` | 404/410 are correct answers (they do not burn the availability SLO); 5xx do |
+
+### What a request never does
+
+These are deliberate absences:
+
+- **No Host-based URL construction** — prevents open-redirect style spoofing of `short_url`.
+- **No check-then-insert** — prevents lost races when two pods draw the same code.
+- **No DB work on `/healthz`** — a DB outage must not restart every pod (that would add a restart storm to the outage). `/readyz` takes pods out of the Service instead.
+- **No `/metrics` on the public port in production** — scrapes use port 9100; NetworkPolicy admits only Prometheus. A scrape on the app port would also compete with user traffic for the threadpool.
+
+### Data at rest (how the two tables fit)
+
+```mermaid
+flowchart LR
+  subgraph writePath [Create path]
+    POST[POST /links] --> RL[(rate_limits<br/>key, tat)]
+    POST --> L[(links<br/>code PK, target, timestamps)]
+  end
+  subgraph readPath [Redirect path]
+    GET[GET /code] --> L
+  end
+  subgraph ops [Out of band]
+    Mig[Migrate Job] -->|Alembic| L
+    Mig --> RL
+    Clean[per-pod cleanup ≤1/min] -->|DELETE stale tat| RL
+  end
+```
+
+- **`links`** is durable product state. Rows are never deleted today (known limitation).
+- **`rate_limits`** is ephemeral control state. A past `tat` equals "no row"; pods delete those rows so the table stays small. Losing the table only resets every client's burst — it does not lose short links.
 
 ## Domain model and code generation
 
@@ -337,16 +472,99 @@ The drill also corrected the runbook. It had said a page clears within about 5 m
 
 ## Build, CI and supply chain
 
-No change reaches `main` without passing three CI jobs, and no image is published without passing a vulnerability scan first.
+No change reaches `main` without passing three CI jobs, and no image is published without passing a vulnerability scan first. This section is the map of *why* each gate exists: what failure it catches, and what would go wrong if it were missing.
 
-**Toolchain.** Python 3.14 (`.python-version`), uv with a committed `uv.lock`, `src/` layout. ruff (lint + format, including security rules S, naive-datetime DTZ and blocking-in-async ASYNC), mypy `--strict`, pytest with branch coverage. The same checks run in pre-commit locally and in CI.
+### Change lifecycle (PR → prod)
 
-| Gate | When | What it proves |
+```mermaid
+flowchart TB
+  subgraph local [Developer laptop]
+    pre[pre-commit: ruff + mypy subset]
+    push[git push / open PR]
+  end
+
+  subgraph ci [CI · .github/workflows/ci.yml · every PR and main]
+    check[Job: check<br/>lint · mypy · pytest ≥90%]
+    image[Job: image<br/>build · Trivy · smoke.sh]
+    k8s[Job: k8s<br/>kind e2e · rollback · HPA · monitoring · admission · cleanup]
+  end
+
+  subgraph release [Release · release.yml · only on tag vX.Y.Z]
+    match[Tag == pyproject version]
+    scan2[Build + Trivy again]
+    pushImg[Multi-arch push + SBOM + provenance]
+    attest[Sigstore SLSA attestation]
+    ghRel[GitHub Release with digest]
+  end
+
+  subgraph deployPath [Deploy · human or script]
+    verify[verify-image.sh<br/>attestation must be release.yml @ tag]
+    stg[deploy.sh staging @digest]
+    prod[deploy.sh prod @same digest]
+    admit[Kyverno at API server<br/>same rules, every path]
+  end
+
+  pre --> push --> check
+  push --> image
+  push --> k8s
+  check --> merge[merge to main]
+  image --> merge
+  k8s --> merge
+  merge --> tag[git tag vX.Y.Z]
+  tag --> match --> scan2 --> pushImg --> attest --> ghRel
+  ghRel --> verify --> stg --> prod
+  stg --> admit
+  prod --> admit
+```
+
+**Why three separate CI jobs (not one big job).** They answer different questions and fail for different reasons. A formatting mistake should not wait for a Kubernetes cluster. An image CVE should not be hidden behind a flaky HPA drill. Parallel jobs also keep the feedback loop short: `check` finishes in minutes while `k8s` does the expensive rehearsal.
+
+### Gate-by-gate: what each piece is for
+
+#### Job `check` — “Is the code correct?”
+
+| Piece | Catches | If missing |
 | --- | --- | --- |
-| `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~150 tests incl. real Postgres, promtool, amtool and the Kyverno CLI; coverage floor 90% (currently ~98%) |
-| `build, scan, smoke-test image` | every PR, push to main | Image builds; Trivy finds no fixable HIGH/CRITICAL; black-box smoke test (non-root, readiness, create → 307, request IDs, metrics, JSON logs, SIGTERM → exit 0) |
-| `deploy to kind, rollback drill` | every PR (docs-only PRs skip its steps and pass), push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; the rate limit holds exactly across its replicas; network policies refuse what they should; the cleanup Job deletes exactly the links past their grace period; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager; the API server refuses shortly images without release provenance |
-| Release workflow | tag `vX.Y.Z` | Tag equals `pyproject.toml` version; scan before publish; multi-arch push; SBOM; signed provenance; GitHub Release with digest |
+| `uv sync --locked` | Someone edited `pyproject.toml` without refreshing `uv.lock` | CI and laptops resolve different dependency graphs; "works on my machine" |
+| ruff format + lint (incl. S, DTZ, ASYNC) | Style drift; `random` instead of `secrets`; naive datetimes; blocking calls in `async` | Security and correctness bugs that type checkers miss; inconsistent diffs |
+| mypy `--strict` | Wrong types at the HTTP ↔ service ↔ store boundaries | Runtime `AttributeError` / invalid status mapping that tests might not hit |
+| pytest + real Postgres (testcontainers) | Contract between SQLAlchemy models, Alembic, and `PostgresStore` | Passing unit tests against `InMemoryStore` while production SQL is wrong |
+| `--cov-fail-under=90` | Untested branches quietly landing | Regressions in collision retry, load shedding, rate-limit edges |
+| promtool / amtool / Kyverno CLI tests | Alert rules that never fire; policies that never deny; dashboard PromQL that selects nothing | Silent monitoring: the first time you learn an alert is broken is during an incident |
+
+Toolchain: Python 3.14 (`.python-version`), uv + committed `uv.lock`, `src/` layout. The same ruff/mypy/pytest stack runs in pre-commit locally so developers see failures before the PR.
+
+#### Job `image` — “Is the artifact we ship safe and runnable?”
+
+Building a container is a different product from "pytest passed." This job builds the real image and treats it as a black box.
+
+| Piece | Catches | If missing |
+| --- | --- | --- |
+| Multi-stage Dockerfile build | Broken runtime deps, wrong `CMD`, missing files | Green unit tests, red deploy |
+| Trivy (fixable HIGH/CRITICAL only) | Known CVEs with a patch available | Shipping vulnerabilities you could have avoided; failing on unfixed CVEs trains people to ignore the scanner |
+| `scripts/smoke.sh` | Non-root, readiness, create → 307, request IDs, metrics, JSON logs, SIGTERM → exit 0 | Chart deploys a process that fails probes or dumps logs Kubernetes cannot parse |
+
+**Image design choices (and why).** Multi-stage: the build toolchain never sits in the runtime image (smaller attack surface, fewer CVEs). Dependencies are a cached layer separate from app code (fast rebuilds). Runtime UID 10001, code owned by root and read-only to the app (compromised process cannot rewrite its own binary). `pip` removed (its vendored packages were the only HIGH findings). Exec-form `CMD` so uvicorn is PID 1 and receives SIGTERM for graceful drain.
+
+#### Job `k8s` — “Will Kubernetes actually run and recover this?”
+
+This is the expensive rehearsal. `scripts/k8s-e2e.sh` runs the same steps CI and a laptop use. Each step exists because a real incident or near-miss taught that unit tests are not enough.
+
+| Step (in `k8s-e2e.sh`) | What it proves | Why it is needed |
+| --- | --- | --- |
+| 0. Digest-mode server-side dry run | The *release* render (digest, not tag) is accepted by the API server | kubeconform missed `sha256:` in a label (illegal); only the API server enforces label syntax |
+| 1–2. Staging deploy + create → 307 | Restricted Pod Security, migrate hook, app works | PSS would reject the pod in a hardened cluster; migrations must run once per release, not race as initContainers |
+| 3. Promote same image to prod | Staging bits == prod bits; HPA + PDB present | Rebuilds for prod silently change what you tested |
+| 3b. Rate limit across replicas | One client through the Service gets one burst, not N | Per-pod counters would look fine in a single-pod test and fail in prod |
+| 4. Broken release auto-rollback | 0 failed requests during a bad rollout | `maxUnavailable: 0` + Helm `--rollback-on-failure` must be rehearsed, not assumed |
+| 5. Manual `helm rollback` | Operators can undo a bad-but-ready release | Auto-rollback only covers "never became ready" |
+| 6. HPA drill | Under load, ready replicas increase | Proved that sync `/healthz` under overload caused restart storms; keeps that from regressing |
+| 7. Monitoring check | Scrape → rules → dashboard → Alertmanager route (the alert drill runs in the background during steps 3–6) | Metrics without a firing path are decoration |
+| 8. Admission check | API server refuses unattested shortly images | `deploy.sh` alone can be bypassed with raw `kubectl` |
+| 9. NetworkPolicy refusals | Metrics port and Postgres reject strangers; controls still succeed | A CNI that ignores NetworkPolicy accepts the objects silently; only a refusal test catches that |
+| 10. Expired-link cleanup | The CronJob's Job deletes exactly the links past their grace period, and the concurrently built index is valid | Deletes on a live table are where data loss hides; a wrong cutoff or a failed index build must fail CI, not prod |
+
+Chart lint + kubeconform run *before* kind starts, so a template typo fails in seconds. A PR that changes only Markdown (other than `docs/RUNBOOK.md`) skips the job's steps and still passes the required check.
 
 **Keeping the kind job fast.** It is the slowest of the three jobs. Its time goes into waiting, not work, so the waits are kept short and overlap where they can:
 
@@ -358,18 +576,47 @@ No change reaches `main` without passing three CI jobs, and no image is publishe
 
 Together these cut the job from 9m24s to **5m07s** (PR #27): cluster setup 117 s → 62 s, the e2e 364 s → 166 s. The alert drill took 101 s and finished entirely behind the prod drills, and the HPA drill stopped at +58 s instead of running its full 100 s. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
 
-**Image.** Multi-stage: uv builds the virtualenv in a builder stage, and only the venv reaches the runtime stage. Dependencies are a separate cached layer from the code. Runtime runs as UID 10001 with code owned by root (read-only to the app), pip removed (its vendored urllib3/msgpack/setuptools were the only HIGH findings), exec-form `CMD` so uvicorn is PID 1 and receives SIGTERM.
 
-**Pinning.** Base images and the uv image are pinned by digest; GitHub Actions are pinned by commit SHA; Python dependencies by `uv.lock` with hashes. Workflows declare least-privilege `permissions`, and checkout uses `persist-credentials: false`.
+### Release workflow — “Publish one immutable, attributable artifact”
 
-**Provenance.** BuildKit attaches an SBOM and `mode=max` provenance to each pushed image. `actions/attest-build-provenance` signs a SLSA v1 statement keylessly through Sigstore, using the workflow's OIDC identity, and records it in the public transparency log. Verify with:
+Triggered only by tags matching `v[0-9]+.[0-9]+.[0-9]+`. CI on main never publishes; publishing is an explicit human act (tag after merge).
+
+| Piece | Why |
+| --- | --- |
+| Tag must equal `pyproject.toml` version | Stops "tagged the wrong commit" / "forgot the bump" before anything reaches GHCR |
+| Scan **before** login/push | A vulnerable image never lands in the registry (even briefly) |
+| Multi-arch (`amd64` + `arm64`) | Servers/CI and Apple Silicon / Graviton share one digest manifest |
+| No `latest` tag | Deploys use digests; a moving `latest` makes "what is in prod?" unanswerable |
+| SBOM + `provenance: mode=max` (BuildKit) | Machine-readable contents and build recipe attached to the image |
+| `attest-build-provenance` (Sigstore, keyless OIDC) | Cryptographic proof that *this* digest came from *this* repo's `release.yml` at *this* tag — the same proof `verify-image.sh` and Kyverno demand |
+| GitHub Release notes with the digest | Operators copy one line into `deploy.sh`; no hunting through registry UI |
+
+Verify a published digest:
 
 ```bash
 gh attestation verify oci://ghcr.io/statsguy/shortly@<digest> --owner statsguy \
   --signer-workflow statsguy/shortly/.github/workflows/release.yml --source-ref refs/tags/<tag>
 ```
 
-**Keeping pins fresh.** Dependabot opens weekly PRs for uv dependencies (grouped), action SHAs and base-image digests; CI decides whether they are safe. `tests/test_toolchain.py` fails if the Dockerfile's Python differs from `.python-version`, so an interpreter bump must be a deliberate change to both.
+### Pinning and freshness
+
+| What is pinned | How | Why |
+| --- | --- | --- |
+| Python deps | `uv.lock` with hashes | Reproducible builds; blocks unexpected transitive upgrades |
+| Base / uv images | Digest in Dockerfile | Tags like `python:3.14` move; digests do not |
+| GitHub Actions | Commit SHA (not floating tag) | A compromised or retagged action cannot silently change CI |
+| Workflow tokens | Least-privilege `permissions`; `persist-credentials: false` | Stolen job tokens should not push code or packages they do not need |
+
+**Keeping pins fresh without silent drift.** Dependabot opens weekly PRs for uv deps (grouped), action SHAs, and base-image digests; CI decides whether each bump is safe. `tests/test_toolchain.py` fails if the Dockerfile's Python differs from `.python-version`, so an interpreter bump is always a deliberate paired change.
+
+### Two gates for provenance (deploy script + admission)
+
+Defense in depth on the path into the cluster:
+
+1. **`scripts/verify-image.sh`** (called by `deploy.sh`) — fast, clear error *before* Helm changes anything. Fails closed if `gh`, the registry, or the attestation is missing. Break-glass: `INSECURE_SKIP_VERIFY=1` (loud warning) for registry/Sigstore outages.
+2. **Kyverno `ImageValidatingPolicy`** — same rules at the API server for *every* create path (`kubectl`, CI, a compromised laptop). Tags are refused (`mutateDigest: false`): what was verified is what runs. Fail-closed webhook: if Kyverno cannot verify, new pods are refused rather than admitted unchecked.
+
+They must agree: `tests/test_admission_policies.py` asserts the policy and `verify-image.sh` name the same signer workflow. The image allowlist policy closes the bypass of "run a different image that has no provenance check"; in kind it is Audit-only so local `shortly:e2e` tags still work.
 
 ## Deployment
 
