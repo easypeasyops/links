@@ -463,8 +463,8 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "sum(rate(load_shed_total{namespace=\"$namespace\"}[$__rate_interval]))",
-          "legendFormat": "503 shed"
+          "expr": "sum by (reason) (rate(load_shed_total{namespace=\"$namespace\"}[$__rate_interval]))",
+          "legendFormat": "503 shed: {{reason}}"
         }
       ],
       "fieldConfig": {

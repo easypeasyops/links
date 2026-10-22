@@ -15,11 +15,17 @@ class CodeConflictError(Exception):
 
 
 class StoreBusyError(Exception):
-    """No backend capacity within the configured wait (e.g. the DB pool is exhausted).
+    """No backend capacity within the configured wait.
 
     Overload, not failure: the API sheds the request with 503 + Retry-After instead of
-    queueing it until the client gives up.
+    queueing it until the client gives up. ``reason`` says which bound was hit, and becomes
+    the ``reason`` label of ``load_shed_total``: ``pool`` (no free connection within
+    pool_timeout) or ``db_timeout`` (a statement or lock wait ran past its timeout).
     """
+
+    def __init__(self, message: str, *, reason: str = "pool") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class LinkStore(Protocol):

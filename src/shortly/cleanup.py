@@ -66,7 +66,9 @@ def main() -> int:
 
     settings = Settings()
     configure_logging(settings.log_level, json_output=settings.log_json)
-    engine = make_engine(str(settings.database_url), pool_size=1)  # autocommit
+    # Autocommit, one connection. A batch delete walks the partial index and takes
+    # milliseconds; 30 s is a guard against a pathological plan, not a budget.
+    engine = make_engine(str(settings.database_url), pool_size=1, statement_timeout_ms=30_000)
     try:
         started = time.monotonic()
         result = delete_expired(

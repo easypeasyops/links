@@ -50,6 +50,11 @@ export const options = {
     // excludes the seeding requests made in setup().
     "http_reqs{scenario:redirects}": ["count>=0"],
     "http_reqs{scenario:creates}": ["count>=0"],
+    // Successful requests only: past capacity a pod sheds (fast 503s), so "all requests"
+    // latency flatters it. Goodput and the latency of what succeeded are the honest numbers.
+    "http_reqs{scenario:redirects,expected_response:true}": ["count>=0"],
+    "http_reqs{scenario:creates,expected_response:true}": ["count>=0"],
+    "http_req_duration{scenario:redirects,expected_response:true}": ["p(99)>=0"],
   },
   summaryTrendStats: ["avg", "p(50)", "p(95)", "p(99)", "max"],
 };

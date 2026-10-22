@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     db_pool_size: int = 5
     # Seconds a request may wait for a pooled connection before it is shed with a 503.
     db_pool_timeout_seconds: float = 1.0
+    # Postgres cancels a statement running longer than this, or waiting on a lock longer
+    # than lock_timeout; the request gets a 503 instead of holding a connection. 0 = off.
+    db_statement_timeout_ms: int = Field(default=2000, ge=0)
+    db_lock_timeout_ms: int = Field(default=1000, ge=0)
+    # Requests a pod works on at once; more are answered 503 + Retry-After immediately,
+    # instead of queueing until every request is slow (docs/DESIGN.md, Capacity). 0 = off.
+    max_concurrent_requests: int = Field(default=16, ge=0)
     # Per-client limit on POST /links (shortly.ratelimit). A quiet client may create
     # `burst` links at once, then one every 60/per_minute seconds. 0 turns limiting off.
     rate_limit_creates_per_minute: float = Field(default=60.0, ge=0)

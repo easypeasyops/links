@@ -224,8 +224,10 @@ tests:
   - name: sustained load shedding opens a ticket
     interval: 1m
     input_series:
-      - series: 'load_shed_total'
+      - series: 'load_shed_total{reason="concurrency"}'
         values: '0x5 0+60x15'
+      - series: 'load_shed_total{reason="pool"}'
+        values: '0x20' # exported, but nothing shed for this reason: no alert for it
     alert_rule_test:
       - eval_time: 8m # shedding for 3 minutes: not yet
         alertname: ShortlyLoadShedding
@@ -233,10 +235,10 @@ tests:
       - eval_time: 15m
         alertname: ShortlyLoadShedding
         exp_alerts:
-          - exp_labels: {severity: ticket}
+          - exp_labels: {severity: ticket, reason: concurrency}
             exp_annotations:
-              summary: Requests are being shed with 503
-              description: The DB pool has been exhausted for 5 minutes. Check the database before adding replicas.
+              summary: Requests are being shed with 503 (concurrency)
+              description: Requests have been shed for 5 minutes, reason concurrency. concurrency means pods at their in-flight limit (traffic above capacity); pool or db_timeout mean a slow database. Check the database before adding replicas.
               runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
 
   - name: HPA pinned at max opens a ticket

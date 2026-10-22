@@ -45,6 +45,15 @@ config:
   dbPoolSize: 5
   # Wait this long for a free connection, then shed with 503 + Retry-After (not 30 s).
   dbPoolTimeoutSeconds: 1
+  # Postgres cancels a statement running longer than this, or waiting on a row lock longer
+  # than dbLockTimeoutMs; the request gets a 503 + Retry-After instead of holding a
+  # connection. The slowest real query is a few ms, so 2 s only catches a sick database.
+  dbStatementTimeoutMs: 2000
+  dbLockTimeoutMs: 1000
+  # Requests one pod works on at once; more are answered 503 + Retry-After in ~1 ms instead
+  # of queueing until every request is slow. Sized from the load test (docs/DESIGN.md,
+  # Capacity): well above what a pod needs at capacity, well below a queue of seconds.
+  maxConcurrentRequests: 16
   # /metrics is served on this port, not the app port: the Service exposes it to Prometheus
   # only, and the NetworkPolicy below admits nothing else to it.
   metricsPort: 9100
