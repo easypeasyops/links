@@ -920,6 +920,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Milestone 9 | Under overload, sync `/healthz` queued behind requests; liveness failed, kubelet restarted the pods, and the restarts cascaded (CI HPA drill, with monitoring on the node) | Probes and `/metrics` off the request threadpool; probe timeout 2 s; threadpool-saturation regression test |
 | Milestone 10 | The Kyverno docs' `referrer` attestation type found nothing in GitHub's Sigstore bundles, so it refused every image, the real release included | Declared as `intoto`; a test requires the documented release to pass, and mutated policies to fail |
 | Milestone 10 | The e2e's digest-mode dry run used a made-up digest, which the admission policy refuses | Dry run uses the runbook's release digest |
+| Backups (PR #35) | The restore drill passed once, then failed: on first start the Postgres image initialises with a temporary server on the Unix socket only, then restarts. A socket `pg_isready` reported Ready during that window and `pg_restore` hit the restart. The kind `postgres` StatefulSet had the same flaw | Readiness probes check over TCP (`-h 127.0.0.1`), which only the real server listens on; the drill restores over TCP; e2e step 11 runs the drill on every PR |
 
 ## Known limitations and future work
 

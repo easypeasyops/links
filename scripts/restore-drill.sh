@@ -34,7 +34,7 @@ cleanup() {
 }
 
 src_sql() { kubectl -n "$SOURCE" exec postgres-0 -- psql -U shortly -d shortly -tAc "$1"; }
-dst_sql() { kubectl -n "$NS" exec "$POD" -c postgres -- psql -U shortly -d shortly -tAc "$1"; }
+dst_sql() { kubectl -n "$NS" exec "$POD" -c postgres -- psql -h 127.0.0.1 -U shortly -d shortly -tAc "$1"; }
 
 kubectl -n "$SOURCE" get cronjob postgres-backup >/dev/null 2>&1 \
   || fail "no postgres-backup CronJob in $SOURCE (scripts/cluster.sh up)"
@@ -121,8 +121,11 @@ spec:
         - { name: POSTGRES_DB, value: shortly }
         - { name: POSTGRES_PASSWORD, value: restore-drill-only }
         - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+      # Over TCP, not the socket: on first start the image initialises the database with a
+      # temporary server that listens on the socket only, then restarts. A socket check
+      # passes during that window, and a restore started then fails mid-restart.
       readinessProbe:
-        exec: { command: [pg_isready, -U, shortly, -d, shortly] }
+        exec: { command: [pg_isready, -h, 127.0.0.1, -U, shortly, -d, shortly] }
         periodSeconds: 2
       securityContext:
         allowPrivilegeEscalation: false
@@ -144,7 +147,7 @@ dump=$(kubectl -n "$NS" exec "$POD" -c postgres -- cat /work/NAME)
 
 # --exit-on-error: a partial restore must fail the drill, not pass with missing tables.
 kubectl -n "$NS" exec "$POD" -c postgres -- \
-  pg_restore --username shortly --dbname shortly --no-owner --no-privileges --exit-on-error \
+  pg_restore --host 127.0.0.1 --username shortly --dbname shortly --no-owner --no-privileges --exit-on-error \
   /work/shortly.dump
 took=$((SECONDS - start))
 
