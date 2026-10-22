@@ -112,6 +112,17 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# Expired-link cleanup (templates/cleanup-cronjob.yaml). Links expired less than graceDays
+# ago are kept, so they still answer 410 Gone. One run deletes at most
+# batchSize x maxBatches rows; a bigger backlog is finished by the next runs.
+cleanup:
+  enabled: true
+  schedule: "17 * * * *" # hourly, off the top of the hour when every other job runs
+  graceDays: 7
+  batchSize: 1000
+  maxBatches: 100
+  activeDeadlineSeconds: 900
+
 # Who may talk to the pods, and whom they may talk to (templates/networkpolicy.yaml). Needs a
 # CNI that enforces NetworkPolicy (kind's kindnet does; the e2e proves it); on one that
 # doesn't, these objects are silently ignored.

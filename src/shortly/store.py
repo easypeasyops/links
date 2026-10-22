@@ -4,6 +4,7 @@ The service depends on the ``LinkStore`` Protocol, not on any database. Postgres
 arrives in a later milestone as a second adapter; the service and its tests won't change.
 """
 
+from datetime import datetime
 from typing import Protocol
 
 from shortly.models import ShortLink
@@ -35,6 +36,14 @@ class LinkStore(Protocol):
         """True if the backend can serve requests. Used by the readiness probe."""
         ...
 
+    def delete_expired(self, before: datetime, limit: int) -> int:
+        """Delete up to ``limit`` links that expired before ``before``, oldest first.
+
+        Returns how many were deleted. Bounded so that one call is one short statement:
+        the cleanup job (shortly.cleanup) calls it in a loop.
+        """
+        ...
+
 
 class InMemoryStore:
     """Dict-backed store for tests and local runs. Not thread-safe; single process only."""
@@ -52,3 +61,12 @@ class InMemoryStore:
 
     def ping(self) -> bool:
         return True
+
+    def delete_expired(self, before: datetime, limit: int) -> int:
+        expired = sorted(
+            (link for link in self._links.values() if link.expires_at and link.expires_at < before),
+            key=lambda link: link.expires_at or before,
+        )[:limit]
+        for link in expired:
+            del self._links[link.code]
+        return len(expired)

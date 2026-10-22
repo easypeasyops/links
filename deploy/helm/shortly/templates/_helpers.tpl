@@ -15,6 +15,34 @@ app.kubernetes.io/name: shortly
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/* Labels of the cleanup Job's pods. Deliberately NOT the selector labels: a pod matching
+     those is counted by the HPA (its CPU skews the average) and the PodDisruptionBudget.
+     part-of ties every pod of the chart together for the Postgres network policy. */}}
+{{- define "shortly.cleanupSelectorLabels" -}}
+app.kubernetes.io/name: shortly-cleanup
+app.kubernetes.io/instance: {{ .Release.Name }}
+app.kubernetes.io/part-of: shortly
+{{- end -}}
+
+{{/* Egress every pod of the chart needs: DNS, and the database. Nothing else. */}}
+{{- define "shortly.egress" -}}
+- to:
+    - namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: kube-system }
+      podSelector:
+        matchLabels: { k8s-app: kube-dns }
+  ports:
+    - { port: 53, protocol: UDP }
+    - { port: 53, protocol: TCP }
+- to:
+    {{- toYaml .Values.networkPolicy.databaseTo | nindent 4 }}
+  ports:
+    - { port: {{ .Values.networkPolicy.databasePort }}, protocol: TCP }
+{{- with .Values.networkPolicy.extraEgress }}
+{{ toYaml . }}
+{{- end }}
+{{- end -}}
+
 {{/* Image reference: digest wins over tag. Fails the render if neither is set. */}}
 {{- define "shortly.image" -}}
 {{- if .Values.image.digest -}}

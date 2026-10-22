@@ -1,0 +1,55 @@
+{{- if .Values.cleanup.enabled }}
+# Deletes links that expired more than cleanup.graceDays ago (python -m shortly.cleanup):
+# bounded batches, each one short statement that commits on its own. Same image as the
+# release, so Kyverno verifies its provenance like the app's (CronJobs are checked too).
+#
+# Run it now:  kubectl -n <ns> create job cleanup-manual --from=cronjob/<release>-cleanup
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "shortly.fullname" . }}-cleanup
+  labels:
+    {{- include "shortly.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cleanup
+spec:
+  schedule: {{ .Values.cleanup.schedule | quote }}
+  timeZone: Etc/UTC
+  # Never two runs at once from the schedule (a manual run may overlap: SKIP LOCKED makes
+  # that safe). A run missed by more than 10 minutes (cluster down) is skipped, not queued.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: {{ .Values.cleanup.activeDeadlineSeconds }}
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            {{- include "shortly.cleanupSelectorLabels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            {{- include "shortly.podSecurityContext" . | nindent 12 }}
+          containers:
+            - name: cleanup
+              image: {{ include "shortly.image" . }}
+              imagePullPolicy: {{ .Values.image.pullPolicy }}
+              command: ["python", "-m", "shortly.cleanup"]
+              env:
+                {{- include "shortly.env" . | nindent 16 }}
+                - name: SHORTLY_CLEANUP_GRACE_DAYS
+                  value: {{ .Values.cleanup.graceDays | quote }}
+                - name: SHORTLY_CLEANUP_BATCH_SIZE
+                  value: {{ .Values.cleanup.batchSize | quote }}
+                - name: SHORTLY_CLEANUP_MAX_BATCHES
+                  value: {{ .Values.cleanup.maxBatches | quote }}
+              securityContext:
+                {{- include "shortly.containerSecurityContext" . | nindent 16 }}
+              resources:
+                requests: { cpu: 50m, memory: 96Mi }
+                limits: { memory: 192Mi }
+{{- end }}

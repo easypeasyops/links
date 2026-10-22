@@ -84,3 +84,22 @@ groups:
           summary: Over 10% of link creations are rate limited
           description: For 30 minutes, more than 1 in 10 POST /links requests got 429. Find out whether it is abuse or a limit that is too tight for legitimate clients.
           runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#rate-limiting-429-on-post-links
+
+      # Needs kube-state-metrics. A cron job that stops running fails silently: nothing
+      # breaks for weeks, then the table is huge. Fires when the last success is over
+      # 3 hours old (3 missed hourly runs), or the CronJob has existed for 3 hours
+      # without ever succeeding (a new install whose first runs all fail).
+      - alert: ShortlyCleanupNotRunning
+        expr: |-
+          time() - max by (namespace) (kube_cronjob_status_last_successful_time{cronjob="shortly-cleanup"}) > 3 * 3600
+            or (
+              time() - max by (namespace) (kube_cronjob_created{cronjob="shortly-cleanup"}) > 3 * 3600
+                unless max by (namespace) (kube_cronjob_status_last_successful_time{cronjob="shortly-cleanup"})
+            )
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Expired-link cleanup hasn't succeeded for over 3 hours
+          description: The shortly-cleanup CronJob has missed at least 3 runs, or has never succeeded. Expired links pile up until it runs again.
+          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#cleanup-job-not-running

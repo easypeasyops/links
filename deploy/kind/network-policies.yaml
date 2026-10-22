@@ -17,8 +17,11 @@ spec:
   podSelector: {}
   policyTypes: [Ingress]
 ---
-# Postgres accepts connections from shortly's pods (the app and its migration Job) only.
-# Its readiness probe is an exec (pg_isready), so it needs no network rule.
+# Postgres accepts connections from shortly's pods only: the app, its migration Job and the
+# cleanup Job. Its readiness probe is an exec (pg_isready), so it needs no network rule.
+# Two peers (either one is enough): app.kubernetes.io/name=shortly for pods of releases
+# before chart 0.6.0, part-of=shortly for all of them since. Contract: drop the first once
+# no release older than 0.6.0 runs.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -31,5 +34,7 @@ spec:
     - from:
         - podSelector:
             matchLabels: { app.kubernetes.io/name: shortly }
+        - podSelector:
+            matchLabels: { app.kubernetes.io/part-of: shortly }
       ports:
         - { port: 5432, protocol: TCP }
