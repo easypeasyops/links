@@ -16,6 +16,8 @@
 #   6. under load, the HPA adds ready pods (scripts/hpa-drill.sh; skip with HPA_DRILL=0)
 #   7. monitoring works end to end: scrape, rules, dashboard queries, and a real alert routed
 #      by Alertmanager (scripts/monitoring-check.sh; skipped when the stack isn't installed)
+#   8. admission refuses shortly images without release provenance, even from hand-run
+#      kubectl (scripts/admission-check.sh; skipped when Kyverno isn't installed)
 set -euo pipefail
 
 IMAGE="${IMAGE:?set IMAGE, e.g. IMAGE=shortly:e2e}"
@@ -65,11 +67,13 @@ deployed_image() { kubectl -n "$1" get deploy shortly -o jsonpath='{.spec.templa
 # Releases deploy by digest, but this test deploys a local image by tag. Render the digest
 # path too and let the real API server validate it (server-side dry run). JSON-schema tools
 # like kubeconform don't check label syntax; the API server does. (v0.1.0 shipped a label
-# "sha256:..." that only the API server rejected.)
-fake_digest="sha256:$(printf '0%.0s' {1..64})"
+# "sha256:..." that only the API server rejected.) The real release digest, because the
+# admission policy (step 8) refuses any shortly digest without release provenance.
+release_digest=$(sed -nE 's/^\| Current release \| v[0-9.]+, `(sha256:[0-9a-f]{64})`.*/\1/p' "$ROOT/docs/RUNBOOK.md")
+[[ -n "$release_digest" ]] || fail "no 'Current release' digest in docs/RUNBOOK.md"
 for ns in staging prod; do
   helm template shortly "$ROOT/deploy/helm/shortly" -n "$ns" -f "$ROOT/deploy/envs/$ns.yaml" \
-    --set image.repository=ghcr.io/statsguy/shortly --set "image.digest=$fake_digest" \
+    --set image.repository=ghcr.io/statsguy/shortly --set "image.digest=$release_digest" \
     | kubectl -n "$ns" apply --dry-run=server -f - >/dev/null \
     || fail "API server rejected the digest-mode render for $ns"
 done
@@ -153,6 +157,13 @@ if kubectl get crd prometheusrules.monitoring.coreos.com >/dev/null 2>&1; then
   "$ROOT/scripts/monitoring-check.sh"
 else
   echo "skip monitoring checks: kube-prometheus-stack not installed (MONITORING=0?)"
+fi
+
+# ---------------------------------------------------------------- 8. admission policy
+if kubectl get crd imagevalidatingpolicies.policies.kyverno.io >/dev/null 2>&1; then
+  "$ROOT/scripts/admission-check.sh"
+else
+  echo "skip admission checks: Kyverno not installed (POLICIES=0?)"
 fi
 
 echo "k8s e2e passed"

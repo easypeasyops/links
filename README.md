@@ -104,7 +104,7 @@ gh attestation verify oci://ghcr.io/statsguy/shortly@sha256:<digest> --owner sta
 Requires Docker, [kind](https://kind.sigs.k8s.io), kubectl, and Helm 4.
 
 ```bash
-scripts/cluster.sh up                                          # kind + metrics-server + monitoring + staging/prod + Postgres
+scripts/cluster.sh up                                          # kind + metrics-server + monitoring + Kyverno + staging/prod + Postgres
 scripts/deploy.sh staging ghcr.io/statsguy/shortly@sha256:<digest>
 scripts/deploy.sh prod    ghcr.io/statsguy/shortly@sha256:<digest>   # same digest: build once, deploy many
 helm -n prod history shortly                                   # what can I roll back to?
@@ -113,11 +113,13 @@ helm -n prod rollback shortly <revision>
 
 `deploy.sh` refuses a digest unless its signed provenance shows it was built by this repo's
 `release.yml` from a release tag (`scripts/verify-image.sh`); tags deploy only to kind.
+The cluster enforces the same rule at admission (Kyverno, `deploy/policies/`), so a
+hand-run `helm` or `kubectl` can't start an unverified shortly image either.
 A failed rollout rolls back automatically (`--rollback-on-failure`); `maxUnavailable: 0`
 keeps old pods serving throughout. Namespaces enforce the **restricted** Pod Security
 Standard. `scripts/k8s-e2e.sh` (run in CI on every PR) deploys, promotes, breaks a release
-on purpose, asserts it rolled back with zero failed requests, then loads prod and checks
-that the HorizontalPodAutoscaler adds pods.
+on purpose, asserts it rolled back with zero failed requests, loads prod and checks
+that the HorizontalPodAutoscaler adds pods, then checks monitoring and admission end to end.
 
 Local image instead of a release: `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev`
 

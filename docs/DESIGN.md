@@ -287,9 +287,9 @@ No change reaches `main` without passing three CI jobs, and no image is publishe
 
 | Gate | When | What it proves |
 | --- | --- | --- |
-| `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~100 tests incl. real Postgres, promtool and amtool; coverage floor 90% (currently ~98%) |
+| `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~115 tests incl. real Postgres, promtool, amtool and the Kyverno CLI; coverage floor 90% (currently ~98%) |
 | `build, scan, smoke-test image` | every PR, push to main | Image builds; Trivy finds no fixable HIGH/CRITICAL; black-box smoke test (non-root, readiness, create → 307, request IDs, metrics, JSON logs, SIGTERM → exit 0) |
-| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager |
+| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager; the API server refuses shortly images without release provenance |
 | Release workflow | tag `vX.Y.Z` | Tag equals `pyproject.toml` version; scan before publish; multi-arch push; SBOM; signed provenance; GitHub Release with digest |
 
 **Image.** Multi-stage: uv builds the virtualenv in a builder stage, and only the venv reaches the runtime stage. Dependencies are a separate cached layer from the code. Runtime runs as UID 10001 with code owned by root (read-only to the app), pip removed (its vendored urllib3/msgpack/setuptools were the only HIGH findings), exec-form `CMD` so uvicorn is PID 1 and receives SIGTERM.
@@ -328,6 +328,19 @@ One Helm chart (`deploy/helm/shortly`, Helm 4) deploys the same image digest to 
 
 The attestation bundle is read from the registry (`--bundle-from-oci`), so the check doesn't depend on GitHub's API. It fails closed: no `gh`, no network or no attestation means no deploy. The break-glass flag `INSECURE_SKIP_VERIFY=1` skips the check with a loud warning, for when the registry or Sigstore is down mid-incident. `tests/test_deploy_gate.py` runs `deploy.sh` against stub tools and asserts that helm is never called for a refused image. It also verifies the release digest the runbook documents, against the real registry.
 
+**Admission policy.** `deploy.sh` protects the normal path; the cluster protects every other one. `scripts/cluster.sh` installs Kyverno 1.19.1 (chart 3.9.1, pinned by version and digest) and applies `deploy/policies/`:
+
+| Policy | Kind | Rule | In kind |
+| --- | --- | --- | --- |
+| `shortly-require-release-provenance` | ImageValidatingPolicy | Any `ghcr.io/statsguy/shortly*` image in `staging` or `prod` must be a digest with SLSA provenance signed by `release.yml` at a `vX.Y.Z` tag, logged in Rekor, from a GitHub Actions workflow build. Pods, and the Pod templates of Deployments, StatefulSets, Jobs, CronJobs, ReplicaSets and DaemonSets | Deny |
+| `shortly-allowed-images` | ValidatingPolicy | Pods in `staging` or `prod` may only run the shortly release (by digest), `postgres:17-alpine` or `grafana/k6` | Audit (PolicyReports) |
+
+The two policies need each other. The provenance policy only looks at shortly's repository, so on its own it can be dodged by running some other image. The allowlist closes that, but it is Audit-only in kind, because local builds (`shortly:dev`, `shortly:e2e`) are how the cluster is developed and tested. In a real cluster it would be Deny.
+
+The rules are the same as `verify-image.sh`, and a test asserts the two agree on the signer. Tags are refused, not resolved (`mutateDigest: false`), so what was verified is what runs. All containers count, init and ephemeral ones included. The policy fails closed (`failurePolicy: Fail`): if Kyverno, the registry or Rekor can't be reached, the API server refuses new Pods instead of admitting them unchecked. Running pods are not affected.
+
+It is tested at two levels. `tests/test_admission_policies.py` runs the same Kyverno engine (the CLI image, pinned by digest) against the real registry: the documented release passes, and a tag, an unattested digest and an unattested init container fail. Two mutated copies of the policy, one expecting `ci.yml` as signer and one a different build type, must refuse the real release, which proves the checks aren't passing everything. `scripts/admission-check.sh` (e2e step 8) then sends server-side dry runs through the live API server. It also proves that a digest that doesn't exist and a Deployment template are refused, and that the allowlist reports the local build.
+
 **Rollout.** `helm upgrade --install --rollback-on-failure --wait --timeout 3m`. `RollingUpdate` with `maxUnavailable: 0, maxSurge: 1` never drops below desired capacity: a new pod that never becomes ready stalls the rollout while old pods keep serving, Helm times out and rolls back. The drill measures this: 0 failed requests through the Service during a broken rollout.
 
 **Probes.** startupProbe on `/healthz` (2 s × 30) gates the others; liveness `/healthz` every 10 s, 3 failures; readiness `/readyz` every 5 s, 2 failures; both with a 2 s timeout.
@@ -361,6 +374,8 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | Database slow or hung | Requests holding connections wait on it; all others wait at most 1 s for a connection, then get **503 + `Retry-After`** instead of queueing for 30 s | `load_shed_total` rising, `db_pool_in_use` = `db_pool_size`, 503s on all DB routes |
 | Load above capacity (CPU) | Latency rises with no errors (requests queue in the threadpool); probes and scrapes still answer, so pods are neither restarted nor pulled; HPA adds pods within about a minute, up to `maxReplicas` | p99 up, HPA `desiredReplicas` rising or pinned at max |
 | Every pod down, or not scraped | No metrics at all, so the SLO ratios are empty and no burn-rate alert can fire | `ShortlyDown` (from `up`, not from app metrics) |
+| Kyverno down (admission webhook unreachable) | The API server refuses **every** new Pod in `staging` and `prod`, Postgres and k6 included, because the webhook fails closed; running pods keep serving | `kubectl apply` / `helm upgrade` errors naming `kyverno-svc`; Deployments stuck below desired replicas |
+| Registry or Sigstore (Rekor, TUF) unreachable | New shortly pods are refused (verification can't run); other images and running pods unaffected | Admission errors naming the provenance policy |
 | Tracing backend down | Spans dropped by the batch exporter; requests unaffected | Exporter warnings in logs |
 | Vulnerable dependency published | CI image scan fails; release workflow refuses to publish | Red `build, scan` job |
 
@@ -435,7 +450,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Log injection / log flooding via headers | `x-request-id` accepted only if `[A-Za-z0-9._-]{1,64}`; JSON encoding escapes everything else |
 | Host-header spoofing in generated links | `short_url` built from configured `base_url` only |
 | Compromised dependency or base image | Lockfile with hashes, digest-pinned bases, Trivy gate on every PR and before publish, weekly Dependabot |
-| Tampered or substituted image | Deploy by digest; `deploy.sh` refuses any digest whose signed SLSA provenance isn't from this repo's `release.yml` at a release tag |
+| Tampered or substituted image | Deploy by digest; `deploy.sh` refuses any digest whose signed SLSA provenance isn't from this repo's `release.yml` at a release tag; the Kyverno admission policy refuses the same at the API server, so hand-run `helm` or `kubectl` can't bypass it |
+| Arbitrary image in the app namespaces | Kyverno image allowlist: Audit in kind, Deny in a real cluster |
 | Compromised CI action | Actions pinned by SHA; workflow `permissions` least-privilege; `persist-credentials: false` |
 | Container escape / lateral movement | Non-root, read-only root FS, no capabilities, seccomp, no SA token, restricted PSS enforced |
 | App rewriting its own code | Code and venv owned by root, read-only to UID 10001 |
@@ -460,7 +476,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | DB tracing | psycopg instrumentation | SQLAlchemy instrumentation | SQLAlchemy instrumentation no-ops on 2.1 |
 | Metric labels | Route template | Raw path | Bounded cardinality |
 | Image tags | Semver + digest, no `latest` | `latest` | "What is in prod?" must be answerable |
-| Provenance check | In `deploy.sh`, failing closed, with a break-glass flag | Manual checking only; admission control first | Cheap, and protects the normal path today; in-cluster admission is the next layer |
+| Provenance check | In `deploy.sh` and at admission, both failing closed | Only one of the two | `deploy.sh` gives a clear error before anything changes; admission covers every other path into the cluster |
+| Admission engine | Kyverno `ImageValidatingPolicy` (CEL) | Sigstore policy-controller; Kyverno `ClusterPolicy` `verifyImages` | Kyverno also runs the image allowlist, and its CLI tests the same engine offline. `ClusterPolicy` is deprecated as of Kyverno 1.19 |
 | Deploy target (now) | Local kind, staging + prod namespaces | Cloud cluster; PaaS | Free, realistic, chart portable to EKS/GKE |
 | Rollback | Helm `--rollback-on-failure` + rehearsed `helm rollback` | Manual only | Tested on every PR |
 | Alerting | Multi-window burn-rate alerts on SLOs, plus a few cause-based alerts | Threshold alerts on error rate or latency | Pages scale with user impact: a 1-minute blip doesn't page, a slow leak still opens a ticket |
@@ -485,6 +502,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Milestone 8 | The HPA drill flaked: 600 req/s produced 75% CPU against a 70% target, and the HPA does nothing within 10% of its target | Drill load raised to 1000 req/s; on failure the drill reports whether the load was too light or the HPA failed to act |
 | Milestone 8 | The selector check let `le="0.04"` pass because `route="/{code}"` contains braces | Quote-aware selector parser; the test fails on any matcher it can't parse |
 | Milestone 9 | Under overload, sync `/healthz` queued behind requests; liveness failed, kubelet restarted the pods, and the restarts cascaded (CI HPA drill, with monitoring on the node) | Probes and `/metrics` off the request threadpool; probe timeout 2 s; threadpool-saturation regression test |
+| Milestone 10 | The Kyverno docs' `referrer` attestation type found nothing in GitHub's Sigstore bundles, so it refused every image, the real release included | Declared as `intoto`; a test requires the documented release to pass, and mutated policies to fail |
+| Milestone 10 | The e2e's digest-mode dry run used a made-up digest, which the admission policy refuses | Dry run uses the runbook's release digest |
 
 ## Known limitations and future work
 
@@ -493,7 +512,10 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - No rate limiting or URL reputation checks: shortly can be used to mask phishing links.
 - No link deletion or expiry cleanup; expired rows stay in the table.
 - `/metrics` is on the public port; no NetworkPolicy restricts it.
-- Provenance is enforced by `deploy.sh`, not by the cluster: `helm` or `kubectl` run by hand can still start an unverified image, and the `INSECURE_SKIP_VERIFY=1` break glass leaves no record beyond the deploy log.
+- The image allowlist is Audit-only in kind, so a non-shortly image can still run in the app namespaces; it is reported, not refused.
+- Provenance is checked when a pod is admitted, not continuously: a policy change doesn't evict running pods.
+- One Kyverno admission replica: while it restarts, no Pod can be created in `staging` or `prod`. A real cluster needs 3.
+- The `INSECURE_SKIP_VERIFY=1` break glass only skips `deploy.sh`'s check; admission still applies. Bypassing it means removing the policy (cluster-admin), which leaves no record beyond the API server's audit log.
 - CPU overload is not shed: past capacity, requests queue until the HPA catches up or `maxReplicas` is reached.
 - A request holding a connection to a hung (not dead) database has no client-side timeout.
 - Capacity was measured on a small, in-memory dataset; Postgres cost per request will rise with table size.
@@ -505,12 +527,11 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 
 **Next steps, in rough priority order**
 
-1. Enforce provenance in the cluster: an admission policy (Kyverno or Sigstore policy-controller) that rejects pods whose image lacks this repo's release attestation, so hand-run `helm` or `kubectl` can't bypass the deploy gate.
-2. Rate limiting per client on `POST /links`; Safe Browsing check on targets.
-3. Move `/metrics` to a separate port; add a NetworkPolicy.
-4. Expired-link cleanup job and an index on `expires_at`.
-5. A concurrency limit that sheds CPU overload; a statement or socket timeout for a hung database.
-6. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
+1. Rate limiting per client on `POST /links`; Safe Browsing check on targets.
+2. Move `/metrics` to a separate port; add a NetworkPolicy.
+3. Expired-link cleanup job and an index on `expires_at`.
+4. A concurrency limit that sheds CPU overload; a statement or socket timeout for a hung database.
+5. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
 
 **Open questions**
 

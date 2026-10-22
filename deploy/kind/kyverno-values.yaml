@@ -1,0 +1,18 @@
+# Kyverno for the kind cluster (scripts/cluster.sh), sized for one laptop node.
+# The policies themselves live in deploy/policies/.
+admissionController:
+  # One replica is enough here. In a real cluster run 3: the provenance policy fails closed,
+  # so while no admission pod is ready, no Pod can start in staging or prod.
+  replicas: 1
+  container:
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { memory: 384Mi }
+# We only validate. The background controller (generate/mutate-existing) and the cleanup
+# controller aren't used; the reports controller turns Audit results into PolicyReports.
+backgroundController:
+  enabled: false
+cleanupController:
+  enabled: false
+reportsController:
+  enabled: true

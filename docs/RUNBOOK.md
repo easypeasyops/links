@@ -21,6 +21,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Logs | JSON on stdout; `request_id` and `trace_id` on every line |
 | SLOs | redirects 99.9% available and 99% < 50 ms; creates 99.5% and 99% < 100 ms; 30-day window (`deploy/prometheus/slos.yaml`) |
 | Alerts | Rules in `deploy/helm/shortly/rules/` (shipped by the prod release). kind: Prometheus, Alertmanager and Grafana in namespace `monitoring` (see Local cluster operations). Compose: `http://localhost:9090/alerts` |
+| Admission | Kyverno (namespace `kyverno`) refuses shortly images without release provenance in `staging` and `prod`, and reports images outside the allowlist (`deploy/policies/`) |
 | Alert routing | anything in `staging` → `staging`; `severity=page` → `pager`; `severity=ticket` → `tickets` (`deploy/kind/monitoring-values.yaml`) |
 
 ```bash
@@ -159,7 +160,7 @@ Deploy the verified digest to staging, check it, then promote the identical dige
 | `is a tag; outside kind, deploy a released digest` | A tag was passed against a non-kind cluster | Use the digest from the release notes |
 | `gh (GitHub CLI) is required` | `gh` isn't installed | `brew install gh` |
 
-**Break glass**, only when verification itself is broken (for example Sigstore is down) and a deploy can't wait: `INSECURE_SKIP_VERIFY=1 scripts/deploy.sh prod ghcr.io/statsguy/shortly@$D`. It prints a warning. Say so in the incident channel, and run `scripts/verify-image.sh` on that digest as soon as verification works again.
+**Break glass**, only when verification itself is broken (for example Sigstore is down) and a deploy can't wait: `INSECURE_SKIP_VERIFY=1 scripts/deploy.sh prod ghcr.io/statsguy/shortly@$D`. It prints a warning. Say so in the incident channel, and run `scripts/verify-image.sh` on that digest as soon as verification works again. This skips `deploy.sh`'s check only: the cluster's admission policy still applies (see [Admission policy refuses pods](#admission-policy-refuses-pods)).
 
 **If the deploy fails**, Helm has already rolled back (a fresh install is uninstalled). Prod keeps serving. Find out why before retrying:
 
@@ -350,7 +351,46 @@ kubectl -n prod get events --sort-by=.lastTimestamp | tail -30
 | `ImagePullBackOff` | Wrong digest, or the GHCR package is private | Check the digest; make the package public or add `imagePullSecrets` |
 | `violates PodSecurity "restricted"` | A chart change dropped a security setting | Restore the `securityContext` in the chart |
 | Migrate Job `Failed` | Migration error | `kubectl -n prod logs job/shortly-migrate-<REV>`; fix the migration in a new release |
+| `admission webhook … denied the request: … shortly-require-release-provenance` | The image isn't a release digest with valid provenance | See [Admission policy refuses pods](#admission-policy-refuses-pods) |
+| `failed calling webhook … kyverno-svc` | Kyverno is down; no Pod can be created in `staging` or `prod` | See [Admission policy refuses pods](#admission-policy-refuses-pods) |
 | `Pending`, `Insufficient cpu/memory` | Node is full (the HPA may have asked for more pods than fit) | Add nodes, or lower `autoscaling.maxReplicas`; don't lower the CPU request without re-measuring |
+
+### Admission policy refuses pods
+
+Kyverno checks every Pod in `staging` and `prod` before it is created (`deploy/policies/`). Pods that are already running are never touched, so a refusal blocks deploys and scale-ups, not traffic. Find which case it is:
+
+```bash
+kubectl -n prod get events --sort-by=.lastTimestamp | grep -i -E 'denied|webhook' | tail
+kubectl -n kyverno get pods
+kubectl get imagevalidatingpolicy,validatingpolicy     # READY must be true
+```
+
+| Message | Cause | Fix |
+| --- | --- | --- |
+| `shortly images must be a release digest with provenance…` | An unreleased or unattested image: a CI build, a fork, or a per-platform child digest instead of the release's index digest | Deploy the digest from the GitHub Release notes. `scripts/verify-image.sh <ref>` tells you why it fails |
+| `image ghcr.io/statsguy/shortly:… does not have a digest` | A tag was used | Use `@sha256:…`; tags are never verified |
+| `provenance is not from a GitHub Actions workflow build` | The attestation exists but describes a different build | Treat as suspicious: who produced this image? |
+| `failed calling webhook "…kyverno…"` or `context deadline exceeded` | Kyverno is down or slow, or it can't reach `ghcr.io` / Sigstore (Rekor, TUF). The policy fails closed, so **every** new Pod in `staging` and `prod`, Postgres included, is refused | `kubectl -n kyverno logs deploy/kyverno-admission-controller --tail=50`; `kubectl -n kyverno rollout restart deploy/kyverno-admission-controller` |
+
+**Break glass**, only when Kyverno can't be recovered and pods must start (for example a node died and prod is below its minimum). It needs cluster-admin. Say so in the incident channel first:
+
+```bash
+# 1. Remove the provenance policy (the webhook follows within seconds).
+kubectl delete imagevalidatingpolicy shortly-require-release-provenance
+# 2. If Kyverno itself is down, the webhook still fails closed: remove its configurations.
+kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations | grep -i kyverno
+kubectl delete validatingwebhookconfiguration <name>      # each kyverno one listed above
+# 3. Restore as soon as possible (reinstalls Kyverno if needed and waits for the policies):
+scripts/cluster.sh up
+```
+
+Afterwards, check that everything running is a release: `scripts/verify-image.sh` on each image from `kubectl -n prod get pods -o jsonpath='{..image}'`.
+
+**Allowlist reports** (Audit in kind, so nothing is refused):
+
+```bash
+kubectl -n prod get policyreport -o wide                  # FAIL > 0: an image outside the allowlist ran
+```
 
 ### 5xx rate rising
 
@@ -398,11 +438,11 @@ Check whether the running digest is affected (the SBOM is attached to the image)
 Every CI step can be reproduced locally with the same command; reproduce before you guess.
 
 | Job → step | Usual cause | Reproduce and fix |
+| --- | --- | --- |
 | test → `test_generated_slo_rules_are_current` | `slos.yaml` or the generator changed without regenerating | `uv run python scripts/gen_slo_rules.py`, commit `deploy/helm/shortly/rules/slo.yaml` |
 | test → `test_every_rule_selector_matches_something_the_app_exports` | A metric, route, label or histogram bucket changed, and an alert now selects nothing | Update the rule (or `slos.yaml`) to the new name, or revert the rename |
 | test → `test_promtool_unit_tests_pass` | A rule's behaviour changed, or its annotations no longer match the test | Run promtool (command in `deploy/prometheus/tests/alerts_test.yaml`); fix the rule or update the expected alert |
 | test → `test_runbook_links_point_at_real_sections` | A RUNBOOK heading was renamed | Rename it back, or update `runbook_url` in the rules |
-| --- | --- | --- |
 | lint → `uv sync --locked` | `pyproject.toml` changed without updating `uv.lock` | `uv lock`, commit the lockfile |
 | lint → format check | Unformatted code | `uv run ruff format .` (pre-commit does this on commit) |
 | lint → ruff / mypy | Lint or type error | `uv run ruff check .` / `uv run mypy src tests` |
@@ -417,7 +457,12 @@ Every CI step can be reproduced locally with the same command; reproduce before 
 | test → `test_alertmanager_config_is_valid` / `test_alerts_route_to_the_right_receiver` | The Alertmanager config in `deploy/kind/monitoring-values.yaml` is invalid, or a route changed | `amtool config routes test --config.file=… namespace=prod severity=page` (the test prints the receiver it got) |
 | test → `test_every_dashboard_query_matches_something_the_app_exports` | A dashboard query selects a metric or label the app doesn't export | Fix the query in `deploy/helm/shortly/dashboards/slo.json` |
 | test → `test_documented_release_verifies` | The Quick reference digest is wrong, or the registry or Sigstore is unreachable from CI | `scripts/verify-image.sh <that digest>`; fix the digest in the Quick reference, or re-run if it was a network blip |
+| test → `test_provenance_verdicts_against_the_real_registry` | The documented release no longer verifies, a refused case was admitted, or the registry or Sigstore was unreachable | Run the Kyverno CLI command the test builds (`tests/test_admission_policies.py`, `_apply`); compare with `scripts/verify-image.sh` on the same digest |
+| test → `test_provenance_policy_actually_checks` | A policy edit made a check pass everything (for example a regex that matches any signer) | Revert the edit; the test names the mutation that was wrongly admitted |
+| test → `test_allowlist_verdicts` / `test_provenance_policy_matches_the_deploy_gate` | The allowlist or the signer rules changed | Make `deploy/policies/` and `scripts/verify-image.sh` agree again |
 | test → other `test_deploy_gate.py` tests | `deploy.sh` or `verify-image.sh` lost a check | Read the failing case: each one names the image that must be refused |
+| k8s → Lint and schema-validate | A chart manifest or a policy in `deploy/policies/` fails its schema | Run the step's `kubeconform` command locally; the error names the field |
+| k8s → admission checks | `was ADMITTED, expected refused` (the policy isn't enforcing), `was refused, expected admitted` (the release no longer verifies in-cluster: often no network to Sigstore), `not by the provenance policy` (Pod Security or a manifest error), or no allowlist reports | `scripts/admission-check.sh` against kind; `kubectl -n kyverno logs deploy/kyverno-admission-controller` |
 | k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready); `load too light` (CPU never got 10% past the target: raise the drill's `RATE`); or no scale-up despite high CPU (a real HPA problem) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
 | k8s → drill | Deploy, promotion or rollback broke | `scripts/cluster.sh up && docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh`; diagnostics print on failure |
 
@@ -440,6 +485,9 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Autoscaling drill only | `scripts/hpa-drill.sh` (`RATE=1500 DURATION=240s` for a longer push) |
 | Watch autoscaling | `kubectl -n prod get hpa shortly -w` |
 | Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 scripts/cluster.sh up` |
+| Create without Kyverno and the admission policies | `POLICIES=0 scripts/cluster.sh up` |
+| Admission checks only | `scripts/admission-check.sh` (server-side dry runs; creates nothing) |
+| Admission policies and their state | `kubectl get imagevalidatingpolicy,validatingpolicy`; reports: `kubectl get policyreport -A` |
 | Prometheus UI (targets, rules, alerts) | `kubectl -n monitoring port-forward svc/kps-prometheus 9090` → http://localhost:9090 |
 | Alertmanager UI (routing, silences) | `kubectl -n monitoring port-forward svc/kps-alertmanager 9093` → http://localhost:9093 |
 | Grafana (dashboard "shortly / SLOs") | `kubectl -n monitoring port-forward svc/grafana 3000:80` → http://localhost:3000, user `admin` |
@@ -450,7 +498,7 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Which image is running | `kubectl -n prod get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}'` |
 | Uninstall the app only | `helm -n prod uninstall shortly` (data stays in the PVC) |
 
-`cluster.sh up` installs metrics-server (pinned, checksum-verified, `--kubelet-insecure-tls` for kind only) and kube-prometheus-stack (pinned by version and digest, values in `deploy/kind/monitoring-values.yaml`, namespace `monitoring` at the `baseline` Pod Security level), creates the `staging` and `prod` namespaces enforcing the restricted Pod Security Standard, generates a random password per namespace into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`. It never overwrites existing Secrets.
+`cluster.sh up` installs metrics-server (pinned, checksum-verified, `--kubelet-insecure-tls` for kind only), kube-prometheus-stack (pinned by version and digest, values in `deploy/kind/monitoring-values.yaml`, namespace `monitoring` at the `baseline` Pod Security level), and Kyverno (pinned by version and digest, values in `deploy/kind/kyverno-values.yaml`, namespace `kyverno` at `restricted`) with the policies in `deploy/policies/`. It then creates the `staging` and `prod` namespaces enforcing the restricted Pod Security Standard, generates a random password per namespace into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`. It never overwrites existing Secrets.
 
 Without a cluster, the fastest full-stack check is Docker Compose: `docker compose --profile app up -d --build --wait && scripts/smoke.sh`.
 
