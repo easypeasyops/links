@@ -42,7 +42,11 @@ jobs:
         run: uv run mypy src tests
 
       - name: Test
-        run: uv run pytest --cov-fail-under=90  
+        run: uv run pytest --cov-fail-under=90
+        env:
+          # gh verifies the released image's provenance (tests/test_deploy_gate.py); the
+          # read-only token is enough: the attestation bundle comes from the registry.
+          GH_TOKEN: ${{ github.token }}
   image:
     name: build, scan, smoke-test image
     runs-on: ubuntu-latest

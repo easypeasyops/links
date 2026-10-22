@@ -111,6 +111,8 @@ helm -n prod history shortly                                   # what can I roll
 helm -n prod rollback shortly <revision>
 ```
 
+`deploy.sh` refuses a digest unless its signed provenance shows it was built by this repo's
+`release.yml` from a release tag (`scripts/verify-image.sh`); tags deploy only to kind.
 A failed rollout rolls back automatically (`--rollback-on-failure`); `maxUnavailable: 0`
 keeps old pods serving throughout. Namespaces enforce the **restricted** Pod Security
 Standard. `scripts/k8s-e2e.sh` (run in CI on every PR) deploys, promotes, breaks a release

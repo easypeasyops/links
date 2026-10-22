@@ -317,7 +317,16 @@ One Helm chart (`deploy/helm/shortly`, Helm 4) deploys the same image digest to 
 | Log level | DEBUG | INFO |
 | Requests / memory limit | 25m CPU, 96Mi / 192Mi | 500m CPU, 128Mi / 256Mi |
 
-**Build once, deploy many.** `scripts/deploy.sh <env> <image-ref>` takes a digest reference (`repo@sha256:…`) for released images; the bits tested in staging are the bits promoted to prod. A tag reference is accepted for local images and is loaded into kind first. The chart refuses to render with neither digest nor tag.
+**Build once, deploy many.** `scripts/deploy.sh <env> <image-ref>` takes a digest reference (`repo@sha256:…`) for released images; the bits tested in staging are the bits promoted to prod. A tag reference is accepted only on a `kind-*` context, for local images, which are loaded into kind first. The chart refuses to render with neither digest nor tag.
+
+**Provenance gate.** Before deploying a digest, `deploy.sh` runs `scripts/verify-image.sh`, which checks the image's signed SLSA provenance with `gh attestation verify`. The deploy is refused unless:
+
+- the signature chains to Sigstore and the GitHub Actions OIDC issuer;
+- the signer is this repo's `release.yml`, not CI and not a fork;
+- the build ran from a `refs/tags/v*` ref, not a branch;
+- the attestation's subject is exactly this digest.
+
+The attestation bundle is read from the registry (`--bundle-from-oci`), so the check doesn't depend on GitHub's API. It fails closed: no `gh`, no network or no attestation means no deploy. The break-glass flag `INSECURE_SKIP_VERIFY=1` skips the check with a loud warning, for when the registry or Sigstore is down mid-incident. `tests/test_deploy_gate.py` runs `deploy.sh` against stub tools and asserts that helm is never called for a refused image. It also verifies the release digest the runbook documents, against the real registry.
 
 **Rollout.** `helm upgrade --install --rollback-on-failure --wait --timeout 3m`. `RollingUpdate` with `maxUnavailable: 0, maxSurge: 1` never drops below desired capacity: a new pod that never becomes ready stalls the rollout while old pods keep serving, Helm times out and rolls back. The drill measures this: 0 failed requests through the Service during a broken rollout.
 
@@ -426,7 +435,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Log injection / log flooding via headers | `x-request-id` accepted only if `[A-Za-z0-9._-]{1,64}`; JSON encoding escapes everything else |
 | Host-header spoofing in generated links | `short_url` built from configured `base_url` only |
 | Compromised dependency or base image | Lockfile with hashes, digest-pinned bases, Trivy gate on every PR and before publish, weekly Dependabot |
-| Tampered or substituted image | Deploy by digest; signed SLSA provenance verifiable against repo, tag and workflow |
+| Tampered or substituted image | Deploy by digest; `deploy.sh` refuses any digest whose signed SLSA provenance isn't from this repo's `release.yml` at a release tag |
 | Compromised CI action | Actions pinned by SHA; workflow `permissions` least-privilege; `persist-credentials: false` |
 | Container escape / lateral movement | Non-root, read-only root FS, no capabilities, seccomp, no SA token, restricted PSS enforced |
 | App rewriting its own code | Code and venv owned by root, read-only to UID 10001 |
@@ -451,6 +460,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | DB tracing | psycopg instrumentation | SQLAlchemy instrumentation | SQLAlchemy instrumentation no-ops on 2.1 |
 | Metric labels | Route template | Raw path | Bounded cardinality |
 | Image tags | Semver + digest, no `latest` | `latest` | "What is in prod?" must be answerable |
+| Provenance check | In `deploy.sh`, failing closed, with a break-glass flag | Manual checking only; admission control first | Cheap, and protects the normal path today; in-cluster admission is the next layer |
 | Deploy target (now) | Local kind, staging + prod namespaces | Cloud cluster; PaaS | Free, realistic, chart portable to EKS/GKE |
 | Rollback | Helm `--rollback-on-failure` + rehearsed `helm rollback` | Manual only | Tested on every PR |
 | Alerting | Multi-window burn-rate alerts on SLOs, plus a few cause-based alerts | Threshold alerts on error rate or latency | Pages scale with user impact: a 1-minute blip doesn't page, a slow leak still opens a ticket |
@@ -483,7 +493,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - No rate limiting or URL reputation checks: shortly can be used to mask phishing links.
 - No link deletion or expiry cleanup; expired rows stay in the table.
 - `/metrics` is on the public port; no NetworkPolicy restricts it.
-- Provenance is verified by hand; nothing stops `deploy.sh` or the cluster from running an unverified image.
+- Provenance is enforced by `deploy.sh`, not by the cluster: `helm` or `kubectl` run by hand can still start an unverified image, and the `INSECURE_SKIP_VERIFY=1` break glass leaves no record beyond the deploy log.
 - CPU overload is not shed: past capacity, requests queue until the HPA catches up or `maxReplicas` is reached.
 - A request holding a connection to a hung (not dead) database has no client-side timeout.
 - Capacity was measured on a small, in-memory dataset; Postgres cost per request will rise with table size.
@@ -495,7 +505,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 
 **Next steps, in rough priority order**
 
-1. Enforce provenance: `deploy.sh` runs the strict `gh attestation verify`; Kyverno or Sigstore policy-controller in-cluster.
+1. Enforce provenance in the cluster: an admission policy (Kyverno or Sigstore policy-controller) that rejects pods whose image lacks this repo's release attestation, so hand-run `helm` or `kubectl` can't bypass the deploy gate.
 2. Rate limiting per client on `POST /links`; Safe Browsing check on targets.
 3. Move `/metrics` to a separate port; add a NetworkPolicy.
 4. Expired-link cleanup job and an index on `expires_at`.
