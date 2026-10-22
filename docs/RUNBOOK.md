@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-21 for v0.2.0 / chart 0.3.0. Mirrored at
+> Last updated 2026-10-21 for v0.2.0 plus unreleased rate limiting on main / chart 0.4.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 

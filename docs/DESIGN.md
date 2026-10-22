@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-21 for v0.2.0 / chart 0.3.0. Mirrored at
+> Last updated 2026-10-21 for v0.2.0 plus unreleased rate limiting on main / chart 0.4.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -24,7 +24,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.2.0 and chart 0.3.0: the capacity work (autocommit, load shedding, HPA), and SLOs with burn-rate alerts delivered through kube-prometheus-stack. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.2.0 plus main (chart 0.4.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, and per-client rate limiting (not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -440,6 +440,15 @@ The measuring host had 2 cores and about 14% steal, so treat the figures as ±15
 | 350 | 1,563 ms FAIL | 1,489 ms FAIL |
 
 CPU per request fell from 2.6–2.9 ms to 2.0–2.3 ms.
+
+**With the rate limiter** (one pod, 1 CPU, same host; three alternating runs per image, every step PASS; creates came from random synthetic clients, so every create did the extra upsert and none was refused):
+
+| Offered req/s | Before: CPU ms/req | Rate limit: CPU ms/req | Change |
+| --- | --- | --- | --- |
+| 250 | 2.09 / 2.13 / 2.09 | 2.27 / 2.19 / 2.07 | +4% |
+| 300 | 1.95 / 1.95 / 1.91 | 2.05 / 2.07 / 2.05 | +6% |
+
+Only creates (10% of the mix) pay for the extra query, so the cost is small, and the sizing below is unchanged. One run per step was not enough to tell: the first single runs showed a FAIL at 200 req/s for one image and at 100 req/s for the other, each from one latency spike that the repeats didn't reproduce. Repeat a step before believing a single FAIL on this host.
 
 **Findings**
 
