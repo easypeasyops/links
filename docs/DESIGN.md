@@ -309,7 +309,7 @@ CREATE TABLE rate_limits (    -- GCRA state (see Rate limiting); short-lived row
 | Never a full table scan | The query walks the partial index; a test asserts the planner can use it for exactly this query |
 | Failure is visible | No metrics to push: kube-state-metrics reports the CronJob's last success, and `ShortlyCleanupNotRunning` opens a ticket after 3 missed hours. Each run logs one JSON line (`deleted`, `batches`, `complete`, `duration_ms`) |
 
-The Job runs the release image, so Kyverno verifies its provenance (CronJob templates are checked too), and it runs under the restricted Pod Security Standard. Its pods carry their own labels (`app.kubernetes.io/name: shortly-cleanup`), not the app's selector labels: a pod matching those would be counted by the HPA, skewing average CPU, and by the PodDisruptionBudget. A NetworkPolicy of its own lets it reach only DNS and the database. Postgres accepts `app.kubernetes.io/part-of: shortly`, now on every pod of the chart, as well as the old `name` label during the transition.
+The Job runs the release image, so Kyverno verifies its provenance (CronJob templates are checked too), and it runs under the restricted Pod Security Standard. Its pods carry their own labels (`app.kubernetes.io/name: shortly-cleanup`), not the app's selector labels: a pod matching those would be counted by the HPA, skewing average CPU, and by the PodDisruptionBudget. A NetworkPolicy of its own lets it reach only DNS and the database. Postgres accepts `app.kubernetes.io/part-of: shortly`, which every pod of the chart carries. The label change was done expand/contract, like a schema change: chart 0.6.0 added `part-of` while Postgres still accepted the old `name` label too, and the old peer was removed once no older release ran.
 
 **The index was built CONCURRENTLY.** A plain `CREATE INDEX` blocks every write to the table until it finishes, which on a large table is an outage. `CONCURRENTLY` cannot run in a transaction, so the migration uses Alembic's `autocommit_block()`. A concurrent build that fails leaves an *invalid* index behind, which `IF NOT EXISTS` would then silently keep, so the migration drops an invalid one before building. The e2e checks that the index is valid after the real migration Job ran.
 
@@ -671,15 +671,15 @@ The probes, and `/metrics`, never wait in the request threadpool. FastAPI runs s
 | --- | --- | --- | --- |
 | Anyone (`networkPolicy.httpFrom`; on a real cluster, the ingress) | shortly | 8000 | The public API |
 | Prometheus pods in `monitoring` | shortly | 9100 | Scrapes; nobody else sees internal metrics |
-| shortly (app and migration Job) | kube-dns | 53 UDP/TCP | Name resolution |
-| shortly (app and migration Job) | postgres | 5432 | The only dependency, in both directions |
+| shortly (app, migration and cleanup Jobs) | kube-dns | 53 UDP/TCP | Name resolution |
+| shortly (pods labelled `app.kubernetes.io/part-of: shortly`) | postgres | 5432 | The only dependency, in both directions |
 | Anything else | any pod in `staging` or `prod` | any | Refused: default-deny ingress |
 
 The app's egress is closed too: it can reach DNS and the database, nothing else. A dependency added later (an OpenTelemetry collector, a URL reputation API) needs an explicit `networkPolicy.extraEgress` rule, which a reviewer sees. Kubelet probes and `kubectl port-forward` don't go through these rules. Postgres's own egress stays open, because the e2e uses `postgres-0` as an in-cluster client.
 
 NetworkPolicy is only as good as the CNI that enforces it. A CNI that ignores it accepts the objects without a word, and every allowed path still works. So e2e step 9 tests the refusals, each next to a control that succeeds from the same place:
 - `postgres-0` reaches the app port but is refused on the metrics port.
-- A pod labelled as shortly reaches Postgres; a stranger pod is refused.
+- A pod labelled `part-of: shortly` reaches Postgres; a stranger pod is refused, and so is a pod with only the old `name: shortly` label.
 
 The allowed paths are proven by the steps before it, including Prometheus scraping port 9100.
 
@@ -863,7 +863,6 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - The rate limit is per IP address, so it is no defence against many addresses (a botnet), and it groups users behind one NAT. With accounts, it would be per user.
 - In kind, prod trusts `X-Forwarded-For` from every pod, so any pod there can choose its client address.
 - No way for a user to delete a link; links without a TTL live forever.
-- The Postgres policy still accepts the old `app.kubernetes.io/name: shortly` label beside `part-of: shortly`. Drop it (the contract step) once no pod from chart 0.5.0 or older runs.
 - Postgres's egress is open (the e2e uses its pod as an in-cluster client), and the app port accepts any pod: on a real cluster, `networkPolicy.httpFrom` should name the ingress.
 - The image allowlist is Audit-only in kind, so a non-shortly image can still run in the app namespaces; it is reported, not refused.
 - Provenance is checked when a pod is admitted, not continuously: a policy change doesn't evict running pods.
