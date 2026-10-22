@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-22 for v0.4.0 plus unreleased expired-link cleanup on main / chart 0.6.0. Mirrored at
+> Last updated 2026-10-22 for v0.5.0 / chart 0.6.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -12,7 +12,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | --- | --- |
 | Repo | [github.com/statsguy/shortly](https://github.com/statsguy/shortly) |
 | Image | `ghcr.io/statsguy/shortly` — deploy by digest, never by tag |
-| Current release | v0.4.0, `sha256:100407b77ff7217d1b4ca65d15ed509aefbe10f676c72e7e658bbb8cef1626d4` (previous: v0.3.0, `sha256:bf179906ca03418e41b4923fcf5e8ccf33dd8ddbf22135f5cc0d6268d280eba3`) |
+| Current release | v0.5.0, `sha256:4b855e2fb8875ee3622d5f5a5054d1d8105e715eacc6a9c6a1be0a023556bad6` (previous: v0.4.0, `sha256:100407b77ff7217d1b4ca65d15ed509aefbe10f676c72e7e658bbb8cef1626d4`) |
 | Environments | kind cluster `shortly`; namespaces `staging` (1 replica), `prod` (HPA, 2–4 replicas) |
 | Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
