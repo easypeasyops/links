@@ -6,7 +6,8 @@
 must stay true. Any PR that changes behaviour they describe updates them **in the same PR**:
 
 - API, status codes, config variables, metrics, logs, traces → DESIGN
-- CI jobs, release or deploy steps, scripts, chart values, probes, rollback → both
+- CI jobs, release or deploy steps, scripts, chart values, probes, rollback, admission
+  policies → both
 - A new failure mode, or an incident and its new guard → DESIGN (failure modes /
   issues table) and RUNBOOK (playbook)
 - Version, digest or chart version in the headers and Quick reference → RUNBOOK
@@ -25,4 +26,6 @@ the one reviewed with the code.
 - `uv run pytest` (needs Docker for integration tests); CI enforces `--cov-fail-under=90`.
 - Python version lives in `.python-version` and both Dockerfile `FROM` lines; change them together.
 - Deploy by digest: `scripts/deploy.sh <env> ghcr.io/statsguy/shortly@sha256:…`.
+- `deploy/policies/` (Kyverno) and `scripts/verify-image.sh` enforce the same provenance rules;
+  change them together (`tests/test_admission_policies.py` checks they agree).
 - Migrations follow expand / deploy / contract; every revision has a working `downgrade()`.

@@ -4,6 +4,7 @@
 #
 #   scripts/cluster.sh up              # idempotent
 #   MONITORING=0 scripts/cluster.sh up # skip kube-prometheus-stack (saves ~1 GB of RAM)
+#   POLICIES=0 scripts/cluster.sh up   # skip Kyverno and the admission policies
 #   scripts/cluster.sh down
 set -euo pipefail
 
@@ -19,6 +20,11 @@ METRICS_SERVER_SHA256=1cec29a5267809306a2c6ec74a3e449abbb705b4a8beed0c8a1963910f
 MONITORING_CHART=oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
 MONITORING_VERSION=91.9.0
 MONITORING_DIGEST=sha256:04047e500c803dc8d2bc284ecb43e9229bb32b5c36bd13fc89592c8a2f3cdc72
+# Kyverno enforces deploy/policies/ at admission (release provenance, image allowlist).
+# Chart 3.9.1 = Kyverno v1.19.1, the engine tests/test_admission_policies.py runs.
+KYVERNO_CHART=oci://ghcr.io/kyverno/charts/kyverno
+KYVERNO_VERSION=3.9.1
+KYVERNO_DIGEST=sha256:720542b97bdbc2633535c2297332690d21cfbb944053eb1ec1f0dbe8e3895444
 
 up() {
   if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
@@ -29,6 +35,8 @@ up() {
   # Before the app namespaces: the shortly chart's ServiceMonitor and PrometheusRule need
   # the stack's CRDs to exist.
   if [[ "${MONITORING:-1}" != 0 ]]; then install_monitoring; fi
+  # Before any app pod: from here on, the API server refuses unverified shortly images.
+  if [[ "${POLICIES:-1}" != 0 ]]; then install_policies; fi
 
   for ns in "${ENVS[@]}"; do
     kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -87,6 +95,28 @@ install_monitoring() {
     --version "$MONITORING_VERSION" --namespace monitoring \
     --values "$ROOT/deploy/kind/monitoring-values.yaml" --wait --timeout 10m >/dev/null
   echo "monitoring ready: kube-prometheus-stack $MONITORING_VERSION in namespace monitoring"
+}
+
+install_policies() {
+  kubectl create namespace kyverno --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl label namespace kyverno --overwrite pod-security.kubernetes.io/enforce=restricted >/dev/null
+  helm upgrade --install kyverno "$KYVERNO_CHART@$KYVERNO_DIGEST" \
+    --version "$KYVERNO_VERSION" --namespace kyverno \
+    --values "$ROOT/deploy/kind/kyverno-values.yaml" --wait --timeout 10m >/dev/null
+  # helm --wait can return before Kyverno's own webhook (which validates the policies we're
+  # about to apply) is serving: wait for the rollout, then retry the apply until it answers.
+  kubectl -n kyverno rollout status deploy/kyverno-admission-controller --timeout=180s >/dev/null
+  for i in $(seq 1 30); do
+    kubectl apply -f "$ROOT/deploy/policies/" >/dev/null 2>/tmp/kyverno-apply.err && break
+    ((i < 30)) || { cat /tmp/kyverno-apply.err >&2; exit 1; }
+    sleep 4
+  done
+  # A policy only protects once Kyverno has compiled it and registered its webhook.
+  for kind in imagevalidatingpolicy validatingpolicy; do
+    kubectl wait "$kind" --all --for=jsonpath='{.status.conditionStatus.ready}'=true \
+      --timeout=120s >/dev/null
+  done
+  echo "policies ready: Kyverno $KYVERNO_VERSION, $(ls "$ROOT"/deploy/policies/*.yaml | wc -l | tr -d ' ') policies"
 }
 
 down() {
