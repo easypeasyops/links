@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-22 for v0.5.0 / chart 0.6.0.
+> Last updated 2026-10-22 for v0.5.0 plus unreleased overload protection on main / chart 0.7.0.
 > Expanded request data-flow and CI/CD "why each piece" sections. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
@@ -25,7 +25,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.5.0 and chart 0.6.0: the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, and expired-link cleanup. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.5.0 plus main (chart 0.7.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, and overload protection (a concurrency limit and database timeouts; not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -236,7 +236,15 @@ The HTTP layer only parses input, calls the service and maps outcomes to status 
 | `GET /readyz` | 200 | 503 when the DB ping fails | Readiness: can this pod take traffic. The ping runs on its own one-thread limiter, not the request threadpool |
 | `GET /metrics` (port 9100) | 200, Prometheus text | — | On its own port (`SHORTLY_METRICS_PORT`), served from its own thread, so a scrape never waits behind requests. Only Prometheus may reach it (NetworkPolicy). The app port answers 404 |
 
-Any endpoint that touches the database returns **503 with `Retry-After: 1`** when no pooled connection frees up within `SHORTLY_DB_POOL_TIMEOUT_SECONDS`. The store raises `StoreBusyError` (overload, not failure), and the API maps it in one place and counts it in `load_shed_total`.
+**503 with `Retry-After: 1`** means overload, not failure. A request gets it in three cases, each counted in `load_shed_total` under its own `reason`:
+
+| `reason` | When | Where |
+| --- | --- | --- |
+| `concurrency` | The pod already has `SHORTLY_MAX_CONCURRENT_REQUESTS` requests in flight | `ConcurrencyLimitMiddleware`, before any work: answered in about 1 ms |
+| `pool` | No pooled connection frees up within `SHORTLY_DB_POOL_TIMEOUT_SECONDS` | The store raises `StoreBusyError` |
+| `db_timeout` | Postgres cancelled a statement after `SHORTLY_DB_STATEMENT_TIMEOUT_MS`, or a lock wait after `SHORTLY_DB_LOCK_TIMEOUT_MS` | The store maps the cancel to `StoreBusyError` |
+
+A shed request still goes through the request middleware, so it has a request ID and an access log line, and it is labelled with its route template. A shed redirect is therefore a 503 on `route="/{code}"` and burns the availability SLO: shedding protects latency, it doesn't hide failures. Probes and `/metrics` are never shed.
 
 ### Rate limiting
 
@@ -335,6 +343,8 @@ All configuration comes from environment variables, parsed by `pydantic-settings
 | `SHORTLY_BASE_URL` | `http://localhost:8000` | Public base for `short_url` |
 | `SHORTLY_DB_POOL_SIZE` | `5` | Connections per pod (fixed, no overflow) |
 | `SHORTLY_DB_POOL_TIMEOUT_SECONDS` | `1.0` | Longest wait for a pooled connection before a 503 |
+| `SHORTLY_DB_STATEMENT_TIMEOUT_MS` / `SHORTLY_DB_LOCK_TIMEOUT_MS` | `2000` / `1000` | Postgres cancels a statement running, or a lock wait lasting, longer than this; the request gets a 503. `0` = off. Migrations have none; the cleanup Job uses 30 s |
+| `SHORTLY_MAX_CONCURRENT_REQUESTS` | `16` | Requests one pod works on at once; more get a 503 at once (see Capacity). `0` = no limit |
 | `SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE` | `60` | Sustained `POST /links` rate per client; `0` turns limiting off |
 | `SHORTLY_RATE_LIMIT_BURST` | `20` | Creates a quiet client may make at once |
 | `SHORTLY_CLEANUP_GRACE_DAYS` | `7` | Cleanup keeps links that expired less than this long ago (they still answer 410) |
@@ -371,7 +381,8 @@ Probe and scrape requests (`/healthz`, `/readyz`, `/metrics`) log at DEBUG so th
 | `code_collisions_total` | counter | — | A rising rate means codes need to get longer |
 | `db_pool_size` | gauge | — | Configured connections per pod |
 | `db_pool_in_use` | gauge | — | Connections checked out now; near `db_pool_size` means the pool is the bottleneck |
-| `load_shed_total` | counter | — | Requests rejected with 503 because the backend was saturated |
+| `load_shed_total` | counter | reason = concurrency, pool, db_timeout | Requests rejected with 503 because the pod or the database was saturated |
+| `requests_in_flight` | gauge | — | Requests the pod is working on now (probes excluded); at `SHORTLY_MAX_CONCURRENT_REQUESTS`, it sheds |
 | `rate_limited_total` | counter | — | `POST /links` refused with 429: the client was over its limit. No client label: one series per address would be unbounded |
 
 **Cardinality rule.** The `route` label is the route template (`/{code}`), never the raw path. Raw paths would create one time series per link ever made. A test asserts that 50 distinct codes produce one series; unmatched paths share `route="unmatched"`.
@@ -414,7 +425,7 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 | `ShortlyDown` | page | No pod scraped means no traffic data; every ratio is empty and no burn-rate alert can fire |
 | `ShortlyNoAvailablePods` | page | One environment with zero pods produces no metrics of its own, while another environment keeps `up` non-empty; this uses kube-state-metrics |
 | `ShortlyNotReady` | page | Pods out of rotation fail requests at the load balancer, which the app never counts |
-| `ShortlyLoadShedding` | ticket | It burns the budget too, but this alert names the cause: the DB pool is exhausted |
+| `ShortlyLoadShedding` | ticket | It burns the budget too, but this alert names the cause: one alert per `reason` (`concurrency`: traffic above what the pods serve; `pool` or `db_timeout`: a slow database) |
 | `ShortlyAtMaxReplicas` | ticket | The HPA has no headroom left; uses kube-state-metrics |
 | `ShortlyCleanupNotRunning` | ticket | The cleanup CronJob's last success is over 3 hours old, or it has never succeeded; uses kube-state-metrics |
 | `ShortlyRateLimiting` | ticket | Over 10% of creates refused with 429 for 30 minutes: abuse, or a limit too tight for real users. 429s never burn the SLO, so without this a bad limit would be invisible |
@@ -703,8 +714,10 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | Code collisions rising | Transparent retries (up to 5); then 503 | `rate(code_collisions_total[1h])` |
 | Code space exhausted (5 collisions in a row) | `POST /links` 503 | 503s on `route="/links"` |
 | Invalid config | Process exits at boot with a validation error | CrashLoopBackOff; first log line names the field |
-| Database slow or hung | Requests holding connections wait on it; all others wait at most 1 s for a connection, then get **503 + `Retry-After`** instead of queueing for 30 s | `load_shed_total` rising, `db_pool_in_use` = `db_pool_size`, 503s on all DB routes |
-| Load above capacity (CPU) | Latency rises with no errors (requests queue in the threadpool); probes and scrapes still answer, so pods are neither restarted nor pulled; HPA adds pods within about a minute, up to `maxReplicas` | p99 up, HPA `desiredReplicas` rising or pinned at max |
+| Database slow (slow queries, lock contention) | Postgres cancels a statement after 2 s, or a lock wait after 1 s; that request gets **503 + `Retry-After`** and its connection goes back to the pool | `load_shed_total{reason="db_timeout"}` rising |
+| Database unreachable (host lost, network partition) | New connections give up after 3 s; open ones are declared dead by TCP keepalives and `tcp_user_timeout` within about 10–25 s, not the kernel's ~15 min | Connection errors in logs; `/readyz` 503, so pods leave the Service |
+| Database frozen (process stopped, kernel still answers TCP) | Requests holding connections wait until it resumes; all others get a 503 after at most 1 s waiting for a connection | `load_shed_total{reason="pool"}` rising, `db_pool_in_use` = `db_pool_size` |
+| Load above capacity (CPU) | Each pod works on at most 16 requests at once and answers the rest **503 + `Retry-After`** in about 1 ms, so admitted requests stay fast; probes and scrapes still answer; HPA adds pods within about a minute, up to `maxReplicas` | `load_shed_total{reason="concurrency"}`, `requests_in_flight` at the limit, HPA `desiredReplicas` rising or pinned at max |
 | Every pod down, or not scraped | No metrics at all, so the SLO ratios are empty and no burn-rate alert can fire | `ShortlyDown` (from `up`, not from app metrics) |
 | Kyverno down (admission webhook unreachable) | The API server refuses **every** new Pod in `staging` and `prod`, Postgres and k6 included, because the webhook fails closed; running pods keep serving | `kubectl apply` / `helm upgrade` errors naming `kyverno-svc`; Deployments stuck below desired replicas |
 | Registry or Sigstore (Rekor, TUF) unreachable | New shortly pods are refused (verification can't run); other images and running pods unaffected | Admission errors naming the provenance policy |
@@ -773,8 +786,18 @@ Only creates (10% of the mix) pay for the extra query, so the cost is small, and
 
 **Overload behaviour.**
 
-- **Database slow or hung.** Verified by pausing Postgres under load. The requests already holding the pool's 5 connections hung until it resumed. Every other request got a 503 in 1.0 s, and the service recovered by itself on resume.
-- **CPU saturated.** These requests are not shed: they queue in the threadpool. The HPA is the defence. A concurrency limit that returns 503 is future work.
+- **Database frozen.** Verified by pausing Postgres under load. The requests already holding the pool's 5 connections hung until it resumed. Every other request got a 503 in 1.0 s, and the service recovered by itself on resume. Statement and lock timeouts don't help here, because a frozen server cancels nothing; they cover a database that is slow rather than stopped (integration tests: a `pg_sleep(5)` is cancelled at 0.2 s, and a create blocked on another session's uncommitted row gives up after the lock timeout instead of being mistaken for a collision).
+- **CPU saturated: shed, don't queue.** Without a limit, a pod past capacity doesn't fail; it queues, and every request waits behind the ones before it. One pod (1 CPU), same mix, with and without the concurrency limit:
+
+  | Offered | Limit | Goodput (req/s) | p99 of successful redirects | Shed (503) |
+  | --- | --- | --- | --- | --- |
+  | 300 req/s | none / 16 | 300 / 300 | 15 ms / 10 ms | 0% / 0% |
+  | 500 req/s | none / 16 | 496 / 483 | 470 ms / 65 ms | 0% / 3% |
+  | 800 req/s | none / 16 | 518 / 412 | **1,929 ms** / **108 ms** | 0% / 48% |
+  | 1,200 req/s | none / 16 | 527 / 369 | **5,736 ms** / **131 ms** | 0% / 68% |
+
+  Without a limit, every request at 800 req/s took about 1.7 s, so a client with a 1 s timeout would have got almost nothing. With the limit, about 400 req/s succeed quickly and the rest get an immediate 503 they can retry on another pod. Shedding isn't free: each 503 still costs some CPU, so raw goodput falls by about 20–30% at heavy overload. Limits of 16, 32 and 64 were measured. 16 had by far the lowest latency (successful p99 108 ms at 800 req/s, against 209 and 358), and its goodput was within 2% of the best at every step (at 800 req/s: 412, against 389 for 32 and 420 for 64; at 1,200 req/s it was the highest). By Little's law a pod at its HPA target has under one request in flight, and about five even at ten times normal latency, so 16 sheds only real overload. `requests_in_flight` shows how close real pods get.
+- **CPU overload is the HPA's job, the limit only buys time.** Shedding keeps the pods that exist fast while the HPA adds more (30–60 s). It doesn't add capacity, and at `maxReplicas` it is what users see.
 - **CI coverage.** `scripts/hpa-drill.sh` runs in CI and proves the HPA adds pods under load; it stops the load once the first new pod is ready. It does not measure capacity.
 
 **Autoscaling, first CI run (PR #11).** 600 req/s from inside the cluster against 2 pods:
@@ -814,6 +837,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Storage access | SQLAlchemy Core, sync, psycopg 3 | ORM; async driver | One table; sync in threadpool is simple. The load test shows a CPU ceiling, which an async driver would not raise |
 | Transactions | Autocommit for the app; transactions for migrations | Implicit transaction per request | Every app query is one atomic statement; saves 2 round trips per request (about +25% capacity) |
 | Pool | Fixed size 5, no overflow, 1 s timeout → 503 | SQLAlchemy defaults (overflow 10, 30 s wait) | Known Postgres connection budget; overload fails fast instead of piling up |
+| Overload | A per-pod in-flight limit (16) that answers 503 at once; statement (2 s) and lock (1 s) timeouts in Postgres | Unbounded queueing; a request timeout that abandons the response but not the work; an adaptive limit (TCP Vegas, gradient); limiting only at the ingress | Measured: latency of what succeeds stays near 100 ms instead of seconds. A request timeout frees the client but leaves the thread and connection busy. Adaptive limits fit better when capacity varies; ours is measured and stable, so a fixed limit is simpler to reason about and test |
 | Expired-link cleanup | A CronJob running bounded, autocommitted batches with `SKIP LOCKED`, through a partial index | Postgres partitioning by expiry month (drop whole partitions); `pg_cron`; deleting on read | Small and testable with what we already run. Partitioning is the scale answer, but it needs every query and the primary key reworked. `pg_cron` is unavailable on most managed Postgres plans without extensions. Deleting on read leaves never-read links forever |
 | Metrics port and network policy | `/metrics` on port 9100, own thread; NetworkPolicies with default-deny ingress and closed app egress | `/metrics` on the app port behind auth; policies only in a real cluster | One rule keeps internal data off the public API, and the scrape can't queue behind requests. Policies tested in kind catch an unenforcing CNI before prod would |
 | Rate limiting | GCRA, state in Postgres, per client IP (IPv6 /64), creates only | Per-pod in-memory counters; Redis; fixed-window counters; limiting at the ingress only | Exact across replicas with one upsert and no new service; no window-edge bursts. Ingress limits are usually per ingress replica and untested by the app's suite; coarse flood protection at the edge can still be added on top |
@@ -868,8 +892,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - Provenance is checked when a pod is admitted, not continuously: a policy change doesn't evict running pods.
 - One Kyverno admission replica: while it restarts, no Pod can be created in `staging` or `prod`. A real cluster needs 3.
 - The `INSECURE_SKIP_VERIFY=1` break glass only skips `deploy.sh`'s check; admission still applies. Bypassing it means removing the policy (cluster-admin), which leaves no record beyond the API server's audit log.
-- CPU overload is not shed: past capacity, requests queue until the HPA catches up or `maxReplicas` is reached.
-- A request holding a connection to a hung (not dead) database has no client-side timeout.
+- A database that is frozen but still answers TCP (a stopped process) holds the requests already using its connections until it resumes; nothing on the client can tell that apart from a slow query. Everything else is shed after 1 s.
+- The concurrency limit is fixed and per pod. A pod on slower hardware reaches it sooner; an adaptive limit would follow capacity, at the cost of being harder to predict.
 - Capacity was measured on a small, in-memory dataset; Postgres cost per request will rise with table size.
 - Alert receivers are placeholders: alerts are routed but not delivered to a person (no PagerDuty or Slack integration).
 - Prometheus keeps 2 days of data in kind and has no persistent volume, so 30-day error budgets reset when its pod restarts.
@@ -879,9 +903,10 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 
 **Next steps, in rough priority order**
 
-1. URL reputation check on targets (Google Safe Browsing or similar).
-2. A concurrency limit that sheds CPU overload; a statement or socket timeout for a hung database.
-3. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
+1. Postgres backups, and a restore drill in CI that proves they restore.
+2. Canary releases gated on the SLO metrics (Argo Rollouts).
+3. URL reputation check on targets (Google Safe Browsing or similar).
+4. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
 
 **Open questions**
 

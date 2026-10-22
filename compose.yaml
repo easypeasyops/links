@@ -32,6 +32,7 @@ services:
       SHORTLY_DATABASE_URL: postgresql://shortly:dev@postgres:5432/shortly
       SHORTLY_BASE_URL: http://localhost:8000
       SHORTLY_DB_POOL_SIZE: ${SHORTLY_DB_POOL_SIZE:-5} # load tests vary this
+      SHORTLY_MAX_CONCURRENT_REQUESTS: ${SHORTLY_MAX_CONCURRENT_REQUESTS:-16} # and this
       # scripts/loadtest.sh's k6 stands in for an ingress and sends X-Forwarded-For to
       # simulate many clients, so the compose network is trusted. Local use only.
       FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-*}

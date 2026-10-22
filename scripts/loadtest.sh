@@ -32,9 +32,10 @@ cpu_usec() {
 
 mkdir -p "$ROOT/loadtest/results"
 out="$ROOT/loadtest/results/$(date -u +%Y%m%dT%H%M%SZ)-cpus${APP_CPUS}.csv"
-echo "target_rps,achieved_rps,redirect_p50_ms,redirect_p95_ms,redirect_p99_ms,create_p99_ms,error_rate,dropped,cores_used,cpu_ms_per_req,pass" >"$out"
+echo "target_rps,achieved_rps,redirect_p50_ms,redirect_p95_ms,redirect_p99_ms,create_p99_ms,error_rate,dropped,cores_used,cpu_ms_per_req,pass,goodput_rps,ok_redirect_p50_ms,ok_redirect_p99_ms" >"$out"
 
-printf '%-7s %-9s %-7s %-7s %-8s %-9s %-7s %-6s %-9s %s\n' target achieved p50 p95 p99 create99 errors cores cpu-ms/req result
+# goodput = successful requests/s; ok-p50/ok-p99 = redirect latency of successful requests only
+printf '%-7s %-9s %-8s %-7s %-7s %-8s %-8s %-9s %-7s %-6s %-9s %s\n' target achieved goodput p50 p95 p99 ok-p99 create99 errors cores cpu-ms/req result
 for rate in $RATES; do
   work=$(mktemp -d) && chmod 777 "$work"   # k6 runs as a non-root user in its container
   # Seed once per step in setup(); measure CPU only over the steady-state window that follows.
@@ -57,6 +58,10 @@ red = m["http_req_duration{scenario:redirects}"]
 cre = m["http_req_duration{scenario:creates}"]
 count = m["http_reqs{scenario:redirects}"]["count"] + m["http_reqs{scenario:creates}"]["count"]
 achieved = count / dur
+okm = lambda k: m.get(k, {"count": 0, "p(50)": 0, "p(99)": 0})  # absent if nothing succeeded
+good = (okm("http_reqs{scenario:redirects,expected_response:true}")["count"]
+        + okm("http_reqs{scenario:creates,expected_response:true}")["count"]) / dur
+ok_red = okm("http_req_duration{scenario:redirects,expected_response:true}")
 err = m["http_req_failed"]["value"]
 dropped = m.get("dropped_iterations", {}).get("count", 0)
 window = t1 - t0
@@ -65,9 +70,9 @@ ms_per_req = cores * 1000 / achieved if achieved else 0  # CPU cost of one reque
 ok = err < 0.01 and red["p(99)"] < 50 and cre["p(99)"] < 100 and dropped < 1
 row = [rate, round(achieved), round(red["p(50)"], 1), round(red["p(95)"], 1), round(red["p(99)"], 1),
        round(cre["p(99)"], 1), round(err, 4), dropped, round(cores, 2), round(ms_per_req, 2),
-       "PASS" if ok else "FAIL"]
+       "PASS" if ok else "FAIL", round(good), round(ok_red["p(50)"], 1), round(ok_red["p(99)"], 1)]
 open(out, "a").write(",".join(map(str, row)) + "\n")
-print(f"{rate:<7} {round(achieved):<9} {row[2]:<7} {row[3]:<7} {row[4]:<8} {row[5]:<9} {err:<7.2%} {row[8]:<6} {row[9]:<9} {row[-1]}")
+print(f"{rate:<7} {round(achieved):<9} {round(good):<8} {row[2]:<7} {row[3]:<7} {row[4]:<8} {row[13]:<8} {row[5]:<9} {err:<7.2%} {row[8]:<6} {row[9]:<9} {row[10]}")
 PY
   rm -rf "$work"
 done

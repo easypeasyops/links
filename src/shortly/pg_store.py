@@ -7,9 +7,9 @@ from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime
 
-from psycopg.errors import UniqueViolation
+from psycopg.errors import LockNotAvailable, QueryCanceled, UniqueViolation
 from sqlalchemy import Connection, Engine, insert, select, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as PoolTimeoutError
 
 from shortly.db import links
@@ -22,16 +22,24 @@ log = logging.getLogger(__name__)
 
 @contextmanager
 def connect(engine: Engine) -> Iterator[Connection]:
-    """A pooled connection, or ``StoreBusyError`` if none frees up within pool_timeout.
+    """A pooled connection, or ``StoreBusyError`` if none frees up within pool_timeout, or
+    if a statement on it runs past statement_timeout / lock_timeout (db.make_engine).
 
     The engine is AUTOCOMMIT (see db.make_engine): each statement commits on its own.
     """
     try:
         conn = engine.connect()
     except PoolTimeoutError as exc:  # every pooled connection busy for pool_timeout
-        raise StoreBusyError("database pool exhausted") from exc
+        raise StoreBusyError("database pool exhausted", reason="pool") from exc
     with conn:
-        yield conn
+        try:
+            yield conn
+        except DBAPIError as exc:
+            # Postgres cancelled the statement (57014) or gave up on a lock (55P03): the
+            # database is slow or contended, not broken. Shed like a full pool: 503 + retry.
+            if isinstance(exc.orig, QueryCanceled | LockNotAvailable):
+                raise StoreBusyError("database timeout", reason="db_timeout") from exc
+            raise
 
 
 # One bounded batch, oldest first, through the partial index on expires_at. SKIP LOCKED: two

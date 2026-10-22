@@ -15,7 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from shortly.api import create_app, create_app_from_env
 from shortly.db import make_engine, pool_in_use
 from shortly.models import ShortLink
-from shortly.pg_store import PostgresStore
+from shortly.pg_store import PostgresStore, connect
 from shortly.service import Shortener
 from shortly.store import StoreBusyError
 from tests.conftest import T0, alembic_config
@@ -131,6 +131,64 @@ def test_exhausted_pool_raises_busy_fast(pg_url: str) -> None:
         assert pool_in_use(engine)() == 0
         assert store.get("anything") is None  # recovers once a connection is free
     finally:
+        engine.dispose()
+
+
+def test_app_connections_carry_the_timeouts(pg_url: str) -> None:
+    # Prove the settings reach the server, not just the config: ask Postgres.
+    engine = make_engine(pg_url)
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(text("SHOW statement_timeout")).scalar() == "2s"
+            assert conn.execute(text("SHOW lock_timeout")).scalar() == "1s"
+    finally:
+        engine.dispose()
+    one_shot = make_engine(pg_url, pooled=False)  # migrations: may legitimately run long
+    try:
+        with one_shot.connect() as conn:
+            assert conn.execute(text("SHOW statement_timeout")).scalar() == "0"
+    finally:
+        one_shot.dispose()
+
+
+def test_slow_statement_is_cancelled_and_shed(pg_url: str) -> None:
+    engine = make_engine(pg_url, statement_timeout_ms=200)
+    try:
+        start = time.perf_counter()
+        with pytest.raises(StoreBusyError) as busy, connect(engine) as conn:
+            conn.execute(text("SELECT pg_sleep(5)"))
+        assert busy.value.reason == "db_timeout"
+        assert time.perf_counter() - start < 2  # cancelled at ~0.2 s, not after 5 s
+        with connect(engine) as conn:  # the connection went back to the pool usable
+            assert conn.execute(text("SELECT 1")).scalar() == 1
+        assert pool_in_use(engine)() == 0
+    finally:
+        engine.dispose()
+
+
+def test_lock_wait_is_bounded_and_not_a_collision(pg_url: str, pg_store: PostgresStore) -> None:
+    # Another session has inserted code "lk0001" but not committed (stuck mid-transaction).
+    # A create of the same code waits on that row's lock: it must give up after
+    # lock_timeout and shed with 503, not hang, and not be mistaken for a collision.
+    holder = create_engine(pg_url.replace("postgresql://", "postgresql+psycopg://", 1))
+    engine = make_engine(pg_url, lock_timeout_ms=200)
+    store = PostgresStore(engine)
+    link = ShortLink(code="lk0001", target=HttpUrl("https://l.example/"), created_at=T0)
+    try:
+        with holder.connect() as hold:
+            hold.execute(
+                text("INSERT INTO links (code, target, created_at) VALUES ('lk0001', 'x', now())")
+            )  # implicit transaction, still open
+            start = time.perf_counter()
+            with pytest.raises(StoreBusyError) as busy:
+                store.add(link)
+            assert busy.value.reason == "db_timeout"
+            assert time.perf_counter() - start < 2
+            hold.rollback()
+        store.add(link)  # the lock is gone: the same create now succeeds
+        assert store.get("lk0001") is not None
+    finally:
+        holder.dispose()
         engine.dispose()
 
 

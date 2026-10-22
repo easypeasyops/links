@@ -17,6 +17,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_s
 from pydantic import AwareDatetime, BaseModel, Field, HttpUrl
 
 from shortly.observability import Metrics, RequestContextMiddleware
+from shortly.overload import ConcurrencyLimitMiddleware
 from shortly.ratelimit import RateLimiter, client_key
 from shortly.service import (
     CodeSpaceExhaustedError,
@@ -49,6 +50,7 @@ def create_app(
     metrics: Metrics | None = None,
     tracer_provider: TracerProvider | None = None,
     rate_limiter: RateLimiter | None = None,
+    max_concurrent_requests: int = 0,
     serve_metrics: bool = True,
     on_shutdown: Callable[[], None] = lambda: None,
 ) -> FastAPI:
@@ -58,6 +60,7 @@ def create_app(
     what lets tests build the app with an in-memory store, a fake clock, a private
     metrics registry, and an in-memory span exporter. ``rate_limiter=None``: no limit.
     ``serve_metrics=False``: no /metrics here (production serves it on its own port).
+    ``max_concurrent_requests``: shed requests beyond this many in flight (0: no limit).
     """
     metrics = metrics or Metrics()
 
@@ -75,8 +78,8 @@ def create_app(
     # Saturated backend: fail fast and tell well-behaved clients when to come back,
     # rather than holding the request until it times out somewhere upstream.
     @app.exception_handler(StoreBusyError)
-    def shed(_: Request, __: StoreBusyError) -> JSONResponse:
-        metrics.load_shed.inc()
+    def shed(_: Request, exc: StoreBusyError) -> JSONResponse:
+        metrics.load_shed.labels(exc.reason).inc()
         return JSONResponse(
             {"detail": "overloaded, retry shortly"},
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -174,6 +177,16 @@ def create_app(
     # The OTel instrumentation wraps the entire middleware stack, so this middleware runs
     # *inside* the request span: its access log line carries the trace ID (verified in
     # tests/test_observability.py). It sees the final status, including unhandled 500s.
+    # Inside RequestContextMiddleware (added after it, so it wraps this one): a shed request
+    # still gets a request ID, an access log line and a 503 in the RED metrics, so it burns
+    # the availability SLO like any other failure. It just costs ~1 ms instead of seconds.
+    app.add_middleware(
+        ConcurrencyLimitMiddleware,
+        limit=max_concurrent_requests,
+        on_shed=metrics.load_shed.labels("concurrency").inc,
+        on_count=metrics.in_flight.set,
+        routes=app.router.routes,
+    )
     app.add_middleware(RequestContextMiddleware, metrics=metrics)
     return app
 
@@ -210,6 +223,8 @@ def create_app_from_env() -> FastAPI:
         str(settings.database_url),
         pool_size=settings.db_pool_size,
         pool_timeout=settings.db_pool_timeout_seconds,
+        statement_timeout_ms=settings.db_statement_timeout_ms,
+        lock_timeout_ms=settings.db_lock_timeout_ms,
     )
     metrics = Metrics()
     metrics.db_pool_size.set(settings.db_pool_size)
@@ -244,6 +259,7 @@ def create_app_from_env() -> FastAPI:
         metrics=metrics,
         tracer_provider=provider,
         rate_limiter=limiter,
+        max_concurrent_requests=settings.max_concurrent_requests,
         serve_metrics=stop_metrics is None,
         on_shutdown=shutdown,
     )

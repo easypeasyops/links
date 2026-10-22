@@ -46,13 +46,16 @@ groups:
       # 503 + Retry-After because no DB connection freed up in time. Usually a slow database.
       # It also burns the availability budget; this alert names the cause.
       - alert: ShortlyLoadShedding
-        expr: sum by (namespace) (rate(load_shed_total[5m])) > 0
+        # One alert per reason: "concurrency" is too much traffic for the pods (the HPA's
+        # job), "pool" and "db_timeout" point at the database. Different fixes, so the
+        # ticket says which.
+        expr: sum by (namespace, reason) (rate(load_shed_total[5m])) > 0
         for: 5m
         labels:
           severity: ticket
         annotations:
-          summary: Requests are being shed with 503
-          description: The DB pool has been exhausted for 5 minutes. Check the database before adding replicas.
+          summary: Requests are being shed with 503 ({{ $labels.reason }})
+          description: Requests have been shed for 5 minutes, reason {{ $labels.reason }}. concurrency means pods at their in-flight limit (traffic above capacity); pool or db_timeout mean a slow database. Check the database before adding replicas.
           runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
 
       # Needs kube-state-metrics in the cluster (not part of the local stack). At max, the

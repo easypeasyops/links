@@ -137,7 +137,17 @@ class Metrics:
         )
         self.load_shed = Counter(
             "load_shed",
-            "Requests rejected with 503 because the backend was saturated.",
+            "Requests rejected with 503 because the pod or the database was saturated.",
+            # pool: no free DB connection in time; db_timeout: a statement or lock wait ran
+            # past its timeout; concurrency: the pod was at its in-flight request limit.
+            ["reason"],
+            registry=self.registry,
+        )
+        for reason in ("pool", "db_timeout", "concurrency"):
+            self.load_shed.labels(reason)  # export 0 for each, so rate() works from the start
+        self.in_flight = Gauge(
+            "requests_in_flight",
+            "Requests this pod is working on now (probes and /metrics excluded).",
             registry=self.registry,
         )
         self.rate_limited = Counter(

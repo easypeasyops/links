@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-22 for v0.5.0 / chart 0.6.0. Mirrored at
+> Last updated 2026-10-22 for v0.5.0 plus unreleased overload protection on main / chart 0.7.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -67,7 +67,7 @@ Do not judge health through `kubectl port-forward svc/...`: it attaches to one p
 | Redirect outcomes | `sum by (outcome) (rate(link_resolutions_total[5m]))` |
 | Code space filling up | `rate(code_collisions_total[1h])` |
 | Readiness failing | `rate(http_requests_total{route="/readyz",status="503"}[5m])` |
-| Load being shed | `sum(rate(load_shed_total[5m]))` |
+| Load being shed, and why | `sum by (reason) (rate(load_shed_total[5m]))` (concurrency, pool, db_timeout) |
 | Pool saturation per pod | `db_pool_in_use / db_pool_size` |
 | Error budget left, per SLO (1 = untouched, below 0 = overspent) | `slo:error_budget_remaining:ratio` |
 | Current burn rate (1 = on pace to spend exactly the 30-day budget) | `slo:sli_error:ratio_rate1h / on(slo) group_left () (1 - slo:objective:ratio)` |
@@ -421,7 +421,7 @@ Don't delete a policy to "see if it helps" in prod. Check labels first: almost e
 kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=1000 | jq -c 'select(.status>=500)' | tail -20
 ```
 
-- 503 with `Retry-After` on every DB route, and `load_shed_total` rising: the DB pool is exhausted. See Saturation.
+- 503 with `Retry-After`, and `load_shed_total` rising: the pod or the database is saturated. Its `reason` label says which. See Saturation.
 - 503 on `route="/links"` only: code space exhausted (5 collisions in a row). Check `rate(code_collisions_total[1h])`; the fix is longer codes (`DEFAULT_LENGTH`) in a release.
 - 500s with an `exc` field: an unhandled bug. Find the `request_id`, open its trace, roll back if it started with a release.
 
@@ -437,8 +437,11 @@ Check p99 by route, then `kubectl -n prod get hpa shortly`.
 
 | Signal | Cause | Fix |
 | --- | --- | --- |
-| `load_shed_total` rising; `db_pool_in_use` = `db_pool_size`; CPU low | Database slow or hung: queries hold connections | Database first (`pg_stat_activity`, locks, disk). Don't raise the pool: more connections to a struggling DB make it worse |
-| HPA `REPLICAS` = max; CPU above target; p99 up; no shedding | Traffic above provisioned capacity | Raise `autoscaling.maxReplicas` and keep `maxReplicas × dbPoolSize` within `maxDbConnections` and Postgres `max_connections`; add nodes if pods go Pending |
+| `load_shed_total{reason="concurrency"}` rising; `requests_in_flight` at the limit (16); CPU high | More traffic than the pods can serve: each pod answers the excess with 503 at once instead of queueing | Normally the HPA fixes it within a minute; if HPA `REPLICAS` = max, see the next row. Raising `maxConcurrentRequests` doesn't add capacity, it only brings back the queueing |
+| `load_shed_total{reason="concurrency"}` rising; CPU **low** | Requests are slow but not busy: they wait on something (the database, a lock) while holding a slot | Database first, as in the `pool` and `db_timeout` rows. If they're clean, check traces for the slow span |
+| `load_shed_total{reason="db_timeout"}` rising | Queries ran past `dbStatementTimeoutMs` (2 s) or waited past `dbLockTimeoutMs` (1 s) on a lock | Postgres: `pg_stat_activity` (long-running queries, `wait_event_type = Lock`), `pg_locks`, disk and CPU. Raising the timeouts only makes requests wait longer |
+| `load_shed_total{reason="pool"}` rising; `db_pool_in_use` = `db_pool_size`; CPU low | Database slow or frozen: queries hold connections | Database first (`pg_stat_activity`, locks, disk). Don't raise the pool: more connections to a struggling DB make it worse |
+| HPA `REPLICAS` = max; CPU above target; p99 up; concurrency shedding | Traffic above provisioned capacity | Raise `autoscaling.maxReplicas` and keep `maxReplicas × dbPoolSize` within `maxDbConnections` and Postgres `max_connections`; add nodes if pods go Pending |
 | HPA `TARGETS` shows `<unknown>` | No CPU metrics: metrics-server down, or no CPU request | `kubectl -n kube-system get deploy metrics-server`; `kubectl top pods -n prod`; `kubectl -n prod describe hpa shortly` |
 
 ```bash
@@ -446,6 +449,7 @@ kubectl -n prod describe hpa shortly | sed -n '/Conditions/,$p'    # why it did 
 kubectl top pods -n prod -l app.kubernetes.io/name=shortly
 kubectl -n prod exec postgres-0 -- psql -U shortly shortly -c \
   "select state, wait_event_type, count(*) from pg_stat_activity group by 1,2"
+kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=500 | jq -c 'select(.status==503) | .route' | sort | uniq -c
 ```
 
 ### Cleanup job not running
@@ -603,8 +607,8 @@ Measure capacity before changing CPU requests, the HPA target or the pool, and a
    SHORTLY_DB_POOL_SIZE=2 SHORTLY_IMAGE=shortly:dev docker compose --profile app up -d --no-build --wait  # vary the pool
    ```
 
-   Each step prints achieved rate, p50/p95/p99, errors, cores used and CPU ms per request, and appends to `loadtest/results/<timestamp>-cpus<N>.csv` (git-ignored).
-3. Read the result. **Capacity is the highest step that PASSes**. A FAIL with 0% errors and climbing p99 is queueing past the knee. A FAIL with errors is a bug, so investigate before trusting the numbers.
+   Each step prints achieved rate, **goodput** (successful requests/s), p50/p95/p99 of all redirects, `ok-p99` (successful redirects only), errors, cores used and CPU ms per request, and appends to `loadtest/results/<timestamp>-cpus<N>.csv` (git-ignored).
+3. Read the result. **Capacity is the highest step that PASSes**. Past it, the pod sheds: errors are fast 503s, goodput levels off and `ok-p99` should stay near 100 ms. A FAIL with 0% errors and climbing p99 means queueing, so the concurrency limit is off or too high. Errors other than 503 are a bug, so investigate before trusting the numbers. To compare limits: `SHORTLY_MAX_CONCURRENT_REQUESTS=32 docker compose --profile app up -d --wait` (`0` turns the limit off).
 4. Compare A/B on the same machine in the same session, and run each side twice: the noise between runs is about ±15%.
 5. If capacity per pod changed, set `resources.requests.cpu` to the cores used at the new passing rate and keep the HPA target at about 70%. Then update DESIGN.md, Capacity, and the Quick reference above in the same PR.
 6. Prove that autoscaling still works in-cluster: `scripts/hpa-drill.sh`.

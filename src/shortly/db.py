@@ -54,7 +54,13 @@ rate_limits = Table(
 
 
 def make_engine(
-    url: str, *, pool_size: int = 5, pool_timeout: float = 1.0, pooled: bool = True
+    url: str,
+    *,
+    pool_size: int = 5,
+    pool_timeout: float = 1.0,
+    statement_timeout_ms: int = 2000,
+    lock_timeout_ms: int = 1000,
+    pooled: bool = True,
 ) -> Engine:
     """Engine for the app (pooled, autocommit) or for one-shot processes (no pool).
 
@@ -62,17 +68,22 @@ def make_engine(
     known number, so the Postgres budget is ``max_replicas * pool_size`` (docs/DESIGN.md,
     Capacity). ``pool_timeout`` bounds how long a request waits for a connection before
     ``StoreBusyError`` -> 503; SQLAlchemy's default of 30 s turns overload into a pile-up.
+
+    Every wait on the database is bounded too (``connect_args``), so a slow or unreachable
+    database costs a request seconds, not a thread forever. ``0`` turns a timeout off.
     """
     # SQLAlchemy needs the driver in the scheme; accept plain postgresql:// from env.
     if url.startswith("postgresql://"):
         url = "postgresql+psycopg://" + url.removeprefix("postgresql://")
     if not pooled:  # one-shot processes (migrations, scripts): keep real transactions
-        return create_engine(url, poolclass=NullPool)
+        # No statement timeout: a migration (e.g. CREATE INDEX CONCURRENTLY) may run long.
+        return create_engine(url, poolclass=NullPool, connect_args={"connect_timeout": 5})
     return create_engine(
         url,
         pool_size=pool_size,
         max_overflow=0,
         pool_timeout=pool_timeout,
+        connect_args=_bounded(statement_timeout_ms, lock_timeout_ms),
         # pre_ping: test a pooled connection before use, so a DB restart doesn't surface as
         # one failed request per stale connection. Costs one round trip per checkout.
         pool_pre_ping=True,
@@ -83,6 +94,32 @@ def make_engine(
         #   conn.execution_options(isolation_level="READ COMMITTED")
         isolation_level="AUTOCOMMIT",
     )
+
+
+def _bounded(statement_timeout_ms: int, lock_timeout_ms: int) -> dict[str, object]:
+    """libpq settings that bound every wait on the database (docs/DESIGN.md, Failure modes).
+
+    - ``statement_timeout``: Postgres cancels a query running longer than this (a slow plan,
+      a table scan). The request gets a 503 instead of holding a pooled connection.
+    - ``lock_timeout``: the same for a query waiting on a row lock (two creates racing on
+      one code while the first is stuck). Shorter: a lock wait is never useful work.
+    - ``connect_timeout``: opening a connection to an unreachable host gives up after 3 s.
+    - TCP keepalives and ``tcp_user_timeout``: a connection whose peer has vanished (node
+      lost, network partition) is declared dead in seconds, not after the kernel's ~15 min.
+
+    Not covered: a server that is frozen but whose kernel still answers TCP (a paused
+    container). Nothing on the client can tell that apart from a slow query without killing
+    the connection from another thread; the concurrency limit bounds the damage instead.
+    """
+    return {
+        "options": f"-c statement_timeout={statement_timeout_ms} -c lock_timeout={lock_timeout_ms}",
+        "connect_timeout": 3,
+        "keepalives": 1,
+        "keepalives_idle": 10,
+        "keepalives_interval": 5,
+        "keepalives_count": 3,
+        "tcp_user_timeout": 10_000,  # ms: unacknowledged data for this long = dead peer
+    }
 
 
 def pool_in_use(engine: Engine) -> Callable[[], float]:

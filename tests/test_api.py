@@ -92,7 +92,7 @@ def test_saturated_store_is_shed_with_503_and_retry_after(clock: FakeClock) -> N
     resp = c.get("/abc1234")
     assert resp.status_code == 503
     assert resp.headers["retry-after"] == "1"
-    assert metrics.registry.get_sample_value("load_shed_total") == 1
+    assert metrics.registry.get_sample_value("load_shed_total", {"reason": "pool"}) == 1
 
 
 @pytest.fixture

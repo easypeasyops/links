@@ -83,6 +83,12 @@ max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
   value: {{ .Values.config.metricsPort | quote }}
 - name: SHORTLY_DB_POOL_TIMEOUT_SECONDS
   value: {{ .Values.config.dbPoolTimeoutSeconds | quote }}
+- name: SHORTLY_DB_STATEMENT_TIMEOUT_MS
+  value: {{ .Values.config.dbStatementTimeoutMs | quote }}
+- name: SHORTLY_DB_LOCK_TIMEOUT_MS
+  value: {{ .Values.config.dbLockTimeoutMs | quote }}
+- name: SHORTLY_MAX_CONCURRENT_REQUESTS
+  value: {{ .Values.config.maxConcurrentRequests | quote }}
 - name: SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE
   value: {{ .Values.config.rateLimit.createsPerMinute | quote }}
 - name: SHORTLY_RATE_LIMIT_BURST
