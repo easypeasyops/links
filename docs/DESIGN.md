@@ -190,10 +190,11 @@ flowchart LR
     Mig[Migrate Job] -->|Alembic| L
     Mig --> RL
     Clean[per-pod cleanup ≤1/min] -->|DELETE stale tat| RL
+    Cron[cleanup CronJob, hourly] -->|DELETE expired > 7 days| L
   end
 ```
 
-- **`links`** is durable product state. Rows are never deleted today (known limitation).
+- **`links`** is durable product state. The cleanup CronJob deletes links that expired more than 7 days ago (see Data and migrations); links without a TTL are kept forever.
 - **`rate_limits`** is ephemeral control state. A past `tat` equals "no row"; pods delete those rows so the table stays small. Losing the table only resets every client's burst — it does not lose short links.
 
 ## Domain model and code generation
