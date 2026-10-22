@@ -107,7 +107,8 @@ in_cluster prod /readyz || fail "prod not reachable through its Service"
 
 # ---------------------------------------------------------------- 3b. rate limit
 # One client, through the Service, so kube-proxy spreads the requests over both pods: the
-# limit must still be exactly the burst, because its state is in Postgres, not per pod.
+# limit must still be one burst (plus what refills meanwhile), because its state is in
+# Postgres. Per-pod counters would let all burst + 5 through.
 # X-Forwarded-For picks the client (prod trusts the pod network as kind's stand-in ingress).
 create_as() {
   kubectl -n prod exec postgres-0 -- wget -S -O /dev/null -T 3 \
@@ -115,14 +116,25 @@ create_as() {
     --post-data '{"url":"https://example.com/rate"}' http://shortly/links 2>&1 \
     | grep -m1 -oE 'HTTP/1\.[01] [0-9]{3}' | cut -d' ' -f2
 }
-burst=$(helm -n prod get values shortly --all -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["rateLimit"]["burst"])')
+limits=$(helm -n prod get values shortly --all -o json \
+  | python3 -c 'import json,sys; r=json.load(sys.stdin)["config"]["rateLimit"]; print(r["burst"], r["createsPerMinute"])')
+read -r burst per_minute <<<"$limits"
+# GCRA refills while we send (one token per 60/per_minute s), and each kubectl exec takes
+# ~0.1 s, so time the run: allowed must be at least the burst, at most burst + refill.
 client="203.0.113.$((RANDOM % 250 + 1))"
-created=0
-for _ in $(seq 1 "$burst"); do [[ "$(create_as "$client")" == 201 ]] && created=$((created + 1)); done
-((created == burst)) || fail "rate limit: only $created of the first $burst creates succeeded"
-[[ "$(create_as "$client")" == 429 ]] || fail "rate limit: create $((burst + 1)) from one client was not refused"
+created=0 refused=0 t0=$(date +%s.%N)
+for _ in $(seq 1 $((burst + 5))); do
+  case "$(create_as "$client")" in
+    201) created=$((created + 1)) ;;
+    429) refused=$((refused + 1)) ;;
+  esac
+done
+max=$(python3 -c "import math,sys; print($burst + math.ceil(($(date +%s.%N) - $t0) * $per_minute / 60))")
+((created >= burst)) || fail "rate limit: only $created creates succeeded, the burst is $burst"
+((created <= max)) || fail "rate limit: $created creates succeeded, at most $max allowed (burst + refill)"
+((refused > 0)) || fail "rate limit: $((burst + 5)) creates from one client, none refused"
 [[ "$(create_as "198.51.100.$((RANDOM % 250 + 1))")" == 201 ]] || fail "rate limit: another client was refused too"
-pass "rate limit: $burst creates, then 429, for one client across $(kubectl -n prod get deploy shortly -o jsonpath='{.status.readyReplicas}') pods; other clients unaffected"
+pass "rate limit: one client got $created creates (burst $burst, at most $max with refill), then 429s, across $(kubectl -n prod get deploy shortly -o jsonpath='{.status.readyReplicas}') pods; other clients unaffected"
 
 good_rev=$(revision prod)
 good_image=$(deployed_image prod)
