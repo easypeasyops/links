@@ -313,13 +313,13 @@ Alertmanager routing (`deploy/kind/monitoring-values.yaml`):
 
 Two inhibitions cut the noise. A page silences the ticket for the same alert, SLO and namespace. `ShortlyNoAvailablePods` silences the burn-rate, readiness and shedding alerts in its namespace, because they are symptoms of the same cause. The receivers are placeholders with no integration, so nothing leaves the cluster; in a real setup `pager` gets PagerDuty and `tickets` gets Slack, with credentials in a Secret.
 
-**Proven on every PR.** `scripts/monitoring-check.sh`, the last step of the kind e2e, checks the whole path in the cluster:
+**Proven on every PR.** `scripts/monitoring-check.sh` (step 7 of the kind e2e) and `scripts/alert-drill.sh` check the whole path in the cluster:
 
 - Prometheus scrapes the prod pods through the ServiceMonitor.
 - All five rule groups load, and every rule reports `health=ok`.
 - The SLO recording rules produce series for prod.
 - Every dashboard query is valid PromQL.
-- A real alert completes the path. The script scales staging to zero; `ShortlyNoAvailablePods` fires and reaches Alertmanager, which routes it to the `staging` receiver. Then staging is restored.
+- A real alert completes the path. `alert-drill.sh` scales staging to zero; `ShortlyNoAvailablePods` fires and reaches Alertmanager, which routes it to the `staging` receiver. Then staging is restored. In the e2e it runs in the background while the prod drills run, because they never touch staging; its 90 s wait is then hidden behind them.
 
 On the first CI run (PR #14), Prometheus scraped all 4 prod pods (the HPA drill had just scaled them up) and all 12 dashboard queries parsed. The staging alert reached Alertmanager **81 s** after the scale-down: about 15 s for kube-state-metrics to be scraped, 60 s of `for`, then evaluation.
 
@@ -345,8 +345,18 @@ No change reaches `main` without passing three CI jobs, and no image is publishe
 | --- | --- | --- |
 | `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~150 tests incl. real Postgres, promtool, amtool and the Kyverno CLI; coverage floor 90% (currently ~98%) |
 | `build, scan, smoke-test image` | every PR, push to main | Image builds; Trivy finds no fixable HIGH/CRITICAL; black-box smoke test (non-root, readiness, create → 307, request IDs, metrics, JSON logs, SIGTERM → exit 0) |
-| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; the rate limit holds exactly across its replicas; network policies refuse what they should; the cleanup Job deletes exactly the links past their grace period; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager; the API server refuses shortly images without release provenance |
+| `deploy to kind, rollback drill` | every PR (docs-only PRs skip its steps and pass), push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; the rate limit holds exactly across its replicas; network policies refuse what they should; the cleanup Job deletes exactly the links past their grace period; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager; the API server refuses shortly images without release provenance |
 | Release workflow | tag `vX.Y.Z` | Tag equals `pyproject.toml` version; scan before publish; multi-arch push; SBOM; signed provenance; GitHub Release with digest |
+
+**Keeping the kind job fast.** It is the slowest of the three jobs. Its time goes into waiting, not work, so the waits are kept short and overlap where they can:
+
+- The HPA drill stops the load as soon as the HPA adds a ready pod. Its 100 s duration is a ceiling.
+- The broken release's Helm timeout is 30 s. Its pods crash within seconds, so a longer wait proves nothing more.
+- The staging alert drill runs alongside the prod drills.
+- `cluster.sh up` installs metrics-server, kube-prometheus-stack and Kyverno side by side.
+- A PR that changes only Markdown skips the cluster. The job still reports success, because it is a required check. A workflow-level paths filter would leave that check pending forever and block the merge. `docs/RUNBOOK.md` doesn't count as Markdown-only here, because the e2e reads the release digest from it. Pushes to main always run everything.
+
+Together these cut the job from about 9.5 minutes to about 6. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
 
 **Image.** Multi-stage: uv builds the virtualenv in a builder stage, and only the venv reaches the runtime stage. Dependencies are a separate cached layer from the code. Runtime runs as UID 10001 with code owned by root (read-only to the app), pip removed (its vendored urllib3/msgpack/setuptools were the only HIGH findings), exec-form `CMD` so uvicorn is PID 1 and receives SIGTERM.
 
@@ -517,7 +527,7 @@ Only creates (10% of the mix) pay for the extra query, so the cost is small, and
 
 - **Database slow or hung.** Verified by pausing Postgres under load. The requests already holding the pool's 5 connections hung until it resumed. Every other request got a 503 in 1.0 s, and the service recovered by itself on resume.
 - **CPU saturated.** These requests are not shed: they queue in the threadpool. The HPA is the defence. A concurrency limit that returns 503 is future work.
-- **CI coverage.** `scripts/hpa-drill.sh` runs in CI and proves the HPA adds pods under load. It does not measure capacity.
+- **CI coverage.** `scripts/hpa-drill.sh` runs in CI and proves the HPA adds pods under load; it stops the load once the first new pod is ready. It does not measure capacity.
 
 **Autoscaling, first CI run (PR #11).** 600 req/s from inside the cluster against 2 pods:
 

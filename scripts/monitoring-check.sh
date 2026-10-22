@@ -8,7 +8,8 @@
 #   3. the SLO recording rules produce series for prod
 #   4. every query on the SLO dashboard is valid PromQL
 #   5. a real alert travels Prometheus -> Alertmanager and is routed to the right receiver
-#      (staging is scaled to zero for about two minutes, then restored)
+#      (scripts/alert-drill.sh: staging is scaled to zero for about 90 s, then restored;
+#      ALERT_DRILL=0 skips it)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -85,23 +86,7 @@ for path in sorted(pathlib.Path(sys.argv[1]).glob("*.json")):
 PY
 
 # ---------------------------------------------------------------- 5. alert end to end
-# staging has one fixed replica and no HPA: scaling it to zero is a clean, reversible outage.
-kubectl -n staging scale deploy/shortly --replicas=0 >/dev/null
-trap 'kubectl -n staging scale deploy/shortly --replicas=1 >/dev/null 2>&1 || true' EXIT
-start=$SECONDS receiver=""
-while ((SECONDS - start < 300)); do
-  receiver=$(api kps-alertmanager:9093 /api/v2/alerts | python3 -c '
-import json, sys
-for a in json.load(sys.stdin):
-    if a["labels"].get("alertname") == "ShortlyNoAvailablePods" and a["labels"].get("namespace") == "staging":
-        print(",".join(r["name"] for r in a["receivers"])); break')
-  [[ -n "$receiver" ]] && break
-  sleep 5
-done
-[[ -n "$receiver" ]] || fail "ShortlyNoAvailablePods for staging never reached Alertmanager"
-[[ "$receiver" == staging ]] || fail "staging alert routed to '$receiver', want 'staging'"
-took=$((SECONDS - start))
-kubectl -n staging scale deploy/shortly --replicas=1 >/dev/null
-kubectl -n staging rollout status deploy/shortly --timeout=120s >/dev/null
-trap - EXIT
-pass "staging scaled to 0: ShortlyNoAvailablePods reached Alertmanager after ${took}s, routed to 'staging'; restored"
+# scripts/alert-drill.sh. k8s-e2e.sh runs it in the background earlier and sets ALERT_DRILL=0.
+if [[ "${ALERT_DRILL:-1}" != 0 ]]; then
+  "$ROOT/scripts/alert-drill.sh"
+fi
