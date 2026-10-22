@@ -356,7 +356,7 @@ No change reaches `main` without passing three CI jobs, and no image is publishe
 - `cluster.sh up` installs metrics-server, kube-prometheus-stack and Kyverno side by side.
 - A PR that changes only Markdown skips the cluster. The job still reports success, because it is a required check. A workflow-level paths filter would leave that check pending forever and block the merge. `docs/RUNBOOK.md` doesn't count as Markdown-only here, because the e2e reads the release digest from it. Pushes to main always run everything.
 
-Together these cut the job from about 9.5 minutes to about 6. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
+Together these cut the job from 9m24s to **5m07s** (PR #27): cluster setup 117 s → 62 s, the e2e 364 s → 166 s. The alert drill took 101 s and finished entirely behind the prod drills, and the HPA drill stopped at +58 s instead of running its full 100 s. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
 
 **Image.** Multi-stage: uv builds the virtualenv in a builder stage, and only the venv reaches the runtime stage. Dependencies are a separate cached layer from the code. Runtime runs as UID 10001 with code owned by root (read-only to the app), pip removed (its vendored urllib3/msgpack/setuptools were the only HIGH findings), exec-form `CMD` so uvicorn is PID 1 and receives SIGTERM.
 
