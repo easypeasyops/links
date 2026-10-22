@@ -12,3 +12,6 @@ spec:
     - name: http
       port: {{ .Values.service.port }}
       targetPort: http
+    - name: metrics # for Prometheus only; the NetworkPolicy admits nobody else
+      port: {{ .Values.config.metricsPort }}
+      targetPort: metrics

@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-21 for v0.3.0 / chart 0.4.0. Mirrored at
+> Last updated 2026-10-21 for v0.3.0 plus unreleased metrics port and network policies on main / chart 0.5.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -17,7 +17,8 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
 | Database | `postgres` StatefulSet per namespace; URL in Secret `shortly-db` key `url` |
-| Endpoints | `/healthz` liveness · `/readyz` readiness · `/metrics` Prometheus |
+| Endpoints | `/healthz` liveness · `/readyz` readiness on port 8000 · `/metrics` on port **9100** (Prometheus only, by NetworkPolicy) |
+| Network | Default-deny ingress per namespace; Postgres accepts shortly only; the app may reach DNS and Postgres only (`networkPolicy` values, `deploy/kind/network-policies.yaml`) |
 | Logs | JSON on stdout; `request_id` and `trace_id` on every line |
 | SLOs | redirects 99.9% available and 99% < 50 ms; creates 99.5% and 99% < 100 ms; 30-day window (`deploy/prometheus/slos.yaml`) |
 | Alerts | Rules in `deploy/helm/shortly/rules/` (shipped by the prod release). kind: Prometheus, Alertmanager and Grafana in namespace `monitoring` (see Local cluster operations). Compose: `http://localhost:9090/alerts` |
@@ -393,6 +394,26 @@ Afterwards, check that everything running is a release: `scripts/verify-image.sh
 kubectl -n prod get policyreport -o wide                  # FAIL > 0: an image outside the allowlist ran
 ```
 
+
+### A network policy blocks a connection
+
+Symptoms: connections that time out (rather than being refused) between pods that used to talk; a new dependency that never answers; Prometheus targets `down` with `context deadline exceeded`. NetworkPolicies drop packets silently, so it looks like a slow network, not an error.
+
+```bash
+kubectl -n prod get networkpolicy                        # shortly, default-deny-ingress, postgres
+kubectl -n prod describe networkpolicy shortly            # what the app may receive and send
+kubectl -n prod get pods --show-labels                    # policies select by label: check them
+```
+
+| What fails | Likely cause | Fix |
+| --- | --- | --- |
+| The app can't reach a new service (collector, external API) | The app's egress allows DNS and Postgres only | Add a rule to `networkPolicy.extraEgress` in the env values and redeploy |
+| Prometheus shows shortly targets down | Scraper pods don't match `networkPolicy.metricsFrom` (a namespace or label change) | Compare its labels with the policy; fix the values |
+| A new workload in `staging` or `prod` gets no traffic | Default-deny ingress: nothing lets it in | Write a NetworkPolicy for it, as `deploy/kind/network-policies.yaml` does for Postgres |
+| The app can't reach Postgres after a relabel | Postgres accepts `app.kubernetes.io/name: shortly` only | Keep the label, or update both policies |
+
+Don't delete a policy to "see if it helps" in prod. Check labels first: almost every case is a selector that no longer matches.
+
 ### 5xx rate rising
 
 ```bash
@@ -482,6 +503,7 @@ Every CI step can be reproduced locally with the same command; reproduce before 
 | test → `test_ratelimit.py` | The limiter's semantics changed (burst, sustained rate, retry time), or the in-memory and Postgres limiters disagree | `uv run pytest tests/test_ratelimit.py -v`; the contract tests run both limiters on the same fake clock |
 | test → other `test_deploy_gate.py` tests | `deploy.sh` or `verify-image.sh` lost a check | Read the failing case: each one names the image that must be refused |
 | k8s → Lint and schema-validate | A chart manifest or a policy in `deploy/policies/` fails its schema | Run the step's `kubeconform` command locally; the error names the field |
+| k8s → network policies | `a non-Prometheus pod scraped prod's metrics port` or `a pod that isn't shortly reached Postgres` (a policy missing, or the CNI not enforcing NetworkPolicy), or a `control:` line (the allowed path broke: check labels and `networkPolicy` values) | `kubectl -n prod get networkpolicy`; the step's commands in `scripts/k8s-e2e.sh` |
 | k8s → admission checks | `was ADMITTED, expected refused` (the policy isn't enforcing), `was refused, expected admitted` (the release no longer verifies in-cluster: often no network to Sigstore), `not by the provenance policy` (Pod Security or a manifest error), or no allowlist reports | `scripts/admission-check.sh` against kind; `kubectl -n kyverno logs deploy/kyverno-admission-controller` |
 | k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready); `load too light` (CPU never got 10% past the target: raise the drill's `RATE`); or no scale-up despite high CPU (a real HPA problem) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
 | k8s → rate limit | `only N creates succeeded, the burst is 20` (limit lower than the chart says, or DB errors), `at most N allowed` or `none refused` (limit missing, or counted per pod instead of shared; the check allows for the tokens that refill while it runs), `another client was refused` (the limit isn't per client: check `forwardedAllowIps`) | `kubectl -n prod logs -l app.kubernetes.io/name=shortly \| grep 'rate limited'`; the step's `wget` command from `postgres-0` |
@@ -513,6 +535,7 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Alertmanager UI (routing, silences) | `kubectl -n monitoring port-forward svc/kps-alertmanager 9093` → http://localhost:9093 |
 | Grafana (dashboard "shortly / SLOs") | `kubectl -n monitoring port-forward svc/grafana 3000:80` → http://localhost:3000, user `admin` |
 | Grafana password | `kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' \| base64 -d` |
+| Read a pod's metrics (port 9100) | `kubectl -n prod port-forward svc/shortly 9100` → http://localhost:9100/metrics |
 | Monitoring checks only | `scripts/monitoring-check.sh` (scales staging to 0 for about 2 minutes) |
 | Open psql | `kubectl -n prod exec -it postgres-0 -- psql -U shortly shortly` |
 | Show the generated DB URL | `kubectl -n prod get secret shortly-db -o jsonpath='{.data.url}' \| base64 -d` |

@@ -1,0 +1,35 @@
+# Applied to each app namespace by scripts/cluster.sh. With the chart's own policy
+# (deploy/helm/shortly/templates/networkpolicy.yaml), traffic inside a namespace is:
+#
+#   anyone ──8000──▶ shortly ──5432──▶ postgres     (and shortly ──53──▶ kube-dns)
+#   prometheus (monitoring ns) ──9100──▶ shortly
+#
+# and nothing else gets in. Proven by scripts/k8s-e2e.sh (step 9), which needs these
+# refusals to happen: a CNI that ignored NetworkPolicy would fail it, not pass silently.
+
+# Default deny: a pod receives traffic only if some policy lets it in. New workloads start
+# closed, and an allow rule has to be written (and reviewed) to open them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+# Postgres accepts connections from shortly's pods (the app and its migration Job) only.
+# Its readiness probe is an exec (pg_isready), so it needs no network rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres
+spec:
+  podSelector:
+    matchLabels: { app: postgres }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: shortly }
+      ports:
+        - { port: 5432, protocol: TCP }

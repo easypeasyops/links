@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-21 for v0.3.0 / chart 0.4.0. Mirrored at
+> Last updated 2026-10-21 for v0.3.0 plus unreleased metrics port and network policies on main / chart 0.5.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -24,7 +24,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.3.0 and chart 0.4.0: the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, and per-client rate limiting. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.3.0 plus main (chart 0.5.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, and the metrics port with network policies (not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -98,7 +98,7 @@ The HTTP layer only parses input, calls the service and maps outcomes to status 
 | `GET /{code}` | 307, `Location: <target>` | 404 unknown; 410 expired; 503 + `Retry-After: 1` when the DB pool is exhausted | Sync endpoint: blocking DB calls run in the threadpool |
 | `GET /healthz` | 200 | — | Liveness: process is responsive. Never touches the DB. `async`: answered on the event loop, never behind request work |
 | `GET /readyz` | 200 | 503 when the DB ping fails | Readiness: can this pod take traffic. The ping runs on its own one-thread limiter, not the request threadpool |
-| `GET /metrics` | 200, Prometheus text | — | Should be reachable only from inside the cluster. `async`, so scrapes don't time out under load |
+| `GET /metrics` (port 9100) | 200, Prometheus text | — | On its own port (`SHORTLY_METRICS_PORT`), served from its own thread, so a scrape never waits behind requests. Only Prometheus may reach it (NetworkPolicy). The app port answers 404 |
 
 Any endpoint that touches the database returns **503 with `Retry-After: 1`** when no pooled connection frees up within `SHORTLY_DB_POOL_TIMEOUT_SECONDS`. The store raises `StoreBusyError` (overload, not failure), and the API maps it in one place and counts it in `load_shed_total`.
 
@@ -185,6 +185,7 @@ All configuration comes from environment variables, parsed by `pydantic-settings
 | `SHORTLY_DB_POOL_TIMEOUT_SECONDS` | `1.0` | Longest wait for a pooled connection before a 503 |
 | `SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE` | `60` | Sustained `POST /links` rate per client; `0` turns limiting off |
 | `SHORTLY_RATE_LIMIT_BURST` | `20` | Creates a quiet client may make at once |
+| `SHORTLY_METRICS_PORT` | `9100` | Port for `/metrics`, served by its own thread; `0` serves it on the app port instead (tests, local runs) |
 | `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Read by uvicorn: peers whose `X-Forwarded-For` is believed. Must be exactly the ingress |
 | `SHORTLY_LOG_LEVEL` | `INFO` | One of DEBUG, INFO, WARNING, ERROR |
 | `SHORTLY_LOG_JSON` | `true` | `false` for human-readable local logs |
@@ -276,7 +277,7 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 
 | Object | Rendered in | Why |
 | --- | --- | --- |
-| ServiceMonitor | every release with `monitoring.enabled` | Prometheus scrapes each pod's `/metrics` through the Service; `job="shortly"`, plus the pod's `namespace` |
+| ServiceMonitor | every release with `monitoring.enabled` | Prometheus scrapes each pod's `/metrics` on the metrics port (9100) through the Service; `job="shortly"`, plus the pod's `namespace` |
 | PrometheusRule, one per file in `rules/` | prod only (`monitoring.clusterWide`) | The rules aggregate `by (namespace)` and so already cover every environment. A second copy would evaluate every recording rule twice and collide |
 | Dashboard ConfigMap (`dashboards/slo.json`) | prod only | Grafana's sidecar loads it from any namespace; an environment drop-down picks staging or prod |
 
@@ -325,7 +326,7 @@ No change reaches `main` without passing three CI jobs, and no image is publishe
 | --- | --- | --- |
 | `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~150 tests incl. real Postgres, promtool, amtool and the Kyverno CLI; coverage floor 90% (currently ~98%) |
 | `build, scan, smoke-test image` | every PR, push to main | Image builds; Trivy finds no fixable HIGH/CRITICAL; black-box smoke test (non-root, readiness, create → 307, request IDs, metrics, JSON logs, SIGTERM → exit 0) |
-| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; the rate limit holds exactly across its replicas; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager; the API server refuses shortly images without release provenance |
+| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; the rate limit holds exactly across its replicas; network policies refuse what they should; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager; the API server refuses shortly images without release provenance |
 | Release workflow | tag `vX.Y.Z` | Tag equals `pyproject.toml` version; scan before publish; multi-arch push; SBOM; signed provenance; GitHub Release with digest |
 
 **Image.** Multi-stage: uv builds the virtualenv in a builder stage, and only the venv reaches the runtime stage. Dependencies are a separate cached layer from the code. Runtime runs as UID 10001 with code owned by root (read-only to the app), pip removed (its vendored urllib3/msgpack/setuptools were the only HIGH findings), exec-form `CMD` so uvicorn is PID 1 and receives SIGTERM.
@@ -387,6 +388,24 @@ The probes, and `/metrics`, never wait in the request threadpool. FastAPI runs s
 
 **Pod hardening.** Pod and Job run as UID/GID 10001, `runAsNonRoot`, `readOnlyRootFilesystem` (a 16 Mi `emptyDir` at `/tmp`), all capabilities dropped, no privilege escalation, `seccompProfile: RuntimeDefault`, `automountServiceAccountToken: false`. Both namespaces **enforce** the restricted Pod Security Standard, so the API server rejects a regression.
 
+**Network policies.** Traffic inside a namespace is allowed, not assumed. The chart's NetworkPolicy covers the app pods and the migration Job, and `deploy/kind/network-policies.yaml` covers the rest of each namespace:
+
+| From | To | Port | Why |
+| --- | --- | --- | --- |
+| Anyone (`networkPolicy.httpFrom`; on a real cluster, the ingress) | shortly | 8000 | The public API |
+| Prometheus pods in `monitoring` | shortly | 9100 | Scrapes; nobody else sees internal metrics |
+| shortly (app and migration Job) | kube-dns | 53 UDP/TCP | Name resolution |
+| shortly (app and migration Job) | postgres | 5432 | The only dependency, in both directions |
+| Anything else | any pod in `staging` or `prod` | any | Refused: default-deny ingress |
+
+The app's egress is closed too: it can reach DNS and the database, nothing else. A dependency added later (an OpenTelemetry collector, a URL reputation API) needs an explicit `networkPolicy.extraEgress` rule, which a reviewer sees. Kubelet probes and `kubectl port-forward` don't go through these rules. Postgres's own egress stays open, because the e2e uses `postgres-0` as an in-cluster client.
+
+NetworkPolicy is only as good as the CNI that enforces it. A CNI that ignores it accepts the objects without a word, and every allowed path still works. So e2e step 9 tests the refusals, each next to a control that succeeds from the same place:
+- `postgres-0` reaches the app port but is refused on the metrics port.
+- A pod labelled as shortly reaches Postgres; a stranger pod is refused.
+
+The allowed paths are proven by the steps before it, including Prometheus scraping port 9100.
+
 **Resources.** The CPU request (500m) is the measured usage at the per-pod design load, and it is what the HPA's percentage is computed against (see Capacity). Memory limit set (a leak OOM-kills one pod, not the node); no CPU limit (avoids CFS throttling on an idle node). Replicas spread across nodes with a topology spread constraint.
 
 **Autoscaling.** When `autoscaling.enabled` (the default; off in staging), the chart renders a `HorizontalPodAutoscaler` and leaves `replicas` out of the Deployment, because a value there would reset the live count on every `helm upgrade`. Rendering fails if CPU requests are missing (the HPA would never scale) or if `maxReplicas × dbPoolSize` exceeds `autoscaling.maxDbConnections`. The PodDisruptionBudget is rendered when the minimum replica count (HPA floor or fixed count) is above 1. `scripts/cluster.sh` installs metrics-server (pinned version, checksum-verified manifest) so the HPA has CPU data in kind.
@@ -412,6 +431,8 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | Every pod down, or not scraped | No metrics at all, so the SLO ratios are empty and no burn-rate alert can fire | `ShortlyDown` (from `up`, not from app metrics) |
 | Kyverno down (admission webhook unreachable) | The API server refuses **every** new Pod in `staging` and `prod`, Postgres and k6 included, because the webhook fails closed; running pods keep serving | `kubectl apply` / `helm upgrade` errors naming `kyverno-svc`; Deployments stuck below desired replicas |
 | Registry or Sigstore (Rekor, TUF) unreachable | New shortly pods are refused (verification can't run); other images and running pods unaffected | Admission errors naming the provenance policy |
+| CNI doesn't enforce NetworkPolicy (a new cluster, a CNI change) | Nothing breaks, and nothing is isolated: every policy is silently ignored | e2e step 9 fails: a refused connection succeeds |
+| A new outbound dependency (collector, external API) | Its connections time out: the app's egress allows DNS and the database only | Timeouts to the new host; add a `networkPolicy.extraEgress` rule |
 | Tracing backend down | Spans dropped by the batch exporter; requests unaffected | Exporter warnings in logs |
 | Vulnerable dependency published | CI image scan fails; release workflow refuses to publish | Red `build, scan` job |
 
@@ -502,7 +523,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Container escape / lateral movement | Non-root, read-only root FS, no capabilities, seccomp, no SA token, restricted PSS enforced |
 | App rewriting its own code | Code and venv owned by root, read-only to UID 10001 |
 | Secret leakage | DB URL only via Secret; `.env` git-ignored and excluded from the build context |
-| Metrics exposure | `/metrics` unauthenticated; must stay cluster-internal (separate port or NetworkPolicy — not yet enforced) |
+| Metrics exposure | `/metrics` on its own port, not exposed by the public API; a NetworkPolicy admits only Prometheus to it |
+| Lateral movement inside the cluster | Default-deny ingress per namespace; Postgres accepts shortly's pods only; the app's egress is limited to DNS and the database |
 
 ## Key decisions
 
@@ -513,6 +535,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Storage access | SQLAlchemy Core, sync, psycopg 3 | ORM; async driver | One table; sync in threadpool is simple. The load test shows a CPU ceiling, which an async driver would not raise |
 | Transactions | Autocommit for the app; transactions for migrations | Implicit transaction per request | Every app query is one atomic statement; saves 2 round trips per request (about +25% capacity) |
 | Pool | Fixed size 5, no overflow, 1 s timeout → 503 | SQLAlchemy defaults (overflow 10, 30 s wait) | Known Postgres connection budget; overload fails fast instead of piling up |
+| Metrics port and network policy | `/metrics` on port 9100, own thread; NetworkPolicies with default-deny ingress and closed app egress | `/metrics` on the app port behind auth; policies only in a real cluster | One rule keeps internal data off the public API, and the scrape can't queue behind requests. Policies tested in kind catch an unenforcing CNI before prod would |
 | Rate limiting | GCRA, state in Postgres, per client IP (IPv6 /64), creates only | Per-pod in-memory counters; Redis; fixed-window counters; limiting at the ingress only | Exact across replicas with one upsert and no new service; no window-edge bursts. Ingress limits are usually per ingress replica and untested by the app's suite; coarse flood protection at the edge can still be added on top |
 | Scaling | HPA on CPU, 2–10 pods | Fixed replicas; scaling on request rate or latency | CPU is the measured bottleneck and needs no custom-metrics adapter |
 | Storage abstraction | `LinkStore` Protocol + contract tests | Direct DB calls in service | Postgres and in-memory pass the same suite; fast unit tests |
@@ -560,7 +583,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - The rate limit is per IP address, so it is no defence against many addresses (a botnet), and it groups users behind one NAT. With accounts, it would be per user.
 - In kind, prod trusts `X-Forwarded-For` from every pod, so any pod there can choose its client address.
 - No link deletion or expiry cleanup; expired rows stay in the table.
-- `/metrics` is on the public port; no NetworkPolicy restricts it.
+- Postgres's egress is open (the e2e uses its pod as an in-cluster client), and the app port accepts any pod: on a real cluster, `networkPolicy.httpFrom` should name the ingress.
 - The image allowlist is Audit-only in kind, so a non-shortly image can still run in the app namespaces; it is reported, not refused.
 - Provenance is checked when a pod is admitted, not continuously: a policy change doesn't evict running pods.
 - One Kyverno admission replica: while it restarts, no Pod can be created in `staging` or `prod`. A real cluster needs 3.
@@ -577,10 +600,9 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 **Next steps, in rough priority order**
 
 1. URL reputation check on targets (Google Safe Browsing or similar).
-2. Move `/metrics` to a separate port; add a NetworkPolicy.
-3. Expired-link cleanup job and an index on `expires_at`.
-4. A concurrency limit that sheds CPU overload; a statement or socket timeout for a hung database.
-5. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
+2. Expired-link cleanup job and an index on `expires_at`.
+3. A concurrency limit that sheds CPU overload; a statement or socket timeout for a hung database.
+4. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
 
 **Open questions**
 

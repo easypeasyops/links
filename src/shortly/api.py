@@ -13,7 +13,7 @@ import anyio
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 from opentelemetry.sdk.trace import TracerProvider
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, generate_latest, start_http_server
 from pydantic import AwareDatetime, BaseModel, Field, HttpUrl
 
 from shortly.observability import Metrics, RequestContextMiddleware
@@ -49,6 +49,7 @@ def create_app(
     metrics: Metrics | None = None,
     tracer_provider: TracerProvider | None = None,
     rate_limiter: RateLimiter | None = None,
+    serve_metrics: bool = True,
     on_shutdown: Callable[[], None] = lambda: None,
 ) -> FastAPI:
     """Build the app around an already-wired ``Shortener``.
@@ -56,6 +57,7 @@ def create_app(
     Taking dependencies as arguments (instead of reading globals or env vars here) is
     what lets tests build the app with an in-memory store, a fake clock, a private
     metrics registry, and an in-memory span exporter. ``rate_limiter=None``: no limit.
+    ``serve_metrics=False``: no /metrics here (production serves it on its own port).
     """
     metrics = metrics or Metrics()
 
@@ -100,13 +102,13 @@ def create_app(
             raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "not ready")
         return {"status": "ready"}
 
-    # Prometheus scrapes this. Not authenticated here: in production it should only be
-    # reachable on the cluster network (a separate port or a NetworkPolicy), not the edge.
-    @app.get("/metrics", include_in_schema=False)
-    async def prometheus_metrics() -> Response:
-        # On the event loop for the same reason as the probes: a scrape that queues behind
-        # overloaded requests times out, leaving a gap in the metrics exactly when needed.
-        return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
+    if serve_metrics:  # local runs and tests; production: serve_metrics_on_port()
+
+        @app.get("/metrics", include_in_schema=False)
+        async def prometheus_metrics() -> Response:
+            # On the event loop for the same reason as the probes: a scrape that queues
+            # behind overloaded requests times out, leaving a gap exactly when needed.
+            return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
 
     @app.post(
         "/links",
@@ -176,6 +178,23 @@ def create_app(
     return app
 
 
+def serve_metrics_on_port(metrics: Metrics, port: int) -> Callable[[], None]:
+    """Serve /metrics on its own port, in its own thread; returns the shutdown function.
+
+    Separate from the app port so the public port carries no internal data, and so a
+    NetworkPolicy can admit only Prometheus to it. Its own thread (prometheus_client's
+    WSGI server) also means a scrape never waits behind request work.
+    """
+    server, thread = start_http_server(port, registry=metrics.registry)
+
+    def stop() -> None:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    return stop
+
+
 def create_app_from_env() -> FastAPI:
     """Production wiring. Run with: uvicorn --factory shortly.api:create_app_from_env"""
     # Imported here so tests of the HTTP layer never need a database driver configured.
@@ -210,11 +229,21 @@ def create_app_from_env() -> FastAPI:
         limit = Limit(settings.rate_limit_creates_per_minute, settings.rate_limit_burst)
         limiter = PostgresRateLimiter(engine, limit)
 
+    stop_metrics = (
+        serve_metrics_on_port(metrics, settings.metrics_port) if settings.metrics_port else None
+    )
+
+    def shutdown() -> None:
+        engine.dispose()  # close pooled connections cleanly
+        if stop_metrics is not None:
+            stop_metrics()
+
     return create_app(
         Shortener(PostgresStore(engine), on_collision=metrics.code_collisions.inc),
         base_url=settings.base_url,
         metrics=metrics,
         tracer_provider=provider,
         rate_limiter=limiter,
-        on_shutdown=engine.dispose,  # close pooled connections cleanly
+        serve_metrics=stop_metrics is None,
+        on_shutdown=shutdown,
     )

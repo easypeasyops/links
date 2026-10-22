@@ -1,0 +1,44 @@
+{{- if .Values.networkPolicy.enabled }}
+# Least privilege on the network, for the app pods and the migration Job (both carry the
+# selector labels). Once a pod is selected, everything not listed here is denied:
+#   in:  the app port from httpFrom (anyone by default), the metrics port from Prometheus
+#   out: DNS, and the database. Nothing else: the app calls no other service.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "shortly.fullname" . }}
+  labels:
+    {{- include "shortly.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "shortly.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - { port: 8000, protocol: TCP }
+      {{- with .Values.networkPolicy.httpFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    - ports:
+        - { port: {{ .Values.config.metricsPort }}, protocol: TCP }
+      from:
+        {{- required "networkPolicy.metricsFrom must name the scraper" .Values.networkPolicy.metricsFrom | toYaml | nindent 8 }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        {{- toYaml .Values.networkPolicy.databaseTo | nindent 8 }}
+      ports:
+        - { port: {{ .Values.networkPolicy.databasePort }}, protocol: TCP }
+    {{- with .Values.networkPolicy.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
