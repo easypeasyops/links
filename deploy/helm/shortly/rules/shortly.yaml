@@ -68,3 +68,19 @@ groups:
           summary: The HPA has been at maxReplicas for 15 minutes
           description: Autoscaling has no headroom left. See Capacity in the design doc for the sizing rule and the DB connection budget.
           runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
+
+      # 429s are the limiter working, so they never burn the availability SLO. A large,
+      # sustained share is still worth a look: one client hammering creates (abuse, or a
+      # buggy integration in a loop), or a limit too tight for many users behind one
+      # address (corporate or carrier-grade NAT).
+      - alert: ShortlyRateLimiting
+        expr: |-
+          sum by (namespace) (rate(rate_limited_total[15m]))
+            / sum by (namespace) (rate(http_requests_total{method="POST", route="/links"}[15m])) > 0.1
+        for: 30m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Over 10% of link creations are rate limited
+          description: For 30 minutes, more than 1 in 10 POST /links requests got 429. Find out whether it is abuse or a limit that is too tight for legitimate clients.
+          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#rate-limiting-429-on-post-links

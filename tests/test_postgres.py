@@ -141,3 +141,23 @@ def test_pool_in_use_counts_checked_out_connections(pg_url: str) -> None:
         assert pool_in_use(make_engine(pg_url, pooled=False))() == 0
     finally:
         engine.dispose()
+
+
+@pytest.mark.usefixtures("restore_logging")
+@pytest.mark.parametrize(("per_minute", "expected"), [("1", [201, 429]), ("0", [201, 201])])
+def test_production_wiring_rate_limits_from_env(
+    pg_url: str,
+    pg_store: PostgresStore,
+    monkeypatch: pytest.MonkeyPatch,
+    per_minute: str,
+    expected: list[int],
+) -> None:
+    monkeypatch.setenv("SHORTLY_DATABASE_URL", pg_url)
+    monkeypatch.setenv("SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE", per_minute)  # 0 = off
+    monkeypatch.setenv("SHORTLY_RATE_LIMIT_BURST", "1")
+    with TestClient(create_app_from_env()) as client:
+        statuses = [
+            client.post("/links", json={"url": "https://example.com/"}).status_code
+            for _ in range(2)
+        ]
+    assert statuses == expected

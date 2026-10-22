@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-21 for v0.2.0 / chart 0.3.0. Mirrored at
+> Last updated 2026-10-21 for v0.2.0 plus unreleased rate limiting on main / chart 0.4.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -24,7 +24,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.2.0 and chart 0.3.0: the capacity work (autocommit, load shedding, HPA), and SLOs with burn-rate alerts delivered through kube-prometheus-stack. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.2.0 plus main (chart 0.4.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, and per-client rate limiting (not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -90,17 +90,43 @@ Collisions are therefore expected long before the space is full, and they are ha
 
 ## HTTP API
 
-The HTTP layer only parses input, calls the service and maps outcomes to status codes; it holds no business logic. It is built by `create_app(shortener, base_url=..., metrics=..., tracer_provider=...)`, so tests construct it with in-memory dependencies.
+The HTTP layer only parses input, calls the service and maps outcomes to status codes; it holds no business logic. It is built by `create_app(shortener, base_url=..., metrics=..., tracer_provider=..., rate_limiter=...)`, so tests construct it with in-memory dependencies.
 
 | Method + path | Success | Errors | Notes |
 | --- | --- | --- | --- |
-| `POST /links` | 201 `{code, short_url, target, expires_at}` | 422 invalid URL or TTL; 503 code space exhausted | Body `{"url": "https://…", "ttl_seconds": 1..31536000}` (TTL optional) |
+| `POST /links` | 201 `{code, short_url, target, expires_at}` | 422 invalid URL or TTL; **429 + `Retry-After`** over the per-client limit; 503 code space exhausted | Body `{"url": "https://…", "ttl_seconds": 1..31536000}` (TTL optional) |
 | `GET /{code}` | 307, `Location: <target>` | 404 unknown; 410 expired; 503 + `Retry-After: 1` when the DB pool is exhausted | Sync endpoint: blocking DB calls run in the threadpool |
 | `GET /healthz` | 200 | — | Liveness: process is responsive. Never touches the DB. `async`: answered on the event loop, never behind request work |
 | `GET /readyz` | 200 | 503 when the DB ping fails | Readiness: can this pod take traffic. The ping runs on its own one-thread limiter, not the request threadpool |
 | `GET /metrics` | 200, Prometheus text | — | Should be reachable only from inside the cluster. `async`, so scrapes don't time out under load |
 
 Any endpoint that touches the database returns **503 with `Retry-After: 1`** when no pooled connection frees up within `SHORTLY_DB_POOL_TIMEOUT_SECONDS`. The store raises `StoreBusyError` (overload, not failure), and the API maps it in one place and counts it in `load_shed_total`.
+
+### Rate limiting
+
+`POST /links` is limited per client: by default a burst of 20, then 60 per minute (`SHORTLY_RATE_LIMIT_*`). Over the limit the API answers **429** with `Retry-After` in whole seconds, rounded up so that a client which waits that long succeeds. Creates are limited because each one writes a row that lives forever and can carry abuse (masking a phishing link). Redirects are not limited: they are cheap reads, and a flood of them is a denial-of-service problem for the edge, not something a pod can fix by counting.
+
+**Algorithm: GCRA** (generic cell rate algorithm), a token bucket stored as one number per client. That number is the theoretical arrival time `tat`: the moment the client's bucket would be full again. Each allowed request moves `tat` forward by `T = 60 / per_minute` seconds. A request is allowed if, after the move, `tat` is at most `burst × T` ahead of now. A refused request changes nothing, and its `Retry-After` is exact. Unlike a fixed-window counter, there is no window edge across which a client can double its rate, and there is no refill job.
+
+**State in Postgres, one statement.** The single number makes the shared version one atomic upsert:
+
+```sql
+INSERT INTO rate_limits AS r (key, tat) VALUES (:key, :now + :T)
+ON CONFLICT (key) DO UPDATE SET tat = GREATEST(r.tat, :now) + :T
+ WHERE GREATEST(r.tat, :now) + :T - :now <= :burst_x_T
+RETURNING tat              -- no row returned = refused
+```
+
+The row lock serialises concurrent requests from one client, so the limit is **exact across replicas**. A test sends 40 concurrent requests from one client through 5 connections and gets exactly the burst of 10. The e2e sends a burst through the prod Service, which spreads it over both pods, and requires 429 at exactly burst + 1. The alternatives were weaker:
+
+- Per-pod counters give each client N times the limit, and N changes with the HPA.
+- Redis is exact too, but adds a stateful service and a new failure mode.
+
+The cost is one extra query per create (see Capacity). The time comes from the app's clock, so tests can drive it. NTP keeps pods within milliseconds, which is noise for a limit counted in seconds. A row whose `tat` has passed means the same as no row, so each pod deletes those at most once a minute. The table holds only the clients active in the last few seconds.
+
+**Who is a client.** The key is the peer IP after uvicorn's proxy-header handling. IPv6 is grouped by /64, because one subscriber usually holds a whole /64. `X-Forwarded-For` is believed only from `FORWARDED_ALLOW_IPS`: the chart value `config.forwardedAllowIps`, which defaults to localhost only. It must be exactly the ingress or load balancer. Anything listed there can claim to be any client; anything missing makes the proxy itself the one "client" everyone shares. In kind there is no ingress, so prod trusts the pod network (`10.244.0.0/16`, pinned in `deploy/kind/cluster.yaml`). That lets the in-cluster load generators act as many clients, each from a random address in the benchmark range 198.18.0.0/15. The local compose stack trusts its network for the same reason.
+
+Refusals are counted in `rate_limited_total`, appear as status 429 in `http_requests_total` (a 4xx, so they never burn an SLO), and log one `rate limited` line naming the client key. That line is the only place the app logs an address, and only for refused requests. Addresses are personal data, so keep log retention short.
 
 **307, not 301.** Browsers cache a 301 indefinitely, so an expired link would keep redirecting and future click analytics would never see repeat visits.
 
@@ -112,7 +138,7 @@ Every response carries `x-request-id`. A caller-supplied ID matching `[A-Za-z0-9
 
 ## Data and migrations
 
-One table, defined with SQLAlchemy Core in `src/shortly/db.py`; the database enforces the same invariants as the model.
+Two tables, defined with SQLAlchemy Core in `src/shortly/db.py`; the database enforces the same invariants as the model.
 
 ```sql
 CREATE TABLE links (
@@ -121,6 +147,11 @@ CREATE TABLE links (
   created_at  TIMESTAMPTZ NOT NULL,
   expires_at  TIMESTAMPTZ NULL,
   CONSTRAINT expiry_after_creation CHECK (expires_at IS NULL OR expires_at > created_at)
+);
+
+CREATE TABLE rate_limits (    -- GCRA state (see Rate limiting); short-lived rows
+  key  VARCHAR(64) PRIMARY KEY,  -- client IP, or IPv6 /64
+  tat  DOUBLE PRECISION NOT NULL -- epoch seconds; a past value means "no state"
 );
 ```
 
@@ -152,6 +183,9 @@ All configuration comes from environment variables, parsed by `pydantic-settings
 | `SHORTLY_BASE_URL` | `http://localhost:8000` | Public base for `short_url` |
 | `SHORTLY_DB_POOL_SIZE` | `5` | Connections per pod (fixed, no overflow) |
 | `SHORTLY_DB_POOL_TIMEOUT_SECONDS` | `1.0` | Longest wait for a pooled connection before a 503 |
+| `SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE` | `60` | Sustained `POST /links` rate per client; `0` turns limiting off |
+| `SHORTLY_RATE_LIMIT_BURST` | `20` | Creates a quiet client may make at once |
+| `FORWARDED_ALLOW_IPS` | `127.0.0.1` | Read by uvicorn: peers whose `X-Forwarded-For` is believed. Must be exactly the ingress |
 | `SHORTLY_LOG_LEVEL` | `INFO` | One of DEBUG, INFO, WARNING, ERROR |
 | `SHORTLY_LOG_JSON` | `true` | `false` for human-readable local logs |
 | `SHORTLY_SERVICE_NAME` | `shortly` | `service.name` on traces |
@@ -183,6 +217,7 @@ Probe and scrape requests (`/healthz`, `/readyz`, `/metrics`) log at DEBUG so th
 | `db_pool_size` | gauge | — | Configured connections per pod |
 | `db_pool_in_use` | gauge | — | Connections checked out now; near `db_pool_size` means the pool is the bottleneck |
 | `load_shed_total` | counter | — | Requests rejected with 503 because the backend was saturated |
+| `rate_limited_total` | counter | — | `POST /links` refused with 429: the client was over its limit. No client label: one series per address would be unbounded |
 
 **Cardinality rule.** The `route` label is the route template (`/{code}`), never the raw path. Raw paths would create one time series per link ever made. A test asserts that 50 distinct codes produce one series; unmatched paths share `route="unmatched"`.
 
@@ -226,6 +261,7 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 | `ShortlyNotReady` | page | Pods out of rotation fail requests at the load balancer, which the app never counts |
 | `ShortlyLoadShedding` | ticket | It burns the budget too, but this alert names the cause: the DB pool is exhausted |
 | `ShortlyAtMaxReplicas` | ticket | The HPA has no headroom left; uses kube-state-metrics |
+| `ShortlyRateLimiting` | ticket | Over 10% of creates refused with 429 for 30 minutes: abuse, or a limit too tight for real users. 429s never burn the SLO, so without this a bad limit would be invisible |
 
 **How the rules are kept honest** (`tests/test_alert_rules.py`, which runs in CI):
 
@@ -287,9 +323,9 @@ No change reaches `main` without passing three CI jobs, and no image is publishe
 
 | Gate | When | What it proves |
 | --- | --- | --- |
-| `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~115 tests incl. real Postgres, promtool, amtool and the Kyverno CLI; coverage floor 90% (currently ~98%) |
+| `lint, type-check, test` | every PR, push to main | `uv sync --locked`, format, lint, mypy, ~150 tests incl. real Postgres, promtool, amtool and the Kyverno CLI; coverage floor 90% (currently ~98%) |
 | `build, scan, smoke-test image` | every PR, push to main | Image builds; Trivy finds no fixable HIGH/CRITICAL; black-box smoke test (non-root, readiness, create → 307, request IDs, metrics, JSON logs, SIGTERM → exit 0) |
-| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager; the API server refuses shortly images without release provenance |
+| `deploy to kind, rollback drill` | every PR, push to main | Digest-mode render passes API-server dry run; staging deploy under restricted PSS; same image promoted to prod; the rate limit holds exactly across its replicas; broken release auto-rolls back with 0 failed requests; manual `helm rollback` works; under in-cluster k6 load the HPA adds ready pods; monitoring end to end, from scrape to an alert routed by Alertmanager; the API server refuses shortly images without release provenance |
 | Release workflow | tag `vX.Y.Z` | Tag equals `pyproject.toml` version; scan before publish; multi-arch push; SBOM; signed provenance; GitHub Release with digest |
 
 **Image.** Multi-stage: uv builds the virtualenv in a builder stage, and only the venv reaches the runtime stage. Dependencies are a separate cached layer from the code. Runtime runs as UID 10001 with code owned by root (read-only to the app), pip removed (its vendored urllib3/msgpack/setuptools were the only HIGH findings), exec-form `CMD` so uvicorn is PID 1 and receives SIGTERM.
@@ -405,6 +441,15 @@ The measuring host had 2 cores and about 14% steal, so treat the figures as ±15
 
 CPU per request fell from 2.6–2.9 ms to 2.0–2.3 ms.
 
+**With the rate limiter** (one pod, 1 CPU, same host; three alternating runs per image, every step PASS; creates came from random synthetic clients, so every create did the extra upsert and none was refused):
+
+| Offered req/s | Before: CPU ms/req | Rate limit: CPU ms/req | Change |
+| --- | --- | --- | --- |
+| 250 | 2.09 / 2.13 / 2.09 | 2.27 / 2.19 / 2.07 | +4% |
+| 300 | 1.95 / 1.95 / 1.91 | 2.05 / 2.07 / 2.05 | +6% |
+
+Only creates (10% of the mix) pay for the extra query, so the cost is small, and the sizing below is unchanged. One run per step was not enough to tell: the first single runs showed a FAIL at 200 req/s for one image and at 100 req/s for the other, each from one latency spike that the repeats didn't reproduce. Repeat a step before believing a single FAIL on this host.
+
 **Findings**
 
 1. **The ceiling is app CPU.** A saturated pod uses about 0.9 core and no more: one uvicorn worker means one GIL. At 250 req/s Postgres used 0.09 cores (about 0.4 ms per request), so one Postgres core can serve roughly 10 pods.
@@ -446,7 +491,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | --- | --- |
 | Guessing or enumerating codes | CSPRNG codes from a 3.5 × 10¹² space; no listing endpoint |
 | Script injection via redirect target | Targets restricted to http/https (`javascript:` rejected) |
-| Open redirect / phishing via shortly | **Not mitigated** — no URL reputation check or rate limit (see Known limitations) |
+| Open redirect / phishing via shortly | **Partly mitigated**: a per-client rate limit on creates slows bulk abuse; there is no URL reputation check (see Known limitations) |
+| Spoofed client address to dodge the rate limit | `X-Forwarded-For` believed only from `FORWARDED_ALLOW_IPS` (localhost by default; the ingress in a real cluster) |
 | Log injection / log flooding via headers | `x-request-id` accepted only if `[A-Za-z0-9._-]{1,64}`; JSON encoding escapes everything else |
 | Host-header spoofing in generated links | `short_url` built from configured `base_url` only |
 | Compromised dependency or base image | Lockfile with hashes, digest-pinned bases, Trivy gate on every PR and before publish, weekly Dependabot |
@@ -467,6 +513,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Storage access | SQLAlchemy Core, sync, psycopg 3 | ORM; async driver | One table; sync in threadpool is simple. The load test shows a CPU ceiling, which an async driver would not raise |
 | Transactions | Autocommit for the app; transactions for migrations | Implicit transaction per request | Every app query is one atomic statement; saves 2 round trips per request (about +25% capacity) |
 | Pool | Fixed size 5, no overflow, 1 s timeout → 503 | SQLAlchemy defaults (overflow 10, 30 s wait) | Known Postgres connection budget; overload fails fast instead of piling up |
+| Rate limiting | GCRA, state in Postgres, per client IP (IPv6 /64), creates only | Per-pod in-memory counters; Redis; fixed-window counters; limiting at the ingress only | Exact across replicas with one upsert and no new service; no window-edge bursts. Ingress limits are usually per ingress replica and untested by the app's suite; coarse flood protection at the edge can still be added on top |
 | Scaling | HPA on CPU, 2–10 pods | Fixed replicas; scaling on request rate or latency | CPU is the measured bottleneck and needs no custom-metrics adapter |
 | Storage abstraction | `LinkStore` Protocol + contract tests | Direct DB calls in service | Postgres and in-memory pass the same suite; fast unit tests |
 | Redirect status | 307 | 301, 302 | Not cached permanently; preserves method |
@@ -509,7 +556,9 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 
 **Limitations**
 
-- No rate limiting or URL reputation checks: shortly can be used to mask phishing links.
+- No URL reputation check: shortly can still be used to mask phishing links, only more slowly.
+- The rate limit is per IP address, so it is no defence against many addresses (a botnet), and it groups users behind one NAT. With accounts, it would be per user.
+- In kind, prod trusts `X-Forwarded-For` from every pod, so any pod there can choose its client address.
 - No link deletion or expiry cleanup; expired rows stay in the table.
 - `/metrics` is on the public port; no NetworkPolicy restricts it.
 - The image allowlist is Audit-only in kind, so a non-shortly image can still run in the app namespaces; it is reported, not refused.
@@ -527,7 +576,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 
 **Next steps, in rough priority order**
 
-1. Rate limiting per client on `POST /links`; Safe Browsing check on targets.
+1. URL reputation check on targets (Google Safe Browsing or similar).
 2. Move `/metrics` to a separate port; add a NetworkPolicy.
 3. Expired-link cleanup job and an index on `expires_at`.
 4. A concurrency limit that sheds CPU overload; a statement or socket timeout for a hung database.

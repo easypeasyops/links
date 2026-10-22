@@ -255,3 +255,43 @@ tests:
               summary: The HPA has been at maxReplicas for 15 minutes
               description: Autoscaling has no headroom left. See Capacity in the design doc for the sizing rule and the DB connection budget.
               runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
+
+  - name: half of creates rate limited for 30 minutes opens a ticket
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{method="POST",route="/links",status="201"}'
+        values: '0+60x90'
+      - series: 'http_requests_total{method="POST",route="/links",status="429"}'
+        values: '0+60x90'
+      - series: 'rate_limited_total'
+        values: '0+60x90'
+    alert_rule_test:
+      - eval_time: 25m # true since the start, but not for 30 minutes yet
+        alertname: ShortlyRateLimiting
+        exp_alerts: []
+      - eval_time: 60m
+        alertname: ShortlyRateLimiting
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: Over 10% of link creations are rate limited
+              description: For 30 minutes, more than 1 in 10 POST /links requests got 429. Find out whether it is abuse or a limit that is too tight for legitimate clients.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#rate-limiting-429-on-post-links
+      # Even at 50%: a 429 is a client error, so the create availability SLO doesn't burn.
+      - eval_time: 60m
+        alertname: CreateAvailabilityBudgetBurn
+        exp_alerts: []
+
+  - name: a few rate-limited creates stay quiet
+    interval: 1m
+    input_series:
+      - series: 'http_requests_total{method="POST",route="/links",status="201"}'
+        values: '0+98x90'
+      - series: 'http_requests_total{method="POST",route="/links",status="429"}'
+        values: '0+2x90'
+      - series: 'rate_limited_total'
+        values: '0+2x90'
+    alert_rule_test:
+      - eval_time: 60m
+        alertname: ShortlyRateLimiting
+        exp_alerts: []

@@ -140,6 +140,11 @@ class Metrics:
             "Requests rejected with 503 because the backend was saturated.",
             registry=self.registry,
         )
+        self.rate_limited = Counter(
+            "rate_limited",
+            "POST /links requests refused with 429 because the client was over its limit.",
+            registry=self.registry,
+        )
 
 
 # ------------------------------------------------------------------------------ middleware
