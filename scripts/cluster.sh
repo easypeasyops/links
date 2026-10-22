@@ -103,7 +103,14 @@ install_policies() {
   helm upgrade --install kyverno "$KYVERNO_CHART@$KYVERNO_DIGEST" \
     --version "$KYVERNO_VERSION" --namespace kyverno \
     --values "$ROOT/deploy/kind/kyverno-values.yaml" --wait --timeout 10m >/dev/null
-  kubectl apply -f "$ROOT/deploy/policies/" >/dev/null
+  # helm --wait can return before Kyverno's own webhook (which validates the policies we're
+  # about to apply) is serving: wait for the rollout, then retry the apply until it answers.
+  kubectl -n kyverno rollout status deploy/kyverno-admission-controller --timeout=180s >/dev/null
+  for i in $(seq 1 30); do
+    kubectl apply -f "$ROOT/deploy/policies/" >/dev/null 2>/tmp/kyverno-apply.err && break
+    ((i < 30)) || { cat /tmp/kyverno-apply.err >&2; exit 1; }
+    sleep 4
+  done
   # A policy only protects once Kyverno has compiled it and registered its webhook.
   for kind in imagevalidatingpolicy validatingpolicy; do
     kubectl wait "$kind" --all --for=jsonpath='{.status.conditionStatus.ready}'=true \
