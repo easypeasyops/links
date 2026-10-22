@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-21 for v0.2.0 plus unreleased rate limiting on main / chart 0.4.0. Mirrored at
+> Last updated 2026-10-21 for v0.3.0 / chart 0.4.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -8,7 +8,7 @@
 
 shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /{code}` redirects to the target with a 307. It is built as a production-shaped reference service, so the operational machinery around it (CI, supply chain, observability, deploys, rollback) matters as much as the feature.
 
-**Status:** v0.2.0 released 2026-10-21 as `ghcr.io/statsguy/shortly@sha256:18754ab5bcb0…` (amd64 + arm64), with signed SLSA provenance (previous: v0.1.0, 2026-10-20). It deploys to local Kubernetes (kind) in `staging` and `prod` namespaces.
+**Status:** v0.3.0 released 2026-10-21 as `ghcr.io/statsguy/shortly@sha256:bf179906ca03…` (amd64 + arm64), with signed SLSA provenance (previous: v0.2.0, 2026-10-21). It deploys to local Kubernetes (kind) in `staging` and `prod` namespaces.
 
 **Goals**
 
@@ -24,7 +24,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.2.0 plus main (chart 0.4.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, and per-client rate limiting (not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.3.0 and chart 0.4.0: the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, and per-client rate limiting. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
