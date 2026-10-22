@@ -15,8 +15,9 @@
 #   4. a broken release is rolled back automatically, with ZERO failed requests meanwhile
 #   5. a manual `helm rollback` restores a previous revision
 #   6. under load, the HPA adds ready pods (scripts/hpa-drill.sh; skip with HPA_DRILL=0)
-#   7. monitoring works end to end: scrape, rules, dashboard queries, and a real alert routed
-#      by Alertmanager (scripts/monitoring-check.sh; skipped when the stack isn't installed)
+#   7. monitoring works end to end: scrape, rules, dashboard queries (scripts/monitoring-check.sh),
+#      and a real alert routed by Alertmanager (scripts/alert-drill.sh, run in the background
+#      during steps 3-6; both skipped when the stack isn't installed)
 #   8. admission refuses shortly images without release provenance, even from hand-run
 #      kubectl (scripts/admission-check.sh; skipped when Kyverno isn't installed)
 #   9. network policies are enforced: the metrics port and Postgres refuse other pods
@@ -26,6 +27,7 @@ set -euo pipefail
 IMAGE="${IMAGE:?set IMAGE, e.g. IMAGE=shortly:e2e}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PF_PIDS=()
+ALERT_PID="" ALERT_LOG=$(mktemp)
 
 pass() { echo "ok   $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -33,6 +35,11 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 on_exit() {
   status=$?
   for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
+  if [[ -n "$ALERT_PID" ]]; then # still running (or never collected): stop it, show its output
+    kill "$ALERT_PID" 2>/dev/null || true
+    wait "$ALERT_PID" 2>/dev/null || true # its EXIT trap restores staging
+    sed 's/^/     alert drill: /' "$ALERT_LOG"
+  fi
   if [[ $status -ne 0 ]]; then
     echo "--- diagnostics ---"
     for ns in staging prod; do
@@ -99,6 +106,18 @@ forward staging 18081 9100 /metrics
 curl -sf http://127.0.0.1:18081/metrics | grep -q 'links_created_total 1.0' || fail "staging metrics"
 pass "staging: migrated, ready, create → 307, metrics on port 9100 only"
 
+# ---------------------------------------------------------------- 7a. alert drill, in the background
+# It scales staging to zero and waits about 90 s for ShortlyNoAvailablePods to reach
+# Alertmanager. Steps 3-6 only touch prod, so it runs alongside them instead of after them.
+# Collected in step 7, before anything uses staging again.
+monitoring=0
+kubectl get crd prometheusrules.monitoring.coreos.com >/dev/null 2>&1 && monitoring=1
+if ((monitoring)); then
+  "$ROOT/scripts/alert-drill.sh" >"$ALERT_LOG" 2>&1 &
+  ALERT_PID=$!
+  echo "     alert drill started in the background (staging scaled to 0)"
+fi
+
 # ---------------------------------------------------------------- 3. promote to prod
 "$ROOT/scripts/deploy.sh" prod "$IMAGE" >/dev/null
 ready=$(kubectl -n prod get deploy shortly -o jsonpath='{.status.readyReplicas}')
@@ -147,12 +166,15 @@ good_image=$(deployed_image prod)
 # ---------------------------------------------------------------- 4. automatic rollback
 # A bad config value makes the new pods fail at boot (Settings validation). They never
 # become ready, so the rollout can't progress; maxUnavailable=0 keeps the old pods serving;
-# helm times out and rolls back. Meanwhile we hit prod's Service and count failures.
-errors_file=$(mktemp)
+# helm times out and rolls back. Meanwhile we hit prod's Service and count failures, from
+# before the upgrade until the rollback is done.
+# 30 s is plenty for the timeout: the new pods crash within seconds of starting, and the
+# rollout cannot get unstuck. A longer wait proves nothing more.
+errors_file=$(mktemp) stop_file=$(mktemp -u)
 (
   errors=0
-  end=$((SECONDS + 75))
-  while ((SECONDS < end)); do
+  end=$((SECONDS + 180)) # a backstop only
+  while [[ ! -e "$stop_file" ]] && ((SECONDS < end)); do
     in_cluster prod /readyz || errors=$((errors + 1))
     sleep 0.2
   done
@@ -160,10 +182,11 @@ errors_file=$(mktemp)
 ) &
 load_pid=$!
 
-if DEPLOY_TIMEOUT=60s "$ROOT/scripts/deploy.sh" prod "$IMAGE" \
+if DEPLOY_TIMEOUT=30s "$ROOT/scripts/deploy.sh" prod "$IMAGE" \
   --set config.logLevel=NOT_A_LEVEL --set migrations.enabled=false >/dev/null 2>&1; then
   fail "broken release was accepted"
 fi
+touch "$stop_file"
 wait "$load_pid"
 errors=$(cat "$errors_file")
 
@@ -191,8 +214,11 @@ if [[ "${HPA_DRILL:-1}" != 0 ]]; then
 fi
 
 # ---------------------------------------------------------------- 7. monitoring
-if kubectl get crd prometheusrules.monitoring.coreos.com >/dev/null 2>&1; then
-  "$ROOT/scripts/monitoring-check.sh"
+if ((monitoring)); then
+  ALERT_DRILL=0 "$ROOT/scripts/monitoring-check.sh"
+  pid=$ALERT_PID ALERT_PID=""
+  wait "$pid" || { sed 's/^/     /' "$ALERT_LOG"; fail "alert drill (scripts/alert-drill.sh)"; }
+  cat "$ALERT_LOG"
 else
   echo "skip monitoring checks: kube-prometheus-stack not installed (MONITORING=0?)"
 fi

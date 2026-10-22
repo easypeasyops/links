@@ -3,8 +3,12 @@
 # that the HorizontalPodAutoscaler adds ready pods. Run by scripts/k8s-e2e.sh (and so by
 # CI), or on its own against a deployed environment:
 #
-#   scripts/hpa-drill.sh                     # prod, 1000 req/s for 100 s
-#   NS=prod RATE=1500 DURATION=240s scripts/hpa-drill.sh
+#   scripts/hpa-drill.sh                     # prod, 1000 req/s until a new pod is ready
+#   NS=prod RATE=1500 DURATION=240s FULL=1 scripts/hpa-drill.sh   # the whole 240 s
+#
+# It stops the load as soon as the HPA has added a ready pod: that is all it asserts, and
+# the rest of the load would only cost time (about a minute in CI). DURATION is the ceiling;
+# FULL=1 runs it out, to watch the HPA keep scaling and see k6's summary.
 #
 # It gates on scaling only. k6's latency thresholds are expected to fail during the first
 # seconds of the spike (that is the gap autoscaling has to close); they are printed, not
@@ -16,8 +20,10 @@ NS="${NS:-prod}"
 # tolerance), and per-request CPU varies by hardware. 600 req/s gave 75% vs a 70% target on
 # a GitHub runner (ratio 1.07, so no scale-up): too close. 1000 lands well past 77%.
 RATE="${RATE:-1000}"
-# 100 s: in CI the first new pod is ready after 30-55 s, so this leaves about 2x margin.
+# A ceiling, not the usual run time: in CI the first new pod is ready after 30-55 s, so
+# 100 s leaves about 2x margin before the drill fails.
 DURATION="${DURATION:-100s}"
+FULL="${FULL:-0}"
 K6_IMAGE="${K6_IMAGE:-grafana/k6:2.3.0}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 JOB=k6-hpa-drill
@@ -87,8 +93,8 @@ spec:
 YAML
 echo "     load: $RATE req/s for $DURATION against $NS"
 
-# 3. Watch until the load finishes.
-start=$SECONDS peak=0 first_scale="" max_cpu=0
+# 3. Watch until a new pod is ready (or, with FULL=1, until the load finishes).
+start=$SECONDS peak=0 first_scale="" max_cpu=0 stopped_early=0
 while :; do
   r=$(ready); r=${r:-0}
   ((r > peak)) && peak=$r
@@ -97,13 +103,20 @@ while :; do
   ((cpu > max_cpu)) && max_cpu=$cpu
   printf '     t=+%3ss  ready=%s  desired=%s  cpu=%s%%\n' $((SECONDS - start)) "$r" \
     "$(hpa '{.status.desiredReplicas}')" "$cpu"
+  if [[ -n "$first_scale" && "$FULL" == 0 ]]; then stopped_early=1; break; fi
   done_count=$(kubectl -n "$NS" get job "$JOB" -o jsonpath='{.status.succeeded}{.status.failed}')
   [[ -n "$done_count" ]] && break
   ((SECONDS - start < 600)) || fail "load job did not finish in 600 s"
-  sleep 10
+  sleep 5
 done
-echo "     k6 summary (informational):"
-kubectl -n "$NS" logs "job/$JOB" 2>/dev/null | grep -E '✓|✗|http_req_duration|http_req_failed|http_reqs' | sed 's/^/       /' || true
+if ((stopped_early)); then
+  echo "     stopping the load: the HPA has added a ready pod (FULL=1 runs all of $DURATION)"
+  # Foreground deletion: the k6 pod is gone, and its load with it, before the next step.
+  kubectl -n "$NS" delete job "$JOB" --cascade=foreground --timeout=60s >/dev/null 2>&1 || true
+else
+  echo "     k6 summary (informational):"
+  kubectl -n "$NS" logs "job/$JOB" 2>/dev/null | grep -E '✓|✗|http_req_duration|http_req_failed|http_reqs' | sed 's/^/       /' || true
+fi
 
 target=$(hpa '{.spec.metrics[0].resource.target.averageUtilization}')
 if ((peak <= min)); then

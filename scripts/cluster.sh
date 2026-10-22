@@ -31,12 +31,17 @@ up() {
     kind create cluster --config "$ROOT/deploy/kind/cluster.yaml" --wait 120s
   fi
   kubectl config use-context "kind-$CLUSTER" >/dev/null
-  install_metrics_server
-  # Before the app namespaces: the shortly chart's ServiceMonitor and PrometheusRule need
-  # the stack's CRDs to exist.
-  if [[ "${MONITORING:-1}" != 0 ]]; then install_monitoring; fi
-  # Before any app pod: from here on, the API server refuses unverified shortly images.
-  if [[ "${POLICIES:-1}" != 0 ]]; then install_policies; fi
+  # The three add-ons don't depend on each other, so they install side by side (about 25 s
+  # faster than one after another). Kyverno's policies cover staging and prod only, so they
+  # can't get in the way of the monitoring pods. All three finish before the app namespaces:
+  # the shortly chart's ServiceMonitor and PrometheusRule need the stack's CRDs, and from
+  # here on the API server refuses unverified shortly images.
+  local pids=() failed=0
+  install_metrics_server & pids+=($!)
+  if [[ "${MONITORING:-1}" != 0 ]]; then install_monitoring & pids+=($!); fi
+  if [[ "${POLICIES:-1}" != 0 ]]; then install_policies & pids+=($!); fi
+  for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+  ((failed == 0)) || { echo "an add-on failed to install (its error is above)" >&2; exit 1; }
 
   for ns in "${ENVS[@]}"; do
     kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -82,6 +87,7 @@ install_metrics_server() {
       -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]' >/dev/null
   fi
   kubectl -n kube-system rollout status deploy/metrics-server --timeout=120s >/dev/null
+  echo "metrics-server ready: $METRICS_SERVER_VERSION"
 }
 
 install_monitoring() {
