@@ -117,7 +117,7 @@ ON CONFLICT (key) DO UPDATE SET tat = GREATEST(r.tat, :now) + :T
 RETURNING tat              -- no row returned = refused
 ```
 
-The row lock serialises concurrent requests from one client, so the limit is **exact across replicas**. A test sends 40 concurrent requests from one client through 5 connections and gets exactly the burst of 10. The e2e sends a burst through the prod Service, which spreads it over both pods, and requires 429 at exactly burst + 1. The alternatives were weaker:
+The row lock serialises concurrent requests from one client, so the limit is **exact across replicas**. A test sends 40 concurrent requests from one client through 5 connections and gets exactly the burst of 10. The e2e sends one client's creates through the prod Service, which spreads them over both pods. It requires at least the burst to succeed and at most the burst plus what refilled while it ran, then 429s; per-pod counters would let all of them through. The alternatives were weaker:
 
 - Per-pod counters give each client N times the limit, and N changes with the HPA.
 - Redis is exact too, but adds a stateful service and a new failure mode.
