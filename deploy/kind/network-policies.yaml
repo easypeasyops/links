@@ -18,7 +18,8 @@ spec:
   policyTypes: [Ingress]
 ---
 # Postgres accepts connections from shortly's pods only: the app, its migration Job and the
-# cleanup Job, which all carry app.kubernetes.io/part-of=shortly (chart 0.6.0 and later).
+# cleanup Job, which all carry app.kubernetes.io/part-of=shortly (chart 0.6.0 and later),
+# and the backup Job (app.kubernetes.io/component=backup, deploy/kind/postgres-backup.yaml).
 # Its readiness probe is an exec (pg_isready), so it needs no network rule.
 # (Charts before 0.6.0 were admitted by app.kubernetes.io/name=shortly. That peer was the
 # "expand" half of the label change; it was removed once no older release ran: "contract".)
@@ -34,5 +35,7 @@ spec:
     - from:
         - podSelector:
             matchLabels: { app.kubernetes.io/part-of: shortly }
+        - podSelector:
+            matchLabels: { app.kubernetes.io/component: backup }
       ports:
         - { port: 5432, protocol: TCP }

@@ -5,6 +5,7 @@
 #   scripts/cluster.sh up              # idempotent
 #   MONITORING=0 scripts/cluster.sh up # skip kube-prometheus-stack (saves ~1 GB of RAM)
 #   POLICIES=0 scripts/cluster.sh up   # skip Kyverno and the admission policies
+#   BACKUPS=0 scripts/cluster.sh up    # skip the backup bucket and the backup CronJobs
 #   scripts/cluster.sh down
 set -euo pipefail
 
@@ -40,6 +41,7 @@ up() {
   install_metrics_server & pids+=($!)
   if [[ "${MONITORING:-1}" != 0 ]]; then install_monitoring & pids+=($!); fi
   if [[ "${POLICIES:-1}" != 0 ]]; then install_policies & pids+=($!); fi
+  if [[ "${BACKUPS:-1}" != 0 ]]; then install_backups & pids+=($!); fi
   for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
   ((failed == 0)) || { echo "an add-on failed to install (its error is above)" >&2; exit 1; }
 
@@ -63,6 +65,15 @@ up() {
     # Default-deny ingress, and Postgres open to shortly's pods only. The chart adds the
     # app's own policy (deploy/helm/shortly/templates/networkpolicy.yaml).
     kubectl -n "$ns" apply -f "$ROOT/deploy/kind/network-policies.yaml" >/dev/null
+    if [[ "${BACKUPS:-1}" != 0 ]]; then
+      # Each environment gets the bucket credentials and an hourly backup CronJob.
+      if ! kubectl -n "$ns" get secret backup-s3 >/dev/null 2>&1; then
+        kubectl -n "$ns" create secret generic backup-s3 \
+          --from-literal=access-key="$(kubectl -n backups get secret seaweedfs-s3 -o jsonpath='{.data.access-key}' | base64 -d)" \
+          --from-literal=secret-key="$(kubectl -n backups get secret seaweedfs-s3 -o jsonpath='{.data.secret-key}' | base64 -d)" >/dev/null
+      fi
+      kubectl -n "$ns" apply -f "$ROOT/deploy/kind/postgres-backup.yaml" >/dev/null
+    fi
   done
 
   for ns in "${ENVS[@]}"; do
@@ -126,6 +137,24 @@ install_policies() {
       --timeout=120s >/dev/null
   done
   echo "policies ready: Kyverno $KYVERNO_VERSION, $(ls "$ROOT"/deploy/policies/*.yaml | wc -l | tr -d ' ') policies"
+}
+
+install_backups() {
+  kubectl create namespace backups --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl label namespace backups --overwrite pod-security.kubernetes.io/enforce=restricted >/dev/null
+  # One S3 identity, generated once, never in git. SeaweedFS reads it from s3.json; the
+  # same keys are copied into each app namespace for the backup Job (see up()).
+  if ! kubectl -n backups get secret seaweedfs-s3 >/dev/null 2>&1; then
+    local key secret
+    key=$(LC_ALL=C tr -dc 'A-Z0-9' </dev/urandom | head -c 20 || true)
+    secret=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 40 || true)
+    kubectl -n backups create secret generic seaweedfs-s3 \
+      --from-literal=access-key="$key" --from-literal=secret-key="$secret" \
+      --from-literal=s3.json="{\"identities\":[{\"name\":\"backup\",\"credentials\":[{\"accessKey\":\"$key\",\"secretKey\":\"$secret\"}],\"actions\":[\"Admin\",\"Read\",\"Write\",\"List\",\"Tagging\"]}]}" >/dev/null
+  fi
+  kubectl -n backups apply -f "$ROOT/deploy/kind/backups.yaml" >/dev/null
+  kubectl -n backups rollout status statefulset/seaweedfs --timeout=180s >/dev/null
+  echo "backups ready: SeaweedFS S3 in namespace backups"
 }
 
 down() {

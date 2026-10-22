@@ -106,3 +106,22 @@ groups:
           summary: Expired-link cleanup hasn't succeeded for over 3 hours
           description: The shortly-cleanup CronJob has missed at least 3 runs, or has never succeeded. Expired links pile up until it runs again.
           runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#cleanup-job-not-running
+
+      # Needs kube-state-metrics. Backups that silently stopped are found during the
+      # incident that needs them. Hourly job (RPO 1 h): fires after 2 missed runs, or if it
+      # has never succeeded in 2 hours. Only where a postgres-backup CronJob exists (the
+      # kind setup); a managed database's backups are watched through its provider.
+      - alert: ShortlyBackupNotRunning
+        expr: |-
+          time() - max by (namespace) (kube_cronjob_status_last_successful_time{cronjob="postgres-backup"}) > 2 * 3600
+            or (
+              time() - max by (namespace) (kube_cronjob_created{cronjob="postgres-backup"}) > 2 * 3600
+                unless max by (namespace) (kube_cronjob_status_last_successful_time{cronjob="postgres-backup"})
+            )
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Postgres backups haven't succeeded for over 2 hours
+          description: The postgres-backup CronJob has missed at least 2 runs, or has never succeeded. Data written since the last good backup can't be recovered if the database is lost.
+          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backup-job-not-running

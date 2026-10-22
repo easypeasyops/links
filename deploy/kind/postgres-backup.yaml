@@ -1,0 +1,98 @@
+# LOCAL ONLY: an hourly logical backup of the namespace's Postgres to the bucket in the
+# `backups` namespace (deploy/kind/backups.yaml). Applied to staging and prod by
+# scripts/cluster.sh. Proven restorable by scripts/restore-drill.sh (e2e step 11).
+#
+#   RPO (data you can lose): up to 1 hour, the schedule. A managed database adds WAL
+#   archiving for point-in-time recovery, which brings that down to seconds.
+#   Retention: 7 days in the bucket; older dumps are deleted by the job itself.
+#
+# Two containers share an emptyDir: pg_dump (the server's own image, so the client is
+# never older than the server) writes and checks the archive, then rclone uploads it.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: postgres-backup
+spec:
+  schedule: "41 * * * *" # hourly, off the hour, and away from the cleanup job (:17)
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid # a slow dump is never doubled up by the next one
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: postgres-backup
+            app.kubernetes.io/component: backup # admitted to the bucket and to Postgres
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70 # the postgres user of the alpine image
+            runAsGroup: 70
+            fsGroup: 70
+            seccompProfile: { type: RuntimeDefault }
+          initContainers:
+            - name: dump
+              image: postgres:17-alpine
+              command: [sh, -ec]
+              args:
+                - |
+                  start=$(date +%s)
+                  # Custom format: compressed, and pg_restore can restore it selectively.
+                  # --no-owner / --no-privileges: restorable into a database with other roles.
+                  pg_dump --dbname "$DATABASE_URL" --format=custom --no-owner --no-privileges \
+                    --file /work/shortly.dump
+                  # A dump that can't be listed can't be restored: fail the job now, not
+                  # during an incident.
+                  pg_restore --list /work/shortly.dump >/dev/null
+                  echo "{\"msg\": \"dump finished\", \"bytes\": $(stat -c %s /work/shortly.dump), \"duration_s\": $(( $(date +%s) - start ))}"
+              env:
+                - name: DATABASE_URL
+                  valueFrom: { secretKeyRef: { name: shortly-db, key: url } }
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: [ALL] }
+              volumeMounts: [{ name: work, mountPath: /work }]
+          containers:
+            - name: upload
+              # rclone 1.75.1, pinned by digest.
+              image: rclone/rclone@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              command: [sh, -ec]
+              args:
+                - |
+                  dest="s3:shortly-backups/$NAMESPACE"
+                  name="shortly-$(date -u +%Y%m%dT%H%M%SZ).dump"
+                  rclone mkdir s3:shortly-backups
+                  rclone copyto /work/shortly.dump "$dest/$name"
+                  # Retention: keep 7 days. Never delete the newest dump, whatever its age.
+                  rclone delete "$dest" --min-age 7d --exclude "$name"
+                  echo "{\"msg\": \"backup uploaded\", \"object\": \"$dest/$name\"}"
+              env:
+                - name: NAMESPACE
+                  valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+                - { name: HOME, value: /tmp } # rclone writes a cache; the root FS is read-only
+                - { name: RCLONE_CONFIG_S3_TYPE, value: s3 }
+                - { name: RCLONE_CONFIG_S3_PROVIDER, value: SeaweedFS }
+                - { name: RCLONE_CONFIG_S3_ENDPOINT, value: "http://seaweedfs.backups.svc:8333" }
+                - name: RCLONE_CONFIG_S3_ACCESS_KEY_ID
+                  valueFrom: { secretKeyRef: { name: backup-s3, key: access-key } }
+                - name: RCLONE_CONFIG_S3_SECRET_ACCESS_KEY
+                  valueFrom: { secretKeyRef: { name: backup-s3, key: secret-key } }
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: [ALL] }
+              volumeMounts:
+                - { name: work, mountPath: /work, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: work
+              emptyDir: { sizeLimit: 512Mi }
+            - name: tmp
+              emptyDir: { sizeLimit: 64Mi }

@@ -146,6 +146,9 @@ def test_allowlist_verdicts(tmp_path: Path) -> None:
         _pod("db", "postgres:17-alpine"),
         _pod("db-qualified", "docker.io/library/postgres:17-alpine"),
         _pod("k6", "grafana/k6:2.3.0"),
+        # The backup Job: pg_dump in an init container, rclone (by digest) uploads.
+        _pod("backup", "rclone/rclone@sha256:" + "b" * 64, init=("postgres:17-alpine",)),
+        _pod("rclone-tag", "rclone/rclone:latest"),  # a tag can move: refused
         _pod("tag", "ghcr.io/statsguy/shortly:0.2.0"),
         _pod("other-image", "docker.io/attacker/miner:latest"),
         _pod("bad-init", release, init=("busybox:1.36",)),
@@ -154,9 +157,9 @@ def test_allowlist_verdicts(tmp_path: Path) -> None:
         _pod("elsewhere", "busybox:1.36", ns="default"),
     ]
     verdicts = _apply(tmp_path, (POLICIES / "allowed-images.yaml").read_text(), pods)
-    for name in ("release", "db", "db-qualified", "k6"):
+    for name in ("release", "db", "db-qualified", "k6", "backup"):
         assert verdicts[name][0] == "pass", (name, verdicts[name])
-    for name in ("tag", "other-image", "bad-init", "old-postgres", "lookalike"):
+    for name in ("tag", "other-image", "bad-init", "old-postgres", "lookalike", "rclone-tag"):
         assert verdicts[name][0] == "fail", (name, verdicts.get(name))
     assert "docker.io/attacker/miner:latest" in verdicts["other-image"][1]
     assert "elsewhere" not in verdicts  # not an app namespace: not evaluated
