@@ -11,4 +11,4 @@ rule_files:
 scrape_configs:
   - job_name: shortly # the alert rules select job="shortly"
     static_configs:
-      - targets: ["app:8000"]
+      - targets: ["app:9100"] # the metrics port, not the app port

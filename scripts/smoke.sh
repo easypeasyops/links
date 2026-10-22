@@ -53,10 +53,13 @@ pass "unknown code 404"
 rid=$(curl -s -D - -o /dev/null -H 'x-request-id: smoke-1' "$BASE/healthz" | tr -d '\r' \
   | awk -F': ' 'tolower($1)=="x-request-id"{print $2}')
 [[ "$rid" == "smoke-1" ]] || fail "request id not echoed (got '$rid')"
-metrics=$(curl -sf "$BASE/metrics")
+# /metrics is on its own port; the app port must not serve it.
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/metrics")
+[[ "$code" == "404" ]] || fail "/metrics on the app port returned $code, want 404"
+metrics=$(curl -sf "http://127.0.0.1:9100/metrics")
 grep -q 'http_requests_total{method="GET",route="/{code}",status="307"}' <<<"$metrics" \
   || fail "/metrics missing the redirect series"
-pass "x-request-id echoed; /metrics has route-templated series"
+pass "x-request-id echoed; /metrics (port 9100 only) has route-templated series"
 
 # 6. Logs are structured: every line the app wrote is a JSON object.
 if ! compose logs --no-color --no-log-prefix app | python3 -c '

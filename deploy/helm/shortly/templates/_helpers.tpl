@@ -51,6 +51,8 @@ max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
   value: {{ .Values.config.logLevel | quote }}
 - name: SHORTLY_DB_POOL_SIZE
   value: {{ .Values.config.dbPoolSize | quote }}
+- name: SHORTLY_METRICS_PORT
+  value: {{ .Values.config.metricsPort | quote }}
 - name: SHORTLY_DB_POOL_TIMEOUT_SECONDS
   value: {{ .Values.config.dbPoolTimeoutSeconds | quote }}
 - name: SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE

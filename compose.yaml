@@ -49,6 +49,7 @@ services:
     environment: *app-env
     ports:
       - "127.0.0.1:8000:8000"
+      - "127.0.0.1:9100:9100" # /metrics lives on its own port (SHORTLY_METRICS_PORT)
     read_only: true # the app never writes to its filesystem; enforce it
     tmpfs: [/tmp]
     cap_drop: [ALL]

@@ -58,7 +58,7 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONDONTWRITEBYTECODE=1
 
 USER app
-EXPOSE 8000
+EXPOSE 8000 9100
 
 # For `docker run` / compose. Kubernetes ignores this and uses its own probes.
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \

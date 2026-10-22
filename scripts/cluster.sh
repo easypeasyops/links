@@ -55,6 +55,9 @@ up() {
         --from-literal=url="postgresql://shortly:${pw}@postgres:5432/shortly" >/dev/null
     fi
     kubectl -n "$ns" apply -f "$ROOT/deploy/kind/postgres.yaml" >/dev/null
+    # Default-deny ingress, and Postgres open to shortly's pods only. The chart adds the
+    # app's own policy (deploy/helm/shortly/templates/networkpolicy.yaml).
+    kubectl -n "$ns" apply -f "$ROOT/deploy/kind/network-policies.yaml" >/dev/null
   done
 
   for ns in "${ENVS[@]}"; do

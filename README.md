@@ -62,7 +62,7 @@ command (`alembic upgrade head`) from the same image — never on app startup.
 | Signal  | Where | Notes |
 |---------|-------|-------|
 | Logs    | stdout, one JSON object per line | `request_id` on every line; `trace_id` when tracing is on |
-| Metrics | `GET /metrics` (Prometheus) | RED metrics by route *template*, plus links created, resolutions, code collisions |
+| Metrics | `GET /metrics` on port 9100 (Prometheus only, by NetworkPolicy) | RED metrics by route *template*, plus links created, resolutions, code collisions |
 | Traces  | OTLP/HTTP when `OTEL_EXPORTER_OTLP_ENDPOINT` is set | request span → SQL spans (psycopg) |
 
 Every response carries `x-request-id` (a valid caller-supplied ID is propagated).

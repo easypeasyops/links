@@ -19,6 +19,7 @@
 #      by Alertmanager (scripts/monitoring-check.sh; skipped when the stack isn't installed)
 #   8. admission refuses shortly images without release provenance, even from hand-run
 #      kubectl (scripts/admission-check.sh; skipped when Kyverno isn't installed)
+#   9. network policies are enforced: the metrics port and Postgres refuse other pods
 set -euo pipefail
 
 IMAGE="${IMAGE:?set IMAGE, e.g. IMAGE=shortly:e2e}"
@@ -44,13 +45,13 @@ on_exit() {
 }
 trap on_exit EXIT
 
-# Port-forward a service to a local port; wait until it answers.
+# Port-forward a service port to a local port; wait until it answers.
 forward() {
-  local ns=$1 port=$2
-  kubectl -n "$ns" port-forward svc/shortly "$port:80" >/dev/null 2>&1 &
+  local ns=$1 port=$2 svc_port=${3:-80} path=${4:-/healthz}
+  kubectl -n "$ns" port-forward svc/shortly "$port:$svc_port" >/dev/null 2>&1 &
   PF_PIDS+=($!)
   for _ in $(seq 1 30); do
-    curl -sf "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && return 0
+    curl -sf "http://127.0.0.1:$port$path" >/dev/null 2>&1 && return 0
     sleep 1
   done
   fail "port-forward to $ns never became ready"
@@ -91,8 +92,11 @@ code=$(curl -sf -X POST $S/links -H 'content-type: application/json' \
   -d '{"url":"https://example.com/k8s"}' | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])')
 [[ "$(curl -s -o /dev/null -w '%{http_code} %{redirect_url}' "$S/$code")" == "307 https://example.com/k8s" ]] \
   || fail "staging redirect"
-curl -sf $S/metrics | grep -q 'links_created_total 1.0' || fail "staging metrics"
-pass "staging: migrated, ready, create → 307, metrics"
+# /metrics lives on its own port (9100); the app port must not serve it.
+[[ "$(curl -s -o /dev/null -w '%{http_code}' $S/metrics)" == 404 ]] || fail "staging serves /metrics on the app port"
+forward staging 18081 9100 /metrics
+curl -sf http://127.0.0.1:18081/metrics | grep -q 'links_created_total 1.0' || fail "staging metrics"
+pass "staging: migrated, ready, create → 307, metrics on port 9100 only"
 
 # ---------------------------------------------------------------- 3. promote to prod
 "$ROOT/scripts/deploy.sh" prod "$IMAGE" >/dev/null
@@ -198,5 +202,31 @@ if kubectl get crd imagevalidatingpolicies.policies.kyverno.io >/dev/null 2>&1; 
 else
   echo "skip admission checks: Kyverno not installed (POLICIES=0?)"
 fi
+
+# ---------------------------------------------------------------- 9. network policies
+# The allowed paths are proven above: users reach the app port (every in_cluster call),
+# the app reaches Postgres (/readyz), Prometheus scrapes port 9100 (step 7). Here, the
+# refusals: these must FAIL. A CNI that ignored NetworkPolicy would fail this step, not
+# pass it silently. Each refusal has a control that succeeds from the same place.
+in_cluster prod /readyz || fail "control: prod app port unreachable from postgres-0"
+if kubectl -n prod exec postgres-0 -- wget -q -O /dev/null -T 3 http://shortly:9100/metrics 2>/dev/null; then
+  fail "network policy: a non-Prometheus pod scraped prod's metrics port"
+fi
+pass "network policy: the metrics port refuses pods other than Prometheus"
+
+# A pod that isn't shortly must not reach Postgres. pg_isready exits 2 = no response.
+probe_pg() {
+  kubectl -n prod run "np-probe-$1" --image=postgres:17-alpine --restart=Never --rm -i --quiet \
+    --labels="$2" --overrides='{"spec":{"automountServiceAccountToken":false,
+      "securityContext":{"runAsNonRoot":true,"runAsUser":70,"seccompProfile":{"type":"RuntimeDefault"}},
+      "containers":[{"name":"probe","image":"postgres:17-alpine","command":["pg_isready","-h","postgres","-t","4"],
+      "securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' >/dev/null 2>&1
+}
+probe_pg as-shortly app.kubernetes.io/name=shortly \
+  || fail "control: a pod labelled as shortly could not reach Postgres"
+if probe_pg stranger app=stranger; then
+  fail "network policy: a pod that isn't shortly reached Postgres"
+fi
+pass "network policy: Postgres accepts shortly's pods only"
 
 echo "k8s e2e passed"

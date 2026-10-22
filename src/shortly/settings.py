@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # Public base for generated links, e.g. https://sho.rt — not derived from the request
     # Host header, which a client controls.
     base_url: str = "http://localhost:8000"
+    # /metrics on its own port, so the public port carries no internal data and a
+    # NetworkPolicy can let only Prometheus reach it. 0 = serve it on the app port instead.
+    metrics_port: int = Field(default=9100, ge=0, le=65535)
     db_pool_size: int = 5
     # Seconds a request may wait for a pooled connection before it is shed with a 503.
     db_pool_timeout_seconds: float = 1.0

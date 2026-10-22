@@ -26,7 +26,7 @@ spec:
         app.kubernetes.io/version: {{ include "shortly.version" . | quote }}
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "8000"
+        prometheus.io/port: {{ .Values.config.metricsPort | quote }}
         prometheus.io/path: /metrics
     spec:
       {{- with .Values.imagePullSecrets }}
@@ -52,6 +52,8 @@ spec:
           ports:
             - name: http
               containerPort: 8000
+            - name: metrics
+              containerPort: {{ .Values.config.metricsPort }}
           env:
             {{- include "shortly.env" . | nindent 12 }}
           securityContext:

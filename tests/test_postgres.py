@@ -1,6 +1,8 @@
 """Postgres-specific behaviour that the shared contract suite can't express."""
 
+import socket
 import time
+import urllib.request
 from datetime import timedelta
 
 import pytest
@@ -58,6 +60,7 @@ def test_production_wiring_end_to_end(
 ) -> None:
     # Exercises the exact factory uvicorn runs: env -> Settings -> engine -> app.
     monkeypatch.setenv("SHORTLY_DATABASE_URL", pg_url)
+    monkeypatch.setenv("SHORTLY_METRICS_PORT", "0")  # /metrics on the app port here
     monkeypatch.setenv("SHORTLY_BASE_URL", "https://sho.rt")
     with TestClient(create_app_from_env(), follow_redirects=False) as client:  # runs lifespan
         assert client.get("/readyz").status_code == 200
@@ -153,6 +156,7 @@ def test_production_wiring_rate_limits_from_env(
     expected: list[int],
 ) -> None:
     monkeypatch.setenv("SHORTLY_DATABASE_URL", pg_url)
+    monkeypatch.setenv("SHORTLY_METRICS_PORT", "0")  # /metrics on the app port here
     monkeypatch.setenv("SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE", per_minute)  # 0 = off
     monkeypatch.setenv("SHORTLY_RATE_LIMIT_BURST", "1")
     with TestClient(create_app_from_env()) as client:
@@ -161,3 +165,29 @@ def test_production_wiring_rate_limits_from_env(
             for _ in range(2)
         ]
     assert statuses == expected
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port: int = s.getsockname()[1]
+        return port
+
+
+@pytest.mark.usefixtures("restore_logging")
+def test_metrics_on_their_own_port_and_not_on_the_app_port(
+    pg_url: str, pg_store: PostgresStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    port = _free_port()
+    monkeypatch.setenv("SHORTLY_DATABASE_URL", pg_url)
+    monkeypatch.setenv("SHORTLY_METRICS_PORT", str(port))
+    with TestClient(create_app_from_env()) as client:
+        client.post("/links", json={"url": "https://example.com/m"})
+        # The public port no longer serves metrics: "/metrics" is just an unknown code.
+        assert client.get("/metrics").status_code == 404
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/metrics", timeout=5) as resp:
+            body = resp.read().decode()
+        assert "links_created_total 1.0" in body  # the same registry the app writes to
+    # Stopped with the app: nothing listens on the port any more.
+    with pytest.raises(ConnectionRefusedError):
+        socket.create_connection(("127.0.0.1", port), timeout=2).close()
