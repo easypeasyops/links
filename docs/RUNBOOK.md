@@ -92,17 +92,15 @@ A release is a pushed `vX.Y.Z` tag on a `main` commit whose `pyproject.toml` ver
    ```
 3. Watch **Actions → Release**. It fails before publishing if the tag and version differ or the image scan finds a fixable HIGH/CRITICAL vulnerability.
 4. Copy the digest from the GitHub Release notes. Every deploy uses this digest.
-5. Verify provenance before deploying:
+5. Check the provenance. `deploy.sh` does this itself before every deploy, but you can run the same check by hand:
 
    ```bash
    D=sha256:<digest from the release notes>
-   gh attestation verify oci://ghcr.io/statsguy/shortly@$D \
-     --owner statsguy \
-     --signer-workflow statsguy/shortly/.github/workflows/release.yml \
-     --source-ref refs/tags/v0.3.0
+   scripts/verify-image.sh ghcr.io/statsguy/shortly@$D
+   # verified: built by …/release.yml@refs/tags/v0.3.0, from … refs/tags/v0.3.0 @ <commit>
    ```
 
-   It must exit 0. Add `--bundle-from-oci` if the GitHub API is unavailable.
+   It must exit 0. Then record the digest in the Quick reference above: `tests/test_deploy_gate.py` verifies the digest documented there.
 
 **If the release workflow fails**
 
@@ -150,7 +148,18 @@ Deploy the verified digest to staging, check it, then promote the identical dige
 
 **First upgrade onto chart 0.2.0** (the HPA arrives): the chart stops setting `replicas`, so Kubernetes may briefly set an existing prod Deployment to 1 replica until the HPA restores its minimum of 2, typically within 15 s. Do this upgrade at a quiet time, then check `kubectl -n prod get hpa,deploy shortly`. Fresh installs are not affected.
 
-**What `deploy.sh` does:** `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the environment's values file. Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
+**What `deploy.sh` does:** for a digest, it first verifies the image's provenance (`scripts/verify-image.sh`) and stops if that fails; a tag is accepted only on a `kind-*` context. Then it runs `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the environment's values file. Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
+
+**If `deploy.sh` says REFUSED**, nothing was deployed:
+
+| Message | Cause | Fix |
+| --- | --- | --- |
+| `no valid provenance from …release.yml` | Wrong or mistyped digest, an image from somewhere else, or the registry or Sigstore unreachable | Copy the digest from the GitHub Release notes again; check network access to `ghcr.io` and `tuf-repo-cdn.sigstore.dev` |
+| `not from a release tag` | The image was built by `release.yml` but from a branch | Deploy a tagged release |
+| `is a tag; outside kind, deploy a released digest` | A tag was passed against a non-kind cluster | Use the digest from the release notes |
+| `gh (GitHub CLI) is required` | `gh` isn't installed | `brew install gh` |
+
+**Break glass**, only when verification itself is broken (for example Sigstore is down) and a deploy can't wait: `INSECURE_SKIP_VERIFY=1 scripts/deploy.sh prod ghcr.io/statsguy/shortly@$D`. It prints a warning. Say so in the incident channel, and run `scripts/verify-image.sh` on that digest as soon as verification works again.
 
 **If the deploy fails**, Helm has already rolled back (a fresh install is uninstalled). Prod keeps serving. Find out why before retrying:
 
@@ -407,6 +416,8 @@ Every CI step can be reproduced locally with the same command; reproduce before 
 | k8s → monitoring checks | `scrapes 0 healthy prod pods` (ServiceMonitor or labels), `rule groups loaded` (PrometheusRule missing: is `monitoring.clusterWide` on for prod?), `rules not evaluating cleanly` (a PromQL error), `a dashboard query is invalid`, or the staging alert never reached Alertmanager or went to the wrong receiver | `scripts/monitoring-check.sh` against kind; for the alert, check Prometheus → Alerts, then Alertmanager → Status → Config |
 | test → `test_alertmanager_config_is_valid` / `test_alerts_route_to_the_right_receiver` | The Alertmanager config in `deploy/kind/monitoring-values.yaml` is invalid, or a route changed | `amtool config routes test --config.file=… namespace=prod severity=page` (the test prints the receiver it got) |
 | test → `test_every_dashboard_query_matches_something_the_app_exports` | A dashboard query selects a metric or label the app doesn't export | Fix the query in `deploy/helm/shortly/dashboards/slo.json` |
+| test → `test_documented_release_verifies` | The Quick reference digest is wrong, or the registry or Sigstore is unreachable from CI | `scripts/verify-image.sh <that digest>`; fix the digest in the Quick reference, or re-run if it was a network blip |
+| test → other `test_deploy_gate.py` tests | `deploy.sh` or `verify-image.sh` lost a check | Read the failing case: each one names the image that must be refused |
 | k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready); `load too light` (CPU never got 10% past the target: raise the drill's `RATE`); or no scale-up despite high CPU (a real HPA problem) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
 | k8s → drill | Deploy, promotion or rollback broke | `scripts/cluster.sh up && docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh`; diagnostics print on failure |
 
@@ -423,7 +434,8 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Create (idempotent) | `scripts/cluster.sh up` |
 | Tear down everything | `scripts/cluster.sh down` |
 | Reset one environment's data (then redeploy so migrations recreate the schema) | `kubectl -n staging delete statefulset postgres && kubectl -n staging delete pvc data-postgres-0 && scripts/cluster.sh up` |
-| Deploy a local build | `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev` |
+| Deploy a local build (kind only; tags are refused elsewhere) | `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev` |
+| Check an image's provenance | `scripts/verify-image.sh ghcr.io/statsguy/shortly@sha256:…` |
 | Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step) |
 | Autoscaling drill only | `scripts/hpa-drill.sh` (`RATE=1500 DURATION=240s` for a longer push) |
 | Watch autoscaling | `kubectl -n prod get hpa shortly -w` |
