@@ -22,6 +22,8 @@
 #      kubectl (scripts/admission-check.sh; skipped when Kyverno isn't installed)
 #   9. network policies are enforced: the metrics port and Postgres refuse other pods
 #  10. the cleanup CronJob deletes links past their grace period, and only those
+#  11. prod's backup runs, only backup pods reach the bucket, and the dump restores into a
+#      fresh database with every link (scripts/restore-drill.sh; skipped if BACKUPS=0)
 set -euo pipefail
 
 IMAGE="${IMAGE:?set IMAGE, e.g. IMAGE=shortly:e2e}"
@@ -288,5 +290,33 @@ summary=$(kubectl -n staging logs job/cleanup-e2e | grep '"cleanup finished"' ||
 [[ "$summary" == *'"deleted": 1'* ]] || fail "cleanup: no 'cleanup finished' log with deleted=1: $summary"
 kubectl -n staging delete job cleanup-e2e --wait=false >/dev/null
 pass "cleanup: the Job deleted only the link past its grace period (404), kept the rest (410, live)"
+
+# ---------------------------------------------------------------- 11. backup and restore
+# Back up prod now (the CronJob's own template), with a canary link written just before,
+# then restore that dump into a scratch database and check every link came back. A backup
+# is only proven by a restore; this one is proven on every PR.
+if kubectl -n prod get cronjob postgres-backup >/dev/null 2>&1; then
+  psql_prod() { kubectl -n prod exec postgres-0 -- psql -U shortly -d shortly -v ON_ERROR_STOP=1 -tAc "$1"; }
+  psql_prod "INSERT INTO links (code, target, created_at) VALUES ('e2ebkp1', 'https://example.com/backup', now())" >/dev/null
+  want_links=$(psql_prod "SELECT count(*) FROM links")
+  kubectl -n prod create job backup-e2e --from=cronjob/postgres-backup >/dev/null
+  if ! kubectl -n prod wait --for=condition=complete job/backup-e2e --timeout=180s >/dev/null; then
+    kubectl -n prod logs job/backup-e2e --all-containers --tail=20 || true
+    fail "backup: the Job did not complete"
+  fi
+  uploaded=$(kubectl -n prod logs job/backup-e2e -c upload | grep '"backup uploaded"' || true)
+  [[ -n "$uploaded" ]] || fail "backup: no 'backup uploaded' log line"
+  pass "backup: pg_dump checked and uploaded ($(kubectl -n prod logs job/backup-e2e -c dump | grep -o '"bytes": [0-9]*'))"
+  # The bucket is for backup pods only: postgres-0 (no component=backup label) is refused.
+  # The control is the Job above, which reached it from the same namespace.
+  if kubectl -n prod exec postgres-0 -- nc -z -w 3 seaweedfs.backups.svc 8333 2>/dev/null; then
+    fail "network policy: a pod that isn't a backup pod reached the backup bucket"
+  fi
+  pass "network policy: the backup bucket refuses pods other than backup and restore pods"
+  SOURCE=prod EXPECT_CODE=e2ebkp1 EXPECT_LINKS="$want_links" "$ROOT/scripts/restore-drill.sh"
+  kubectl -n prod delete job backup-e2e --wait=false >/dev/null
+else
+  echo "skip backup checks: no postgres-backup CronJob (BACKUPS=0?)"
+fi
 
 echo "k8s e2e passed"

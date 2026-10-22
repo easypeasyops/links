@@ -42,8 +42,11 @@ spec:
               valueFrom: { secretKeyRef: { name: postgres-auth, key: password } }
             - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
           ports: [{ containerPort: 5432 }]
+          # TCP, not the socket: during first-time initialisation the image runs a temporary
+          # server on the socket only, then restarts. A socket check reports Ready in between
+          # (found by the restore drill, which lost that race in CI).
           readinessProbe:
-            exec: { command: ["pg_isready", "-U", "shortly", "-d", "shortly"] }
+            exec: { command: ["pg_isready", "-h", "127.0.0.1", "-U", "shortly", "-d", "shortly"] }
             periodSeconds: 2
           volumeMounts:
             - { name: data, mountPath: /var/lib/postgresql/data }

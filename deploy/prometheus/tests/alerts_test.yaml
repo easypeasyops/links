@@ -349,3 +349,54 @@ tests:
       - eval_time: 4h50m
         alertname: ShortlyCleanupNotRunning
         exp_alerts: []
+
+  - name: backups that stopped open a ticket
+    interval: 1m
+    input_series:
+      # Last success at t=0, nothing since.
+      - series: 'kube_cronjob_status_last_successful_time{namespace="prod",cronjob="postgres-backup"}'
+        values: '0x200'
+      - series: 'kube_cronjob_created{namespace="prod",cronjob="postgres-backup"}'
+        values: '0x200'
+    alert_rule_test:
+      - eval_time: 2h
+        alertname: ShortlyBackupNotRunning
+        exp_alerts: [] # just over 2 h stale, but not yet for 15 minutes
+      - eval_time: 2h20m
+        alertname: ShortlyBackupNotRunning
+        exp_alerts:
+          - exp_labels: {namespace: prod, severity: ticket}
+            exp_annotations:
+              summary: Postgres backups haven't succeeded for over 2 hours
+              description: The postgres-backup CronJob has missed at least 2 runs, or has never succeeded. Data written since the last good backup can't be recovered if the database is lost.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backup-job-not-running
+
+  - name: backups that never succeeded open a ticket
+    interval: 1m
+    input_series:
+      - series: 'kube_cronjob_created{namespace="prod",cronjob="postgres-backup"}'
+        values: '0x200'
+    alert_rule_test:
+      - eval_time: 1h50m
+        alertname: ShortlyBackupNotRunning
+        exp_alerts: []
+      - eval_time: 2h20m
+        alertname: ShortlyBackupNotRunning
+        exp_alerts:
+          - exp_labels: {namespace: prod, severity: ticket}
+            exp_annotations:
+              summary: Postgres backups haven't succeeded for over 2 hours
+              description: The postgres-backup CronJob has missed at least 2 runs, or has never succeeded. Data written since the last good backup can't be recovered if the database is lost.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backup-job-not-running
+
+  - name: hourly backups stay quiet
+    interval: 1m
+    input_series:
+      - series: 'kube_cronjob_status_last_successful_time{namespace="prod",cronjob="postgres-backup"}'
+        values: '0x59 3600x59 7200x59 10800x59'
+      - series: 'kube_cronjob_created{namespace="prod",cronjob="postgres-backup"}'
+        values: '0x239'
+    alert_rule_test:
+      - eval_time: 3h50m
+        alertname: ShortlyBackupNotRunning
+        exp_alerts: []

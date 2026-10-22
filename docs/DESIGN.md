@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-22 for v0.5.0 plus unreleased overload protection on main / chart 0.7.0.
+> Last updated 2026-10-22 for v0.5.0 plus unreleased overload protection and backups on main / chart 0.7.0.
 > Expanded request data-flow and CI/CD "why each piece" sections. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
@@ -25,7 +25,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.5.0 plus main (chart 0.7.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, and overload protection (a concurrency limit and database timeouts; not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.5.0 plus main (chart 0.7.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, overload protection (a concurrency limit and database timeouts; not yet in a release), and Postgres backups with a restore drill. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -191,10 +191,11 @@ flowchart LR
     Mig --> RL
     Clean[per-pod cleanup ≤1/min] -->|DELETE stale tat| RL
     Cron[cleanup CronJob, hourly] -->|DELETE expired > 7 days| L
+    Bkp[backup CronJob, hourly] -.->|pg_dump to S3| L
   end
 ```
 
-- **`links`** is durable product state. The cleanup CronJob deletes links that expired more than 7 days ago (see Data and migrations); links without a TTL are kept forever.
+- **`links`** is durable product state. The cleanup CronJob deletes links that expired more than 7 days ago (see Data and migrations); links without a TTL are kept forever. It is backed up hourly (see Backups and recovery).
 - **`rate_limits`** is ephemeral control state. A past `tat` equals "no row"; pods delete those rows so the table stays small. Losing the table only resets every client's burst — it does not lose short links.
 
 ## Domain model and code generation
@@ -333,6 +334,39 @@ Guards in the test suite:
 
 **Compatibility rule: expand, deploy, contract.** During a rollout, old pods serve against the new schema, and a rollback runs old code against it too. Every migration must therefore be backward compatible with the previous app version. Destructive changes (drop or rename a column) ship in a later release, after no running version reads the old shape.
 
+### Backups and recovery
+
+Losing the database loses every link, and a short link that stops resolving breaks every place it was published. So each environment's Postgres is backed up every hour, the backups live apart from the database, and a restore is proven on every PR.
+
+```mermaid
+flowchart LR
+  subgraph app [staging / prod namespace]
+    PG[(Postgres)] -->|pg_dump, hourly :41| Job[postgres-backup Job<br/>dump, check, upload]
+  end
+  subgraph bk [backups namespace]
+    S3[(SeaweedFS S3<br/>shortly-backups/ns/…)]
+  end
+  Job -->|rclone| S3
+  subgraph drill [restore-drill namespace, throwaway]
+    R[empty Postgres<br/>+ pg_restore] 
+  end
+  S3 -->|newest dump| R
+```
+
+| Property | How | Why |
+| --- | --- | --- |
+| What | `pg_dump --format=custom` of the whole database, by the server's own image | A logical dump restores into any Postgres of the same or newer major version; the server's image keeps client and server versions equal |
+| Checked when taken | `pg_restore --list` on the archive before upload; the Job fails otherwise | A corrupt dump is found within the hour, not during the incident |
+| Where | An S3 bucket in its own namespace (`deploy/kind/backups.yaml`); only pods labelled `component=backup` reach it (NetworkPolicy) | Backups that share the database's failure domain or credentials are lost with it. In a real cloud: another account or region, versioning and object lock |
+| How often, how long | Hourly at :41; 7 days kept, deleted by the Job itself (never the newest) | Recovery point and storage cost; see RPO below |
+| Proven | `scripts/restore-drill.sh`: the newest dump into an empty Postgres in a throwaway namespace; checks the Alembic revision, the link count and a canary link. e2e step 11 runs it on every PR | A backup nobody has restored is a hope. The drill also measures the restore time |
+| Watched | `ShortlyBackupNotRunning` (ticket) after 2 missed runs or 2 hours without a success | Backups fail silently: nothing breaks until the day they're needed |
+
+**Recovery objectives (local setup).**
+
+- **RPO, the data you can lose: up to 1 hour**, the backup interval. Everything written since the last dump is gone. Continuous WAL archiving (pgBackRest, WAL-G, or a managed database's point-in-time recovery) brings it down to seconds; that is the production answer, not hourly dumps.
+- **RTO, the time to restore: about 5 s** for the drill's database in CI (2,967 links, a 78 KB dump: download, empty Postgres, `pg_restore`, checks). That figure is mostly fixed overhead. Restore time grows with the database: a logical restore rebuilds every index, so a large table takes minutes to hours. Re-measure as data grows; RUNBOOK has the procedure for a real restore into prod.
+
 ## Configuration and secrets
 
 All configuration comes from environment variables, parsed by `pydantic-settings` at startup. An invalid or missing value stops the process on boot rather than failing on the first request; the rollback drill relies on this.
@@ -428,6 +462,7 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 | `ShortlyLoadShedding` | ticket | It burns the budget too, but this alert names the cause: one alert per `reason` (`concurrency`: traffic above what the pods serve; `pool` or `db_timeout`: a slow database) |
 | `ShortlyAtMaxReplicas` | ticket | The HPA has no headroom left; uses kube-state-metrics |
 | `ShortlyCleanupNotRunning` | ticket | The cleanup CronJob's last success is over 3 hours old, or it has never succeeded; uses kube-state-metrics |
+| `ShortlyBackupNotRunning` | ticket | The Postgres backup CronJob's last success is over 2 hours old (2 missed hourly runs), or it has never succeeded; uses kube-state-metrics. Only where the kind backup CronJob exists |
 | `ShortlyRateLimiting` | ticket | Over 10% of creates refused with 429 for 30 minutes: abuse, or a limit too tight for real users. 429s never burn the SLO, so without this a bad limit would be invisible |
 
 **How the rules are kept honest** (`tests/test_alert_rules.py`, which runs in CI):
@@ -575,6 +610,7 @@ This is the expensive rehearsal. `scripts/k8s-e2e.sh` runs the same steps CI and
 | 8. Admission check | API server refuses unattested shortly images | `deploy.sh` alone can be bypassed with raw `kubectl` |
 | 9. NetworkPolicy refusals | Metrics port and Postgres reject strangers; controls still succeed | A CNI that ignores NetworkPolicy accepts the objects silently; only a refusal test catches that |
 | 10. Expired-link cleanup | The CronJob's Job deletes exactly the links past their grace period, and the concurrently built index is valid | Deletes on a live table are where data loss hides; a wrong cutoff or a failed index build must fail CI, not prod |
+| 11. Backup and restore | Prod's backup Job dumps and uploads; only backup pods reach the bucket; the dump restores into a fresh Postgres with the same revision, every link and a canary | Backups are only real once restored; this proves it on every PR, and times it |
 
 Chart lint + kubeconform run *before* kind starts, so a template typo fails in seconds. A PR that changes only Markdown (other than `docs/RUNBOOK.md`) skips the job's steps and still passes the required check.
 
@@ -724,6 +760,9 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | CNI doesn't enforce NetworkPolicy (a new cluster, a CNI change) | Nothing breaks, and nothing is isolated: every policy is silently ignored | e2e step 9 fails: a refused connection succeeds |
 | A new outbound dependency (collector, external API) | Its connections time out: the app's egress allows DNS and the database only | Timeouts to the new host; add a `networkPolicy.extraEgress` rule |
 | Cleanup job failing or not scheduled | Expired rows accumulate; requests unaffected (expired links still answer 410) | `ShortlyCleanupNotRunning` after 3 missed hours; failed Jobs in `kubectl get jobs` |
+| Backup job failing or not scheduled | Nothing user-facing; the recovery point ages, so a database loss would cost more data | `ShortlyBackupNotRunning` after 2 missed runs; failed Jobs in `kubectl get jobs` |
+| Backup bucket down or full | Backup Jobs fail at upload (the dump itself is fine); existing backups unaffected unless the bucket's volume is lost | `ShortlyBackupNotRunning`; upload errors in the Job's `upload` log |
+| Database lost (volume deleted, corrupted) | Every request fails; restore from the newest dump loses up to 1 hour of writes | `ShortlyDown` / `ShortlyNotReady`; RUNBOOK, Restore Postgres from a backup |
 | Index build fails halfway (lock timeout, disk) | The migration Job fails and the release is aborted; an invalid index is left, which the next run drops and rebuilds | Failed `shortly-migrate-<rev>` Job; `indisvalid = false` in `pg_index` |
 | Tracing backend down | Spans dropped by the batch exporter; requests unaffected | Exporter warnings in logs |
 | Vulnerable dependency published | CI image scan fails; release workflow refuses to publish | Red `build, scan` job |
@@ -826,6 +865,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | App rewriting its own code | Code and venv owned by root, read-only to UID 10001 |
 | Secret leakage | DB URL only via Secret; `.env` git-ignored and excluded from the build context |
 | Metrics exposure | `/metrics` on its own port, not exposed by the public API; a NetworkPolicy admits only Prometheus to it |
+| Database loss (deleted volume, bad migration, operator error) | Hourly dumps to a separate bucket, restorable and restored on every PR; 7 days of history |
+| Backup tampering or theft | Bucket in its own namespace, reachable only by backup pods; credentials generated per cluster, never in git. Not yet: encryption of the dumps, object lock |
 | Lateral movement inside the cluster | Default-deny ingress per namespace; Postgres accepts shortly's pods only; the app's egress is limited to DNS and the database |
 
 ## Key decisions
@@ -838,6 +879,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Transactions | Autocommit for the app; transactions for migrations | Implicit transaction per request | Every app query is one atomic statement; saves 2 round trips per request (about +25% capacity) |
 | Pool | Fixed size 5, no overflow, 1 s timeout → 503 | SQLAlchemy defaults (overflow 10, 30 s wait) | Known Postgres connection budget; overload fails fast instead of piling up |
 | Overload | A per-pod in-flight limit (16) that answers 503 at once; statement (2 s) and lock (1 s) timeouts in Postgres | Unbounded queueing; a request timeout that abandons the response but not the work; an adaptive limit (TCP Vegas, gradient); limiting only at the ingress | Measured: latency of what succeeds stays near 100 ms instead of seconds. A request timeout frees the client but leaves the thread and connection busy. Adaptive limits fit better when capacity varies; ours is measured and stable, so a fixed limit is simpler to reason about and test |
+| Backups | Hourly `pg_dump` (custom format) to S3 in another namespace; a restore drill on every PR | Volume snapshots; WAL archiving with point-in-time recovery (pgBackRest, WAL-G); an operator (CloudNativePG) | A dump is portable across versions and hosts and easy to verify by restoring it, which is the property that matters most. PITR is the production answer for the recovery point, and comes with a managed database; snapshots of a local volume share its failure domain |
 | Expired-link cleanup | A CronJob running bounded, autocommitted batches with `SKIP LOCKED`, through a partial index | Postgres partitioning by expiry month (drop whole partitions); `pg_cron`; deleting on read | Small and testable with what we already run. Partitioning is the scale answer, but it needs every query and the primary key reworked. `pg_cron` is unavailable on most managed Postgres plans without extensions. Deleting on read leaves never-read links forever |
 | Metrics port and network policy | `/metrics` on port 9100, own thread; NetworkPolicies with default-deny ingress and closed app egress | `/metrics` on the app port behind auth; policies only in a real cluster | One rule keeps internal data off the public API, and the scrape can't queue behind requests. Policies tested in kind catch an unenforcing CNI before prod would |
 | Rate limiting | GCRA, state in Postgres, per client IP (IPv6 /64), creates only | Per-pod in-memory counters; Redis; fixed-window counters; limiting at the ingress only | Exact across replicas with one upsert and no new service; no window-edge bursts. Ingress limits are usually per ingress replica and untested by the app's suite; coarse flood protection at the edge can still be added on top |
@@ -878,6 +920,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Milestone 9 | Under overload, sync `/healthz` queued behind requests; liveness failed, kubelet restarted the pods, and the restarts cascaded (CI HPA drill, with monitoring on the node) | Probes and `/metrics` off the request threadpool; probe timeout 2 s; threadpool-saturation regression test |
 | Milestone 10 | The Kyverno docs' `referrer` attestation type found nothing in GitHub's Sigstore bundles, so it refused every image, the real release included | Declared as `intoto`; a test requires the documented release to pass, and mutated policies to fail |
 | Milestone 10 | The e2e's digest-mode dry run used a made-up digest, which the admission policy refuses | Dry run uses the runbook's release digest |
+| Backups (PR #35) | The restore drill passed once, then failed: on first start the Postgres image initialises with a temporary server on the Unix socket only, then restarts. A socket `pg_isready` reported Ready during that window and `pg_restore` hit the restart. The kind `postgres` StatefulSet had the same flaw | Readiness probes check over TCP (`-h 127.0.0.1`), which only the real server listens on; the drill restores over TCP; e2e step 11 runs the drill on every PR |
 
 ## Known limitations and future work
 
@@ -899,14 +942,16 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - Prometheus keeps 2 days of data in kind and has no persistent volume, so 30-day error budgets reset when its pod restarts.
 - The SLIs are measured in the app. Requests that never reach it (ingress or network failures) are invisible except through `ShortlyDown` and `ShortlyNotReady`; a load-balancer SLI would be more complete.
 - At very low traffic one error is a large ratio, so burn-rate alerts can be noisy; a minimum-request-rate guard is not implemented.
-- Local kind only; no production cluster, backups or disaster recovery for Postgres.
+- Local kind only; no production cluster.
+- Backups are hourly dumps: up to an hour of writes can be lost (no point-in-time recovery), and a restore of a large database is slow (every index is rebuilt).
+- The bucket runs in the same cluster, on the same node, as the database. It shows the separation of credentials and network, not of failure domains: a real setup puts backups in another account or region, with versioning and object lock so a compromised cluster can't delete them.
+- Dumps are not encrypted, and the bucket has one identity for every environment.
 
 **Next steps, in rough priority order**
 
-1. Postgres backups, and a restore drill in CI that proves they restore.
-2. Canary releases gated on the SLO metrics (Argo Rollouts).
-3. URL reputation check on targets (Google Safe Browsing or similar).
-4. Real cloud environment: Terraform + EKS/GKE, managed Postgres with backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
+1. Canary releases gated on the SLO metrics (Argo Rollouts).
+2. URL reputation check on targets (Google Safe Browsing or similar).
+3. Real cloud environment: Terraform + EKS/GKE, managed Postgres with point-in-time recovery and cross-region backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
 
 **Open questions**
 
