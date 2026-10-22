@@ -53,6 +53,12 @@ max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
   value: {{ .Values.config.dbPoolSize | quote }}
 - name: SHORTLY_DB_POOL_TIMEOUT_SECONDS
   value: {{ .Values.config.dbPoolTimeoutSeconds | quote }}
+- name: SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE
+  value: {{ .Values.config.rateLimit.createsPerMinute | quote }}
+- name: SHORTLY_RATE_LIMIT_BURST
+  value: {{ .Values.config.rateLimit.burst | quote }}
+- name: FORWARDED_ALLOW_IPS # read by uvicorn itself
+  value: {{ .Values.config.forwardedAllowIps | quote }}
 {{- if .Values.otel.endpoint }}
 - name: OTEL_EXPORTER_OTLP_ENDPOINT
   value: {{ .Values.otel.endpoint | quote }}

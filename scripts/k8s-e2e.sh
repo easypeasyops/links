@@ -10,7 +10,8 @@
 #   0. the digest-mode render (how releases deploy) passes API-server validation
 #   1. the chart deploys under the "restricted" Pod Security Standard, migrations run as a hook
 #   2. the app works in-cluster (readiness, create → redirect, metrics)
-#   3. the SAME image promotes to prod: autoscaled (HPA, min 2) + a PodDisruptionBudget
+#   3. the SAME image promotes to prod: autoscaled (HPA, min 2) + a PodDisruptionBudget,
+#      and the per-client rate limit holds exactly across its replicas
 #   4. a broken release is rolled back automatically, with ZERO failed requests meanwhile
 #   5. a manual `helm rollback` restores a previous revision
 #   6. under load, the HPA adds ready pods (scripts/hpa-drill.sh; skip with HPA_DRILL=0)
@@ -103,6 +104,26 @@ kubectl -n prod get hpa shortly >/dev/null || fail "prod HorizontalPodAutoscaler
 pass "promoted the same image to prod: 2/2 ready, PDB and HPA present"
 
 in_cluster prod /readyz || fail "prod not reachable through its Service"
+
+# ---------------------------------------------------------------- 3b. rate limit
+# One client, through the Service, so kube-proxy spreads the requests over both pods: the
+# limit must still be exactly the burst, because its state is in Postgres, not per pod.
+# X-Forwarded-For picks the client (prod trusts the pod network as kind's stand-in ingress).
+create_as() {
+  kubectl -n prod exec postgres-0 -- wget -S -O /dev/null -T 3 \
+    --header 'content-type: application/json' --header "X-Forwarded-For: $1" \
+    --post-data '{"url":"https://example.com/rate"}' http://shortly/links 2>&1 \
+    | grep -m1 -oE 'HTTP/1\.[01] [0-9]{3}' | cut -d' ' -f2
+}
+burst=$(helm -n prod get values shortly --all -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["config"]["rateLimit"]["burst"])')
+client="203.0.113.$((RANDOM % 250 + 1))"
+created=0
+for _ in $(seq 1 "$burst"); do [[ "$(create_as "$client")" == 201 ]] && created=$((created + 1)); done
+((created == burst)) || fail "rate limit: only $created of the first $burst creates succeeded"
+[[ "$(create_as "$client")" == 429 ]] || fail "rate limit: create $((burst + 1)) from one client was not refused"
+[[ "$(create_as "198.51.100.$((RANDOM % 250 + 1))")" == 201 ]] || fail "rate limit: another client was refused too"
+pass "rate limit: $burst creates, then 429, for one client across $(kubectl -n prod get deploy shortly -o jsonpath='{.status.readyReplicas}') pods; other clients unaffected"
+
 good_rev=$(revision prod)
 good_image=$(deployed_image prod)
 

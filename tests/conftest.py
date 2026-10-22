@@ -19,6 +19,19 @@ from shortly.store import InMemoryStore
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 
 
+class FakeTime:
+    """Epoch seconds that tests move by hand (the rate limiter's clock)."""
+
+    def __init__(self, start: float = 1_767_225_600.0) -> None:  # 2026-01-01T00:00:00Z
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
 class FakeClock:
     """A clock tests can move. Avoids sleep() and freezegun-style global patching."""
 
@@ -113,8 +126,15 @@ def pg_engine(pg_url: str) -> Iterator[Engine]:
 @pytest.fixture
 def pg_store(pg_engine: Engine) -> PostgresStore:
     with pg_engine.begin() as conn:
-        conn.execute(text("TRUNCATE links"))
+        conn.execute(text("TRUNCATE links, rate_limits"))
     return PostgresStore(pg_engine)
+
+
+@pytest.fixture
+def clean_rate_limits(pg_engine: Engine) -> Engine:
+    with pg_engine.begin() as conn:
+        conn.execute(text("TRUNCATE rate_limits"))
+    return pg_engine
 
 
 @pytest.fixture

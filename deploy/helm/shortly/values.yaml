@@ -45,6 +45,15 @@ config:
   dbPoolSize: 5
   # Wait this long for a free connection, then shed with 503 + Retry-After (not 30 s).
   dbPoolTimeoutSeconds: 1
+  # Per-client limit on POST /links: a burst, then a sustained rate (0 turns it off).
+  # Exact across replicas: the state lives in Postgres (docs/DESIGN.md, Rate limiting).
+  rateLimit:
+    createsPerMinute: 60
+    burst: 20
+  # Peers whose X-Forwarded-For uvicorn believes (comma-separated IPs or CIDRs). The
+  # limiter keys on the client IP, so this must be exactly your ingress / load balancer:
+  # anyone listed here can claim to be any client. Default: nobody but localhost.
+  forwardedAllowIps: "127.0.0.1"
 
 # The database URL is a secret and is NEVER put in values files (they live in git).
 # Create it out of band (kubectl, External Secrets, Sealed Secrets, Vault...) and point here.

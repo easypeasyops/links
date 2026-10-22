@@ -22,6 +22,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | SLOs | redirects 99.9% available and 99% < 50 ms; creates 99.5% and 99% < 100 ms; 30-day window (`deploy/prometheus/slos.yaml`) |
 | Alerts | Rules in `deploy/helm/shortly/rules/` (shipped by the prod release). kind: Prometheus, Alertmanager and Grafana in namespace `monitoring` (see Local cluster operations). Compose: `http://localhost:9090/alerts` |
 | Admission | Kyverno (namespace `kyverno`) refuses shortly images without release provenance in `staging` and `prod`, and reports images outside the allowlist (`deploy/policies/`) |
+| Rate limit | `POST /links`: per client IP (IPv6 /64), burst 20 then 60 per minute → 429 + `Retry-After`; state in Postgres, shared by all pods (`config.rateLimit`) |
 | Alert routing | anything in `staging` → `staging`; `severity=page` → `pager`; `severity=ticket` → `tickets` (`deploy/kind/monitoring-values.yaml`) |
 
 ```bash
@@ -425,6 +426,24 @@ kubectl -n prod exec postgres-0 -- psql -U shortly shortly -c \
   "select state, wait_event_type, count(*) from pg_stat_activity group by 1,2"
 ```
 
+### Rate limiting: 429 on POST /links
+
+Each client (IP address, IPv6 by /64) may create `config.rateLimit.burst` links at once (default 20), then `createsPerMinute` per minute (default 60). Beyond that it gets **429 + `Retry-After`**. Redirects are never limited, and a 429 is a client error, so it doesn't burn the availability SLO. `ShortlyRateLimiting` (ticket) means more than 10% of creates were refused for 30 minutes. Find out who:
+
+```bash
+kubectl -n prod logs -l app.kubernetes.io/name=shortly --since=1h | grep '"rate limited"' \
+  | python3 -c 'import json,sys,collections; c=collections.Counter(json.loads(l)["client"] for l in sys.stdin); print(c.most_common(10))'
+```
+
+| What you see | Cause | Fix |
+| --- | --- | --- |
+| One or a few clients account for almost all refusals | Abuse, or a client integration stuck in a loop | Nothing urgent: the limit is doing its job. Block it at the edge if it persists |
+| Many different clients, each refused a little | The limit is too tight for real use | Raise `config.rateLimit` in the env values and redeploy |
+| One client that is really many users (an office or a mobile carrier's NAT) | Shared address | Raise the limit, or exempt that range at the ingress |
+| Every request seems to come from the same address (the ingress, or a node) | `config.forwardedAllowIps` doesn't include the proxy, so its address is the "client" | Set it to the ingress or load-balancer addresses (never `*` on the internet: then anyone can claim any address) |
+
+The limiter's state is a small Postgres table, `rate_limits`, with one row per recently active client. Each create therefore makes two queries instead of one. When the database is slow or the pool is full, creates are shed with 503 like any other request (see Saturation), not refused with 429. To turn limiting off in an emergency: `scripts/deploy.sh prod <digest> --set config.rateLimit.createsPerMinute=0`.
+
 ### Code collisions rising
 
 Not an outage: retries absorb it. Plan a release that raises `DEFAULT_LENGTH` from 7 to 8 (62× more codes). Existing codes keep working.
@@ -460,10 +479,12 @@ Every CI step can be reproduced locally with the same command; reproduce before 
 | test → `test_provenance_verdicts_against_the_real_registry` | The documented release no longer verifies, a refused case was admitted, or the registry or Sigstore was unreachable | Run the Kyverno CLI command the test builds (`tests/test_admission_policies.py`, `_apply`); compare with `scripts/verify-image.sh` on the same digest |
 | test → `test_provenance_policy_actually_checks` | A policy edit made a check pass everything (for example a regex that matches any signer) | Revert the edit; the test names the mutation that was wrongly admitted |
 | test → `test_allowlist_verdicts` / `test_provenance_policy_matches_the_deploy_gate` | The allowlist or the signer rules changed | Make `deploy/policies/` and `scripts/verify-image.sh` agree again |
+| test → `test_ratelimit.py` | The limiter's semantics changed (burst, sustained rate, retry time), or the in-memory and Postgres limiters disagree | `uv run pytest tests/test_ratelimit.py -v`; the contract tests run both limiters on the same fake clock |
 | test → other `test_deploy_gate.py` tests | `deploy.sh` or `verify-image.sh` lost a check | Read the failing case: each one names the image that must be refused |
 | k8s → Lint and schema-validate | A chart manifest or a policy in `deploy/policies/` fails its schema | Run the step's `kubeconform` command locally; the error names the field |
 | k8s → admission checks | `was ADMITTED, expected refused` (the policy isn't enforcing), `was refused, expected admitted` (the release no longer verifies in-cluster: often no network to Sigstore), `not by the provenance policy` (Pod Security or a manifest error), or no allowlist reports | `scripts/admission-check.sh` against kind; `kubectl -n kyverno logs deploy/kyverno-admission-controller` |
 | k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready); `load too light` (CPU never got 10% past the target: raise the drill's `RATE`); or no scale-up despite high CPU (a real HPA problem) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
+| k8s → rate limit | `only N of the first 20 creates succeeded` (limit lower than the chart says, or DB errors), `was not refused` (limit missing, or per pod instead of shared), `another client was refused` (the limit isn't per client: check `forwardedAllowIps`) | `kubectl -n prod logs -l app.kubernetes.io/name=shortly \| grep 'rate limited'`; the step's `wget` command from `postgres-0` |
 | k8s → drill | Deploy, promotion or rollback broke | `scripts/cluster.sh up && docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh`; diagnostics print on failure |
 
 A test that fails with warnings as errors (`filterwarnings = error`) usually means a dependency deprecated something. Fix the call site; don't silence the warning globally.

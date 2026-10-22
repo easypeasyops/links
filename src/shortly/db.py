@@ -10,6 +10,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Double,
     Engine,
     MetaData,
     String,
@@ -30,6 +31,16 @@ links = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("expires_at", DateTime(timezone=True), nullable=True),
     CheckConstraint("expires_at IS NULL OR expires_at > created_at", name="expiry_after_creation"),
+)
+
+# GCRA state for per-client rate limiting (shortly.ratelimit): one row per client active in
+# the last few seconds. ``tat`` is epoch seconds; a row whose tat has passed means the same
+# as no row, so cleanup is a plain range delete and never changes a decision.
+rate_limits = Table(
+    "rate_limits",
+    metadata,
+    Column("key", String(64), primary_key=True),  # client IP, or IPv6 /64
+    Column("tat", Double, nullable=False),
 )
 
 

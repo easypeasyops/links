@@ -6,6 +6,10 @@ autoscaling:
 config:
   baseUrl: "http://sho.rt.localhost"
   logLevel: INFO
+  # kind has no ingress: in-cluster load generators (scripts/hpa-drill.sh) stand in for it
+  # and send X-Forwarded-For to simulate many clients. kind's pod network, so ANY pod here
+  # can pick its client IP. On a real cluster: the ingress controller's addresses only.
+  forwardedAllowIps: "10.244.0.0/16"
 podDisruptionBudget:
   enabled: true
   minAvailable: 1

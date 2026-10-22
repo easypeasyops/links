@@ -54,13 +54,22 @@ export const options = {
   summaryTrendStats: ["avg", "p(50)", "p(95)", "p(99)", "max"],
 };
 
+// Many clients, not one: every create comes from a random address in 198.18.0.0/15 (the
+// range reserved for benchmarks, RFC 2544), sent as X-Forwarded-For the way an ingress
+// would. The app trusts it only where configured (compose; kind prod via the pod network),
+// so the per-client rate limit is exercised as in production instead of refusing the
+// load test, a single real client, after its burst.
+const fakeClient = () =>
+  `198.${18 + Math.floor(Math.random() * 2)}.${Math.floor(Math.random() * 256)}.${1 + Math.floor(Math.random() * 254)}`;
+const createHeaders = () => ({ "content-type": "application/json", "x-forwarded-for": fakeClient() });
+
 // 307 and 201 are successes; everything else counts toward http_req_failed.
 http.setResponseCallback(http.expectedStatuses(201, 307));
 
 export function setup() {
   const codes = [];
-  const params = { headers: { "content-type": "application/json" }, responseType: "text" };
   for (let i = 0; i < SEED; i++) {
+    const params = { headers: createHeaders(), responseType: "text" };
     const res = http.post(`${BASE}/links`, JSON.stringify({ url: `https://example.com/seed/${i}` }), params);
     if (res.status !== 201) throw new Error(`seeding failed: HTTP ${res.status}`);
     codes.push(res.json("code"));
@@ -78,7 +87,7 @@ export function create() {
   const res = http.post(
     `${BASE}/links`,
     JSON.stringify({ url: `https://example.com/load/${__VU}/${__ITER}` }),
-    { headers: { "content-type": "application/json" }, tags: { name: "POST /links" } },
+    { headers: createHeaders(), tags: { name: "POST /links" } },
   );
   check(res, { "201": (r) => r.status === 201 });
 }

@@ -3,6 +3,7 @@
 No business logic lives here, so the service stays testable without HTTP.
 """
 
+import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -16,6 +17,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import AwareDatetime, BaseModel, Field, HttpUrl
 
 from shortly.observability import Metrics, RequestContextMiddleware
+from shortly.ratelimit import RateLimiter, client_key
 from shortly.service import (
     CodeSpaceExhaustedError,
     LinkExpiredError,
@@ -25,6 +27,7 @@ from shortly.service import (
 from shortly.store import StoreBusyError
 
 MAX_TTL_SECONDS = 365 * 24 * 3600
+log = logging.getLogger("shortly.ratelimit")
 
 
 class CreateLink(BaseModel):
@@ -45,13 +48,14 @@ def create_app(
     base_url: str,
     metrics: Metrics | None = None,
     tracer_provider: TracerProvider | None = None,
+    rate_limiter: RateLimiter | None = None,
     on_shutdown: Callable[[], None] = lambda: None,
 ) -> FastAPI:
     """Build the app around an already-wired ``Shortener``.
 
     Taking dependencies as arguments (instead of reading globals or env vars here) is
     what lets tests build the app with an in-memory store, a fake clock, a private
-    metrics registry, and an in-memory span exporter.
+    metrics registry, and an in-memory span exporter. ``rate_limiter=None``: no limit.
     """
     metrics = metrics or Metrics()
 
@@ -104,8 +108,29 @@ def create_app(
         # overloaded requests times out, leaving a gap in the metrics exactly when needed.
         return Response(generate_latest(metrics.registry), media_type=CONTENT_TYPE_LATEST)
 
-    @app.post("/links", status_code=status.HTTP_201_CREATED)
-    def create_link(body: CreateLink) -> LinkOut:
+    @app.post(
+        "/links",
+        status_code=status.HTTP_201_CREATED,
+        responses={429: {"description": "Too many links created; see Retry-After"}},
+    )
+    def create_link(body: CreateLink, request: Request) -> LinkOut:
+        # Only creates are limited: they write a row that lives forever and can carry abuse
+        # (masking phishing links). Redirects are cheap reads; flooding them is a DoS
+        # problem for the edge, not something one pod can fix by counting.
+        if rate_limiter is not None:
+            key = client_key(request.client.host if request.client else None)
+            decision = rate_limiter.hit(key)
+            if not decision.allowed:
+                metrics.rate_limited.inc()
+                # The one place a client address is logged: refused requests only, so an
+                # operator can tell one abuser from many users behind one NAT. Addresses are
+                # personal data: keep log retention short.
+                log.info("rate limited", extra={"client": key})
+                raise HTTPException(
+                    status.HTTP_429_TOO_MANY_REQUESTS,
+                    "rate limit exceeded, retry later",
+                    headers={"Retry-After": decision.retry_after_header},
+                )
         ttl = timedelta(seconds=body.ttl_seconds) if body.ttl_seconds else None
         try:
             link = shortener.shorten(str(body.url), ttl=ttl)
@@ -156,7 +181,8 @@ def create_app_from_env() -> FastAPI:
     # Imported here so tests of the HTTP layer never need a database driver configured.
     from shortly.db import make_engine, pool_in_use
     from shortly.observability import configure_logging, tracer_provider_from_env
-    from shortly.pg_store import PostgresStore
+    from shortly.pg_store import PostgresRateLimiter, PostgresStore
+    from shortly.ratelimit import Limit
     from shortly.settings import Settings
 
     settings = Settings()  # fields come from the environment; fails fast if missing
@@ -179,10 +205,16 @@ def create_app_from_env() -> FastAPI:
         # query regardless of what issued it. tests/test_postgres.py proves spans appear.
         PsycopgInstrumentor().instrument(tracer_provider=provider)
 
+    limiter = None
+    if settings.rate_limit_creates_per_minute > 0:
+        limit = Limit(settings.rate_limit_creates_per_minute, settings.rate_limit_burst)
+        limiter = PostgresRateLimiter(engine, limit)
+
     return create_app(
         Shortener(PostgresStore(engine), on_collision=metrics.code_collisions.inc),
         base_url=settings.base_url,
         metrics=metrics,
         tracer_provider=provider,
+        rate_limiter=limiter,
         on_shutdown=engine.dispose,  # close pooled connections cleanly
     )
