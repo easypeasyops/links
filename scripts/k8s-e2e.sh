@@ -249,12 +249,16 @@ probe_pg() {
       "containers":[{"name":"probe","image":"postgres:17-alpine","command":["pg_isready","-h","postgres","-t","4"],
       "securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' >/dev/null 2>&1
 }
-probe_pg as-shortly app.kubernetes.io/name=shortly \
-  || fail "control: a pod labelled as shortly could not reach Postgres"
+probe_pg part-of app.kubernetes.io/part-of=shortly \
+  || fail "control: a pod labelled part-of=shortly could not reach Postgres"
 if probe_pg stranger app=stranger; then
   fail "network policy: a pod that isn't shortly reached Postgres"
 fi
-pass "network policy: Postgres accepts shortly's pods only"
+# The old peer (name=shortly, charts before 0.6.0) was removed: such a pod must be refused.
+if probe_pg old-label app.kubernetes.io/name=shortly; then
+  fail "network policy: Postgres still admits the old app.kubernetes.io/name=shortly label"
+fi
+pass "network policy: Postgres accepts part-of=shortly only (not strangers, not the old label)"
 
 # ---------------------------------------------------------------- 10. expired-link cleanup
 # Plant links in staging's database, run the CronJob now, and check that exactly the right
