@@ -135,7 +135,7 @@ spec:
       containers:
         - name: k6
           image: ${K6_IMAGE:-grafana/k6:2.3.0}
-          args: [run, --quiet, --no-color, --no-thresholds, --no-summary, /scripts/mixed.js]
+          args: [run, --quiet, --no-color, --no-thresholds, /scripts/mixed.js]
           env:
             - { name: BASE_URL, value: "${CANARY_TRAFFIC_URL:-http://shortly-gateway.envoy-gateway-system.svc}" }
             - { name: HOST, value: "$host" }
@@ -172,6 +172,13 @@ while :; do
   phase=$(ro '{.status.phase}') hash=$(ro '{.status.currentPodHash}') stable=$(ro '{.status.stableRS}')
   if [[ "$phase" == Healthy && -n "$hash" && "$hash" == "$stable" ]]; then result=ok; break; fi
   if [[ "$phase" == Degraded || "$(ro '{.status.abort}')" == true ]]; then result=aborted; break; fi
+  # Without its traffic the canary can only fail on "too little traffic": say why, now.
+  if [[ -n "$(kubectl -n "$ENV" get job "$TRAFFIC_JOB" -o jsonpath='{.status.failed}' 2>/dev/null)" ]]; then
+    echo "     the synthetic traffic Job failed; its log:" >&2
+    kubectl -n "$ENV" logs "job/$TRAFFIC_JOB" --tail=20 2>&1 | sed 's/^/       /' >&2 || true
+    kubectl -n "$ENV" patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}' >/dev/null
+    result="aborted (no synthetic traffic)"; break
+  fi
   if ((SECONDS > deadline)); then
     echo "     out of time after $CANARY_TIMEOUT: aborting the canary" >&2
     kubectl -n "$ENV" patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}' >/dev/null
