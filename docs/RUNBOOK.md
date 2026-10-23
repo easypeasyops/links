@@ -36,7 +36,7 @@ D=sha256:18754ab5bcb04cff0a5f65ae13e0e9fdbf05793c151ba2923a8f7532e9405f04
 scripts/deploy.sh staging ghcr.io/statsguy/shortly@$D     # deploy (auto-rollback on failure)
 scripts/deploy.sh prod    ghcr.io/statsguy/shortly@$D
 helm -n prod history shortly                               # revisions you can roll back to
-helm -n prod rollback shortly <REV> --wait                 # manual rollback
+helm -n prod rollback shortly <REV> --force-conflicts --wait=legacy  # manual rollback (prod)
 kubectl -n prod get pods -l app.kubernetes.io/name=shortly # pod status
 kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=100
 kubectl -n prod get rollout shortly                        # prod: PHASE Healthy, or the canary's step
@@ -180,7 +180,7 @@ Stop a canary by hand (traffic goes back to stable at once; then roll helm back 
 
 ```bash
 kubectl -n prod patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}'
-helm -n prod rollback shortly --wait=legacy
+helm -n prod rollback shortly --force-conflicts --wait=legacy
 ```
 
 Knobs: `CANARY_TIMEOUT` (default 15m; `deploy.sh` aborts the canary when it runs out), `CANARY_TRAFFIC_RATE` (20), `DEPLOY_TIMEOUT` (helm's own wait, 3m). Steps and thresholds are chart values (`canary:` in `values.yaml`).
@@ -230,10 +230,12 @@ Roll back first, investigate second: when a release is bad, restore the last goo
 2. Roll back and wait:
 
    ```bash
-   helm -n prod rollback shortly <REV> --wait=legacy --timeout 3m
+   helm -n prod rollback shortly <REV> --force-conflicts --wait=legacy --timeout 3m   # see below
    kubectl -n prod get rollout shortly    # Healthy within seconds: no canary steps for the last 3 revisions
    # staging: helm -n staging rollback shortly <REV> --wait; kubectl -n staging rollout status deploy/shortly
    ```
+
+   In prod, `--force-conflicts` is required: Argo Rollouts writes to the Services and the HTTPRoute that Helm also applies, and without it Helm refuses with `Apply failed with 1 conflict`. `--wait=legacy` because Helm's default wait doesn't understand a Rollout.
 3. Verify through the Service:
 
    ```bash

@@ -272,7 +272,7 @@ pass "healthy canary promoted 10% → 50% → 100% in ${took}s ($runs)"
 
 # Back to the good revision with helm: inside rollbackWindow, so no steps, no analysis.
 start=$SECONDS
-helm -n prod rollback shortly "$good_rev" --wait=legacy --timeout 2m >/dev/null
+helm -n prod rollback shortly "$good_rev" --force-conflicts --wait=legacy --timeout 2m >/dev/null
 for _ in $(seq 1 60); do
   [[ "$(ro '{.status.phase}')" == Healthy && "$(ro '{.status.stableRS}')" == "$(ro '{.status.currentPodHash}')" ]] && break
   sleep 2

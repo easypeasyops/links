@@ -87,8 +87,13 @@ fi
 
 # --wait=legacy: helm's default watcher doesn't understand a Rollout's status; the loop
 # below does. It still waits for the hooks (migrations) and the Services.
+# --force-conflicts: Argo Rollouts also writes to objects Helm applies (the stable/canary
+# Services' selectors, the HTTPRoute's weights). Server-side apply calls that a conflict
+# and refuses. Forcing gives Helm back only the fields it declares; the controller keeps
+# the ones only it sets (the pod-template-hash selector), and resets the rest when it next
+# acts. Safe because nothing upgrades in the middle of a canary: this script waits for it.
 helm upgrade --install shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
-  --rollback-on-failure --wait=legacy --timeout "$TIMEOUT"
+  --rollback-on-failure --force-conflicts --wait=legacy --timeout "$TIMEOUT"
 
 # Let the controller see the new spec before reading its status.
 gen=$(kubectl -n "$ENV" get rollout shortly -o jsonpath='{.metadata.generation}')
@@ -204,7 +209,7 @@ run=$(kubectl -n "$ENV" get analysisrun -l rollouts-pod-template-hash="$hash" \
 if [[ -n "$run" ]]; then
   kubectl -n "$ENV" get "$run" -o jsonpath='{range .status.metricResults[*]}{"     "}{.name}{": "}{.phase}{" (last value "}{.measurements[-1:].value}{")"}{"\n"}{end}' >&2 || true
 fi
-helm -n "$ENV" rollback shortly --wait=legacy --timeout "$TIMEOUT" >&2
+helm -n "$ENV" rollback shortly --force-conflicts --wait=legacy --timeout "$TIMEOUT" >&2
 # A rollback inside rollbackWindow skips the steps: back on stable within seconds.
 for _ in $(seq 1 60); do
   [[ "$(ro '{.status.phase}')" == Healthy ]] && break
