@@ -43,11 +43,12 @@ repoServer:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { memory: 512Mi }
 redis:
-  # The chart's default registry host (ecr-public.aws.com) refuses anonymous pulls once a
-  # data limit is hit ("Data limit exceeded"), which broke CI. The same official image from
-  # public.ecr.aws, pinned by digest.
+  # The chart pulls Redis from ECR Public, which refuses anonymous pulls from shared runner
+  # addresses once their data limit is hit (CI failed with ImagePullBackOff, from both
+  # ecr-public.aws.com and public.ecr.aws). The same official image from Docker Hub, where
+  # postgres:17-alpine already comes from, pinned by the same digest.
   image:
-    repository: public.ecr.aws/docker/library/redis
+    repository: docker.io/library/redis
     tag: 8.6.4-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763
   resources:
     requests: { cpu: 10m, memory: 32Mi }
