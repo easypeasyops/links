@@ -32,9 +32,10 @@
 #      (needs GITOPS_REVISION, a commit Argo CD can fetch; CI sets it)
 #
 # E2E_SUITE splits the run for CI's two parallel kind jobs. Both run steps 0-3a, then:
-#   platform: 3b, 6-11 (rate limit, autoscaling, monitoring and the alert drill, admission,
-#             network policies, cleanup, backups)
-#   delivery: 4, 5, 5b, 12 (automatic and manual rollback, both canaries, GitOps)
+#   platform: 3b, 6-12 (rate limit, autoscaling, monitoring and the alert drill, admission,
+#             network policies, cleanup, backups, GitOps)
+#   delivery: 4, 5, 5b (automatic and manual rollback, both canaries)
+# (GitOps runs with the platform half because that half is otherwise ~2 minutes shorter.)
 #   all:      everything in one cluster (the default; what a laptop runs)
 # Every deploy also gets deploy/kind/e2e-values.yaml: faster scrapes and canary analysis.
 set -euo pipefail
@@ -463,7 +464,7 @@ fi # 6-11
 # Prod's Application from deploy/argocd/applications.yaml, pointed at this commit instead of
 # main, and at the local build instead of the release digest (helm parameters). Everything
 # else is as on a real cluster: auto-sync, self-heal, the canary's ignored weights.
-if suite delivery && [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applications.argoproj.io >/dev/null 2>&1; then
+if suite platform && [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applications.argoproj.io >/dev/null 2>&1; then
   app() { kubectl -n argocd get application shortly-prod -o jsonpath="$1" 2>/dev/null; }
   synced_healthy() { [[ "$(app '{.status.sync.status}/{.status.health.status}')" == Synced/Healthy ]]; }
   wait_app() { # seconds what -> waits until Synced and Healthy on the newest spec

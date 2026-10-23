@@ -6,7 +6,7 @@
 #   MONITORING=0 scripts/cluster.sh up # skip kube-prometheus-stack (saves ~1 GB of RAM)
 #   POLICIES=0 scripts/cluster.sh up   # skip Kyverno and the admission policies
 #   BACKUPS=0 scripts/cluster.sh up    # skip the backup bucket and the backup CronJobs
-#   ARGOCD=0 scripts/cluster.sh up      # skip Argo CD altogether (CI's platform e2e job)
+#   ARGOCD=0 scripts/cluster.sh up      # skip Argo CD altogether (CI's delivery e2e job)
 #   ARGOCD_APPS=0 scripts/cluster.sh up # install Argo CD, but don't let it manage the app
 #                                       # (CI: the e2e deploys with deploy.sh instead)
 #
