@@ -238,10 +238,12 @@ status=$(helm -n prod status shortly -o json | python3 -c 'import json,sys; prin
 pass "broken release auto-rolled back (now revision $(revision prod)); 0 failed requests during it"
 
 # Canary analysis needs Prometheus. Fast settings for CI: each step is judged on 2
-# measurements 15 s apart, after 30 s for Prometheus to scrape the new pod (default 60 s,
-# 4 x 30 s: values.yaml). Without monitoring, steps are short plain pauses.
+# measurements 15 s apart, after 45 s for Prometheus to find and scrape the new pod
+# (default 60 s, 4 x 30 s: values.yaml). 30 s was too short: discovery plus two 15 s
+# scrapes sometimes isn't done yet, and the canary read as having no traffic. Without
+# monitoring, steps are short plain pauses.
 if ((monitoring)); then
-  canary_fast=(--set canary.analysis.initialDelay=30s --set canary.analysis.interval=15s --set canary.analysis.count=2)
+  canary_fast=(--set canary.analysis.initialDelay=45s --set canary.analysis.interval=15s --set canary.analysis.count=2)
 else
   canary_fast=(--set canary.pauseWithoutAnalysis=5s)
 fi

@@ -20,11 +20,13 @@ spec:
   metrics:
     # Too little traffic proves nothing: fail rather than pass a canary nobody used.
     # (`or vector(0)`: no series at all is 0 req/s, a clear failure, not a query error.)
+    # One miss is allowed: the first measurement can land before Prometheus has scraped the
+    # new pod twice (service discovery lags), which reads as 0 req/s.
     - name: traffic
       initialDelay: {{ $a.initialDelay }}
       interval: {{ $a.interval }}
       count: {{ $a.count }}
-      failureLimit: 0
+      failureLimit: 1
       successCondition: result[0] >= {{ $a.minRequestRate }}
       provider:
         prometheus:

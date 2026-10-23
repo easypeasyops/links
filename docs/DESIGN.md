@@ -536,7 +536,7 @@ flowchart TB
   subgraph ci [CI · .github/workflows/ci.yml · every PR and main]
     check[Job: check<br/>lint · mypy · pytest ≥90%]
     image[Job: image<br/>build · Trivy · smoke.sh]
-    k8s[Job: k8s<br/>kind e2e · rollback · HPA · monitoring · admission · cleanup]
+    k8s[Job: k8s<br/>kind e2e · rollback · canary · HPA · monitoring · admission · cleanup]
   end
 
   subgraph release [Release · release.yml · only on tag vX.Y.Z]
@@ -622,12 +622,14 @@ Chart lint + kubeconform run *before* kind starts, so a template typo fails in s
 
 - The HPA drill stops the load as soon as the HPA adds a ready pod. Its 100 s duration is a ceiling.
 - The broken release's canary timeout is 45 s. Its pod crashes within seconds, so a longer wait proves nothing more.
-- The canary drills use short analyses (30 s delay, 2 measurements 15 s apart) instead of the default 60 s and 4 × 30 s; the logic is the same.
+- The canary drills use short analyses (45 s delay, 2 measurements 15 s apart) instead of the default 60 s and 4 × 30 s; the logic is the same.
 - The staging alert drill runs alongside the prod drills.
 - `cluster.sh up` installs metrics-server, kube-prometheus-stack and Kyverno side by side.
 - A PR that changes only Markdown skips the cluster. The job still reports success, because it is a required check. A workflow-level paths filter would leave that check pending forever and block the merge. `docs/RUNBOOK.md` doesn't count as Markdown-only here, because the e2e reads the release digest from it. Pushes to main always run everything.
 
 Together these cut the job from 9m24s to **5m07s** (PR #27): cluster setup 117 s → 62 s, the e2e 364 s → 166 s. The alert drill took 101 s and finished entirely behind the prod drills, and the HPA drill stopped at +58 s instead of running its full 100 s. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
+
+The canary drills (PR #40) brought it back to **8–10 minutes** (8m19s and 9m59s in the first green runs; the second also had the HPA drill doing a real scale-up again): the healthy canary takes 106–134 s and the faulty one 74–86 s, even with short analyses. They are the price of testing the one release type nothing else catches. If the job's time matters more later, the healthy-canary drill is the one to move to a nightly run: the faulty one is the guard.
 
 
 ### Release workflow — “Publish one immutable, attributable artifact”
@@ -728,7 +730,7 @@ flowchart LR
 
 | Metric | Passes when | Fails the step | Why |
 | --- | --- | --- | --- |
-| `traffic` | at least 0.5 req/s | on the first bad measurement | A canary nobody used proves nothing; "no data" must not pass |
+| `traffic` | at least 0.5 req/s | on the second bad measurement | A canary nobody used proves nothing; "no data" must not pass. One miss is allowed because the first measurement can land before Prometheus has scraped the new pod twice |
 | `error-ratio` | 5xx share ≤ 1% | on the first bad measurement | What the availability SLOs count, load-shedding 503s included |
 | `redirect-p99` | p99 of `GET /{code}` ≤ 250 ms | on the second bad measurement | Coarse on purpose: a p99 from a few hundred requests is noisy. It catches a regression of several times, not a few ms |
 
@@ -746,6 +748,8 @@ The thresholds are absolute ("good enough"), not relative ("no worse than stable
 **Rollbacks skip the steps.** `rollbackWindow: 3` lets the Rollout go back to any of its last three revisions at once, without steps or analysis: those pods already served all traffic, and an incident is the moment not to wait 7 minutes. A first install also goes straight to 100%: there is no stable version to compare against or fall back to.
 
 **Moving from the Deployment.** On the first canary-enabled upgrade, Helm would delete the Deployment as soon as the Rollout exists, before the Rollout's pods are ready. `deploy.sh` annotates the Deployment `helm.sh/resource-policy: keep` first, so it keeps serving, and deletes it once the Rollout is Healthy. Both sets of pods carry the selector labels, so the `shortly` Service, the PDB and the HPA (now pointed at the Rollout) cover the overlap.
+
+**Measured in CI** (e2e steps 4, 5, 5b, with the short analyses): a never-ready canary got no traffic at all, 0 failed requests through the Service and the Gateway; a healthy canary was promoted 10% → 50% → 100% in 106–134 s; a canary failing half its requests was aborted at 10% after 74–86 s, and meanwhile 1.1–3.0% of redirects through the Gateway failed (6 of 539, 19 of 624), against the 5% a 10% canary failing half its requests would cause for as long as it ran. A `helm rollback` inside the window was Healthy within a second.
 
 **What the canary doesn't catch:** a problem that only shows at full load, with a long delay (a slow leak), or in a route the synthetic mix doesn't use (it sends creates and redirects only). A migration is not canaried at all: it runs once, before any canary pod, so it must stay backward compatible (expand/contract) whatever the canary decides.
 
@@ -1011,6 +1015,9 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Milestone 10 | The Kyverno docs' `referrer` attestation type found nothing in GitHub's Sigstore bundles, so it refused every image, the real release included | Declared as `intoto`; a test requires the documented release to pass, and mutated policies to fail |
 | Milestone 10 | The e2e's digest-mode dry run used a made-up digest, which the admission policy refuses | Dry run uses the runbook's release digest |
 | Backups (PR #35) | The restore drill passed once, then failed: on first start the Postgres image initialises with a temporary server on the Unix socket only, then restarts. A socket `pg_isready` reported Ready during that window and `pg_restore` hit the restart. The kind `postgres` StatefulSet had the same flaw | Readiness probes check over TCP (`-h 127.0.0.1`), which only the real server listens on; the drill restores over TCP; e2e step 11 runs the drill on every PR |
+| Canary (PR #40) | The first prod upgrade after the Rollout existed failed, and so did Helm's automatic rollback: Argo Rollouts edits the stable/canary Services and the HTTPRoute, and Helm 4's server-side apply refused them as conflicts | `--force-conflicts` on prod upgrades and rollbacks (`deploy.sh`, RUNBOOK); e2e steps 4–5b upgrade and roll back prod repeatedly |
+| Canary (PR #40) | A healthy canary was aborted in CI for "no traffic": its first measurement, 30 s in, came before Prometheus had discovered and scraped the new pod twice | `traffic` allows one miss; the CI delay is 45 s (default 60 s) |
+| Canary (PR #40) | The HPA drill passed without proving anything: a Rollout's ready count includes the old version's pods for 30 s after a promotion or abort, so "a new pod is ready" was true at t=0 | The drill waits for ready ≤ the HPA floor before loading, and fails otherwise |
 
 ## Known limitations and future work
 
