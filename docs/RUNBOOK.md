@@ -707,7 +707,7 @@ Every CI step can be reproduced locally with the same command; reproduce before 
 
 The kind e2e runs as two jobs in parallel, `kind e2e (platform)` and `kind e2e (delivery)`; the required check `deploy to kind, rollback drill` fails if either does, so open the failing one. Platform covers steps 3b and 6–12 (rate limit, HPA, monitoring, admission, network policies, cleanup, backups, GitOps); delivery covers 4, 5 and 5b (rollbacks and canaries). To rerun just one half locally: `E2E_SUITE=delivery IMAGE=shortly:e2e scripts/k8s-e2e.sh`.
 
-A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the kind jobs' steps; they pass with the notice "Docs-only change". If a PR you expected to be tested shows that notice, check its file list.
+A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the work in every CI job (`scripts/ci-scope.sh`): all four checks pass in under a minute with the notice "Docs-only change". If a PR you expected to be tested shows that notice, check its file list. A RUNBOOK change always runs everything, because the tests and the e2e read the current release digest from it.
 
 | Job → step | Usual cause | Reproduce and fix |
 | --- | --- | --- |

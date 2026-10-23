@@ -616,7 +616,7 @@ This is the expensive rehearsal. `scripts/k8s-e2e.sh` runs the same steps CI and
 | 11. Backup and restore | Prod's backup Job dumps and uploads; only backup pods reach the bucket; the dump restores into a fresh Postgres with the same revision, every link and a canary | Backups are only real once restored; this proves it on every PR, and times it |
 | 12. GitOps | Argo CD takes prod over from the PR's own commit, reverts a hand edit, and runs a full canary it started, without fighting Argo Rollouts over the weights | Two controllers on one object is where GitOps setups break; the first canary under Argo CD must not be in prod |
 
-Chart lint + kubeconform run *before* kind starts, so a template typo fails in seconds. A PR that changes only Markdown (other than `docs/RUNBOOK.md`) skips the job's steps and still passes the required check.
+Chart lint + kubeconform run *before* kind starts, so a template typo fails in seconds. Like `check` and `image`, it skips its steps on a docs-only PR (below).
 
 **Keeping the kind job fast.** It is the slowest of the three jobs. Its time goes into waiting, not work, so the waits are kept short and overlap where they can:
 
@@ -626,7 +626,7 @@ Chart lint + kubeconform run *before* kind starts, so a template typo fails in s
 - The staging alert drill runs alongside the prod drills.
 - `cluster.sh up` installs its add-ons side by side, and each kind job installs only what its half uses (the delivery cluster skips Argo CD, Kyverno and backups).
 - The two halves run on two runners at once.
-- A PR that changes only Markdown skips the cluster. The job still reports success, because it is a required check. A workflow-level paths filter would leave that check pending forever and block the merge. `docs/RUNBOOK.md` doesn't count as Markdown-only here, because the e2e reads the release digest from it. Pushes to main always run everything.
+- A PR that changes only Markdown skips the work in **all three jobs**, not just the cluster: `scripts/ci-scope.sh` runs first in each and the other steps run only if it says so, so a docs PR is mergeable in under a minute instead of eight (PR #50; a pure-docs PR was blocked by `check` and `image` for about 75 s and by the kind jobs before that). The jobs still report success, because they are required checks. A workflow-level paths filter would leave those checks pending forever and block the merge. `docs/RUNBOOK.md` doesn't count as Markdown-only, because the tests, the admission checks and the e2e read the release digest from it, so a record-digest PR runs everything. Pushes to main always run everything. `tests/test_ci_scope.py` pins which changes skip.
 
 Together these cut the job from 9m24s to **5m07s** (PR #27): cluster setup 117 s → 62 s, the e2e 364 s → 166 s. The alert drill took 101 s and finished entirely behind the prod drills, and the HPA drill stopped at +58 s instead of running its full 100 s. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
 
