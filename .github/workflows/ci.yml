@@ -28,23 +28,34 @@ jobs:
           # staging has run on main.
           fetch-depth: 0
 
+      # Docs-only PRs skip the work (scripts/ci-scope.sh says why the job still runs).
+      - name: Does this change need the checks?
+        id: scope
+        run: scripts/ci-scope.sh
+
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        if: steps.scope.outputs.full == 'true'
         with:
           enable-cache: true # Python version comes from .python-version
 
       - name: Install (fails if uv.lock is stale)
+        if: steps.scope.outputs.full == 'true'
         run: uv sync --locked
 
       - name: Format check
+        if: steps.scope.outputs.full == 'true'
         run: uv run ruff format --check .
 
       - name: Lint
+        if: steps.scope.outputs.full == 'true'
         run: uv run ruff check .
 
       - name: Type check
+        if: steps.scope.outputs.full == 'true'
         run: uv run mypy src tests
 
       - name: Test
+        if: steps.scope.outputs.full == 'true'
         run: uv run pytest --cov-fail-under=90
         env:
           # gh verifies the released image's provenance (tests/test_deploy_gate.py); the
@@ -58,10 +69,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 2 # the PR merge commit and its first parent, for scripts/ci-scope.sh
+
+      # Docs-only PRs skip the work (scripts/ci-scope.sh says why the job still runs).
+      - name: Does this change need the checks?
+        id: scope
+        run: scripts/ci-scope.sh
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.scope.outputs.full == 'true'
 
       - name: Build
+        if: steps.scope.outputs.full == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -73,6 +92,7 @@ jobs:
       # Fail on HIGH/CRITICAL vulns that have a fix available. Unfixed ones can't be
       # acted on yet, and failing on them just trains people to ignore the scanner.
       - name: Scan image
+        if: steps.scope.outputs.full == 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: shortly:ci
@@ -83,57 +103,44 @@ jobs:
           exit-code: "1"
 
       - name: Smoke test
+        if: steps.scope.outputs.full == 'true'
         run: scripts/smoke.sh
         env:
           SHORTLY_IMAGE: shortly:ci
   
   # Two kind clusters in parallel, each running half of the e2e drills (E2E_SUITE in
-  # scripts/k8s-e2e.sh): the platform checks, and the delivery drills (rollbacks, canaries,
-  # GitOps). One cluster ran them in about 14 minutes; two take about 7.
+  # scripts/k8s-e2e.sh): the platform checks plus GitOps, and the delivery drills (rollbacks
+  # and canaries). One cluster ran them in about 14 minutes; two take about 8.
   k8s:
     name: kind e2e (${{ matrix.suite }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15 # usually about 7; a hung drill shouldn't hold a runner
+    timeout-minutes: 15 # usually about 8; a hung drill shouldn't hold a runner
     strategy:
       fail-fast: false # a failure in one half shouldn't hide the other half's result
       matrix:
         include:
-          # Platform: everything but Argo CD (unused there).
-          - { suite: platform, argocd: "0", policies: "1", backups: "1" }
-          # Delivery: no admission policies or backups (unused there), so it starts sooner.
-          - { suite: delivery, argocd: "1", policies: "0", backups: "0" }
+          # Platform: everything.
+          - { suite: platform, argocd: "1", policies: "1", backups: "1" }
+          # Delivery: no Argo CD, admission policies or backups (unused there).
+          - { suite: delivery, argocd: "0", policies: "0", backups: "0" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 2 # the PR merge commit and its first parent (main), to diff them
 
-      # Docs-only PRs skip the cluster. The job still runs and reports success: it is a
-      # required check, and a workflow-level paths filter would leave it "expected" forever,
-      # blocking the merge. docs/RUNBOOK.md is not docs-only here: the e2e and the admission
-      # checks read the current release digest from it. Pushes to main always run everything.
-      - name: Does this change need the cluster?
+      # Docs-only PRs skip the work (scripts/ci-scope.sh says why the job still runs).
+      - name: Does this change need the checks?
         id: scope
-        env:
-          EVENT: ${{ github.event_name }}
-        run: |
-          if [[ "$EVENT" != pull_request ]]; then echo "e2e=true" >>"$GITHUB_OUTPUT"; exit 0; fi
-          changed=$(git diff --name-only HEAD^1 HEAD)
-          echo "$changed"
-          if grep -qvE '\.md$' <<<"$changed" || grep -qx docs/RUNBOOK.md <<<"$changed"; then
-            echo "e2e=true" >>"$GITHUB_OUTPUT"
-          else
-            echo "e2e=false" >>"$GITHUB_OUTPUT"
-            echo "::notice::Docs-only change: the kind cluster and e2e are skipped"
-          fi
+        run: scripts/ci-scope.sh
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-        if: steps.scope.outputs.e2e == 'true'
+        if: steps.scope.outputs.full == 'true'
         with:
           version: v4.3.1 # deploy.sh uses Helm 4 flags (--rollback-on-failure)
 
       - name: Lint and schema-validate the chart
-        if: steps.scope.outputs.e2e == 'true'
+        if: steps.scope.outputs.full == 'true'
         run: |
           helm lint deploy/helm/shortly --set image.tag=ci
           # --api-versions renders the ServiceMonitor/PrometheusRule (normally only rendered
@@ -155,16 +162,16 @@ jobs:
             -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" /a
 
       - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
-        if: steps.scope.outputs.e2e == 'true'
+        if: steps.scope.outputs.full == 'true'
         with:
           cluster_name: shortly
           config: deploy/kind/cluster.yaml
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        if: steps.scope.outputs.e2e == 'true'
+        if: steps.scope.outputs.full == 'true'
 
       - name: Build image
-        if: steps.scope.outputs.e2e == 'true'
+        if: steps.scope.outputs.full == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -173,7 +180,7 @@ jobs:
           cache-from: type=gha
 
       - name: Namespaces, Postgres, secrets
-        if: steps.scope.outputs.e2e == 'true'
+        if: steps.scope.outputs.full == 'true'
         run: scripts/cluster.sh up
         env:
           ARGOCD: ${{ matrix.argocd }}
@@ -182,7 +189,7 @@ jobs:
           BACKUPS: ${{ matrix.backups }}
 
       - name: Deploy, promote, rollback drill
-        if: steps.scope.outputs.e2e == 'true'
+        if: steps.scope.outputs.full == 'true'
         run: scripts/k8s-e2e.sh
         env:
           IMAGE: shortly:e2e
