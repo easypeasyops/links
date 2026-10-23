@@ -1,5 +1,11 @@
 # Production: autoscaled (chart defaults), never below two replicas so a rollout, drain,
 # or crash never drops to zero. maxReplicas is capped to what a laptop kind node can hold.
+
+# The release this environment runs. Argo CD deploys whatever is here on main, so changing
+# this line in a merged PR IS the deploy (scripts/promote.sh writes it). CI verifies the
+# digest's release provenance, and that staging ran it first.
+image:
+  digest: "sha256:9df4c29bd25d9f69b0ce2f7776a0affeab4d2bca18c859668927e398f4a21670" # v0.7.0
 autoscaling:
   minReplicas: 2
   maxReplicas: 4

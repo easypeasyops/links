@@ -27,6 +27,9 @@
 #  10. the cleanup CronJob deletes links past their grace period, and only those
 #  11. prod's backup runs, only backup pods reach the bucket, and the dump restores into a
 #      fresh database with every link (scripts/restore-drill.sh; skipped if BACKUPS=0)
+#  12. GitOps: Argo CD takes prod over from this commit, reverts a hand edit, and runs a
+#      canary it started itself without fighting Argo Rollouts over the route's weights
+#      (needs GITOPS_REVISION, a commit Argo CD can fetch; CI sets it)
 set -euo pipefail
 
 IMAGE="${IMAGE:?set IMAGE, e.g. IMAGE=shortly:e2e}"
@@ -441,6 +444,82 @@ if kubectl -n prod get cronjob postgres-backup >/dev/null 2>&1; then
   kubectl -n prod delete job backup-e2e --wait=false >/dev/null
 else
   echo "skip backup checks: no postgres-backup CronJob (BACKUPS=0?)"
+fi
+
+# ---------------------------------------------------------------- 12. GitOps (Argo CD)
+# Prod's Application from deploy/argocd/applications.yaml, pointed at this commit instead of
+# main, and at the local build instead of the release digest (helm parameters). Everything
+# else is as on a real cluster: auto-sync, self-heal, the canary's ignored weights.
+if [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applications.argoproj.io >/dev/null 2>&1; then
+  app() { kubectl -n argocd get application shortly-prod -o jsonpath="$1" 2>/dev/null; }
+  synced_healthy() { [[ "$(app '{.status.sync.status}/{.status.health.status}')" == Synced/Healthy ]]; }
+  wait_app() { # seconds what -> waits until Synced and Healthy on the newest spec
+    for _ in $(seq 1 "$(($1 / 3))"); do synced_healthy && return 0; sleep 3; done
+    kubectl -n argocd get application shortly-prod -o yaml | sed -n '/^status:/,$p' | head -60 >&2
+    fail "GitOps: $2: application shortly-prod is $(app '{.status.sync.status}/{.status.health.status}')"
+  }
+  repo=${GITOPS_REPO:-https://github.com/statsguy/shortly.git}
+  kubectl apply -f "$ROOT/deploy/argocd/project.yaml" >/dev/null
+  # (YAML to JSON by kubectl, which knows the CRD: the runner's python has no YAML module.)
+  kubectl create --dry-run=client -o json -f "$ROOT/deploy/argocd/applications.yaml" \
+    | python3 -c "$(cat <<'PY'
+import json, sys
+revision, repo, repository, tag = sys.argv[1:]
+items = json.load(sys.stdin)["items"]
+app = next(a for a in items if a["metadata"]["name"] == "shortly-prod")
+source = app["spec"]["source"]
+source["targetRevision"], source["repoURL"] = revision, repo
+source["helm"]["valuesObject"] = {  # applied after prod.yaml, like --set
+    "image": {"repository": repository, "tag": tag, "digest": ""},
+    # CI-length canary analysis, as in step 5.
+    "canary": {"analysis": {"initialDelay": "45s", "interval": "15s", "count": 2}},
+}
+print(json.dumps(app))
+PY
+)" "$GITOPS_REVISION" "$repo" "${IMAGE%:*}" "${IMAGE##*:}" | kubectl apply -f - >/dev/null
+  start=$SECONDS
+  wait_app 240 "taking over prod"
+  [[ "$(deployed_image prod)" == "$IMAGE" ]] || fail "GitOps: prod runs $(deployed_image prod), want $IMAGE"
+  pass "GitOps: Argo CD took prod over from $GITOPS_REVISION (Synced, Healthy) in $((SECONDS - start))s"
+
+  # Self-heal: a hand edit to something the chart sets is put back.
+  kubectl -n prod patch pdb shortly --type merge -p '{"spec":{"minAvailable":0}}' >/dev/null
+  start=$SECONDS healed=0
+  for _ in $(seq 1 30); do
+    [[ "$(kubectl -n prod get pdb shortly -o jsonpath='{.spec.minAvailable}')" == 1 ]] && { healed=1; break; }
+    sleep 2
+  done
+  ((healed)) || fail "GitOps: self-heal did not restore the PodDisruptionBudget within 60s"
+  pass "GitOps: a hand edit (PDB minAvailable 1 → 0) was reverted in $((SECONDS - start))s"
+
+  # A change through Argo CD (as a merged PR would make): a full canary, with its own
+  # synthetic traffic, while Argo CD keeps watching. It must not reset the weights.
+  old_hash=$(ro '{.status.stableRS}')
+  kubectl -n argocd patch application shortly-prod --type json -p \
+    '[{"op":"add","path":"/spec/source/helm/valuesObject/config","value":{"logLevel":"DEBUG"}}]' >/dev/null
+  start=$SECONDS max_weight=0 out_of_sync=0
+  while ((SECONDS - start < 420)); do
+    w=$(kubectl -n prod get httproute shortly -o jsonpath='{.spec.rules[0].backendRefs[1].weight}')
+    ((${w:-0} > max_weight)) && max_weight=${w:-0}
+    [[ "$(app '{.status.sync.status}')" == OutOfSync ]] && out_of_sync=$((out_of_sync + 1))
+    new_hash=$(ro '{.status.stableRS}')
+    [[ -n "$new_hash" && "$new_hash" != "$old_hash" && "$(ro '{.status.phase}')" == Healthy ]] && break
+    [[ "$(ro '{.status.phase}')" == Degraded ]] && fail "GitOps: the canary was aborted: $(ro '{.status.message}')"
+    sleep 3
+  done
+  [[ "$new_hash" != "$old_hash" ]] || fail "GitOps: the canary did not finish in 420 s ($(ro '{.status.phase}'))"
+  [[ "$(pod_env prod SHORTLY_LOG_LEVEL)" == DEBUG ]] || fail "GitOps: the change did not reach the Rollout"
+  ((max_weight >= 10)) || fail "GitOps: the canary never got traffic (max weight $max_weight%)"
+  if ((monitoring)); then
+    [[ "$(analysis_runs "$new_hash")" == *Successful*Successful* ]] \
+      || fail "GitOps: analysis runs for the canary: '$(analysis_runs "$new_hash")'"
+  fi
+  # A sample or two of OutOfSync is the sync itself; repeated ones mean a fight over weights.
+  ((out_of_sync <= 3)) || fail "GitOps: Argo CD saw prod OutOfSync $out_of_sync times during the canary"
+  wait_app 60 "after the canary"
+  pass "GitOps: a change through Argo CD ran a full canary (weights up to ${max_weight}%, analysis Successful twice, synthetic traffic included) in $((SECONDS - start))s; Argo CD stayed in sync"
+else
+  echo "skip GitOps checks: no Argo CD, or GITOPS_REVISION unset (CI sets it)"
 fi
 
 echo "k8s e2e passed"

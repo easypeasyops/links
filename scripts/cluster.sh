@@ -6,9 +6,12 @@
 #   MONITORING=0 scripts/cluster.sh up # skip kube-prometheus-stack (saves ~1 GB of RAM)
 #   POLICIES=0 scripts/cluster.sh up   # skip Kyverno and the admission policies
 #   BACKUPS=0 scripts/cluster.sh up    # skip the backup bucket and the backup CronJobs
+#   ARGOCD_APPS=0 scripts/cluster.sh up # install Argo CD, but don't let it manage the app
+#                                       # (CI: the e2e deploys with deploy.sh instead)
 #
 # Always installed: Envoy Gateway (the Gateway API implementation that is the cluster's
-# front door) and Argo Rollouts (prod's canary releases). The app's chart depends on both.
+# front door), Argo Rollouts (prod's canary releases) and Argo CD (GitOps: it deploys the
+# app from git, deploy/argocd/). The app's chart depends on the first two.
 #   scripts/cluster.sh down
 set -euo pipefail
 
@@ -43,6 +46,10 @@ ROLLOUTS_DIGEST=sha256:ea68b0aed72752c8c8aa8d948c62d8d6076a255c5e6238648769bf1b0
 GATEWAYAPI_PLUGIN_VERSION=v0.17.0
 GATEWAYAPI_PLUGIN_SHA256_amd64=1904ca787d33107c140521899d61fff030ee75d99908bd175fca5a4647759061
 GATEWAYAPI_PLUGIN_SHA256_arm64=5221279f7bf2c9b2c0ff6ed7ff12718ecce1d4892f1ff5e5224bb723cfd0fd92
+# Argo CD: deploys staging and prod from git (deploy/argocd/applications.yaml).
+ARGOCD_CHART=oci://ghcr.io/argoproj/argo-helm/argo-cd
+ARGOCD_VERSION=10.11.1 # Argo CD v3.5.6
+ARGOCD_DIGEST=sha256:2ac5224a5c201789f96aa9e085673d80732591d1b3e815a8a825a4db6d1d7c88
 
 up() {
   if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
@@ -58,6 +65,7 @@ up() {
   install_metrics_server & pids+=($!)
   install_gateway & pids+=($!)
   install_rollouts & pids+=($!)
+  install_argocd & pids+=($!)
   if [[ "${MONITORING:-1}" != 0 ]]; then install_monitoring & pids+=($!); fi
   if [[ "${POLICIES:-1}" != 0 ]]; then install_policies & pids+=($!); fi
   if [[ "${BACKUPS:-1}" != 0 ]]; then install_backups & pids+=($!); fi
@@ -99,6 +107,19 @@ up() {
     kubectl -n "$ns" rollout status statefulset/postgres --timeout=180s
   done
   echo "cluster ready: namespaces ${ENVS[*]}"
+
+  # Last, once Postgres and the secrets exist: from here on, git decides what runs.
+  if [[ "${ARGOCD_APPS:-1}" != 0 ]]; then
+    kubectl apply -f "$ROOT/deploy/argocd/project.yaml" -f "$ROOT/deploy/argocd/applications.yaml" >/dev/null
+    for ns in "${ENVS[@]}"; do
+      if ! kubectl -n argocd wait "application/shortly-$ns" --timeout=300s \
+        --for=jsonpath='{.status.health.status}'=Healthy >/dev/null 2>&1; then
+        echo "WARNING: Argo CD application shortly-$ns is not Healthy after 5 minutes:" >&2
+        kubectl -n argocd get application "shortly-$ns" >&2 || true
+      fi
+    done
+    kubectl -n argocd get applications
+  fi
 }
 
 install_metrics_server() {
@@ -188,6 +209,15 @@ install_rollouts() {
     --set "controller.trafficRouterPlugins[0].sha256=$sha" \
     --wait --timeout 5m >/dev/null
   echo "rollouts ready: Argo Rollouts (chart $ROLLOUTS_VERSION), Gateway API plugin $GATEWAYAPI_PLUGIN_VERSION ($arch)"
+}
+
+install_argocd() {
+  kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl label namespace argocd --overwrite pod-security.kubernetes.io/enforce=restricted >/dev/null
+  helm upgrade --install argocd "$ARGOCD_CHART@$ARGOCD_DIGEST" --version "$ARGOCD_VERSION" \
+    --namespace argocd --values "$ROOT/deploy/kind/argocd-values.yaml" \
+    --wait --timeout 5m >/dev/null
+  echo "argocd ready: Argo CD (chart $ARGOCD_VERSION) in namespace argocd"
 }
 
 install_backups() {

@@ -1,0 +1,19 @@
+# The Argo CD project for shortly: what its Applications may deploy, and where.
+# Least privilege, like the rest of the cluster: one repository, two namespaces, and no
+# cluster-scoped resources at all (the chart has none; the platform is installed by
+# scripts/cluster.sh, not by Argo CD).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: shortly
+  namespace: argocd
+spec:
+  description: shortly's environments, deployed from git
+  sourceRepos:
+    - https://github.com/statsguy/shortly.git
+  destinations:
+    - { server: https://kubernetes.default.svc, namespace: staging }
+    - { server: https://kubernetes.default.svc, namespace: prod }
+  clusterResourceWhitelist: [] # nothing cluster-scoped
+  namespaceResourceWhitelist:
+    - { group: "*", kind: "*" }
