@@ -185,7 +185,7 @@ helm -n prod rollback shortly --force-conflicts --wait=legacy
 
 Knobs: `CANARY_TIMEOUT` (default 15m; `deploy.sh` aborts the canary when it runs out), `CANARY_TRAFFIC_RATE` (20), `DEPLOY_TIMEOUT` (helm's own wait, 3m). Steps and thresholds are chart values (`canary:` in `values.yaml`).
 
-**First upgrade onto chart 0.9.0** (prod becomes a Rollout): `deploy.sh` keeps the old Deployment serving (it annotates it `helm.sh/resource-policy: keep`), waits for the Rollout to be Healthy, then deletes the Deployment, and prints `migrated`. The first Rollout version starts at 100% (there is no stable version yet), so this one deploy has no canary. If it fails, the rollback brings the Deployment back under Helm; check `kubectl -n prod get deploy,rollout`.
+**First upgrade onto chart 0.9.0** (prod becomes a Rollout): `deploy.sh` keeps the old Deployment serving (it annotates it `helm.sh/resource-policy: keep`), waits for the Rollout to be Healthy, then deletes the Deployment, and prints `migrated`. Meanwhile it shows `first version, no canary`: the first Rollout version starts at 100% (there is no stable version yet), so this one deploy has no canary. If it fails, the rollback brings the Deployment back under Helm; check `kubectl -n prod get deploy,rollout`.
 
 **First upgrade onto chart 0.2.0** (the HPA arrives): the chart stops setting `replicas`, so Kubernetes may briefly set an existing prod Deployment to 1 replica until the HPA restores its minimum of 2, typically within 15 s. Do this upgrade at a quiet time, then check `kubectl -n prod get hpa,deploy shortly`. Fresh installs are not affected.
 
