@@ -29,3 +29,10 @@ the one reviewed with the code.
 - `deploy/policies/` (Kyverno) and `scripts/verify-image.sh` enforce the same provenance rules;
   change them together (`tests/test_admission_policies.py` checks they agree).
 - Migrations follow expand / deploy / contract; every revision has a working `downgrade()`.
+
+## Pull requests opened by Claude
+
+- Docs-only and record-digest PRs: turn on auto-merge (squash) when opening them; they merge
+  once CI is green. Docs-only PRs skip the CI work (`scripts/ci-scope.sh`).
+- Promotion PRs (`scripts/promote.sh … --pr`) and code / CI PRs: never auto-merge. Merging a
+  promotion is the deploy, so the human merge is the approval.
