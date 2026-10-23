@@ -111,11 +111,21 @@ up() {
   # Last, once Postgres and the secrets exist: from here on, git decides what runs.
   if [[ "${ARGOCD_APPS:-1}" != 0 ]]; then
     kubectl apply -f "$ROOT/deploy/argocd/project.yaml" -f "$ROOT/deploy/argocd/applications.yaml" >/dev/null
+    # Wait for Synced AND Healthy. Healthy alone comes first when Argo CD adopts resources
+    # that already run, before its first sync has applied main (seen on the first takeover:
+    # both printed OutOfSync/Healthy).
     for ns in "${ENVS[@]}"; do
-      if ! kubectl -n argocd wait "application/shortly-$ns" --timeout=300s \
-        --for=jsonpath='{.status.health.status}'=Healthy >/dev/null 2>&1; then
-        echo "WARNING: Argo CD application shortly-$ns is not Healthy after 5 minutes:" >&2
-        kubectl -n argocd get application "shortly-$ns" >&2 || true
+      state=""
+      for _ in $(seq 1 100); do
+        state=$(kubectl -n argocd get application "shortly-$ns" \
+          -o jsonpath='{.status.sync.status}/{.status.health.status}' 2>/dev/null || true)
+        [[ "$state" == Synced/Healthy ]] && break
+        sleep 3
+      done
+      if [[ "$state" != Synced/Healthy ]]; then
+        echo "WARNING: Argo CD application shortly-$ns is $state after 5 minutes; out of sync:" >&2
+        kubectl -n argocd get application "shortly-$ns" \
+          -o jsonpath='{range .status.resources[?(@.status!="Synced")]}  {.kind}/{.name}{"\n"}{end}{.status.operationState.message}{"\n"}' >&2 || true
       fi
     done
     kubectl -n argocd get applications
