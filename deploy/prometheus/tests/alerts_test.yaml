@@ -400,3 +400,31 @@ tests:
       - eval_time: 3h50m
         alertname: ShortlyBackupNotRunning
         exp_alerts: []
+
+  - name: fault injection left on opens a ticket
+    interval: 1m
+    input_series:
+      - series: 'faults_injected_total{namespace="prod"}'
+        values: '0+30x40'
+    alert_rule_test:
+      - eval_time: 10m # a drill's few minutes: quiet
+        alertname: ShortlyFaultInjectionOn
+        exp_alerts: []
+      - eval_time: 25m
+        alertname: ShortlyFaultInjectionOn
+        exp_alerts:
+          - exp_labels: {namespace: prod, severity: ticket}
+            exp_annotations:
+              summary: Fault injection is failing requests on purpose
+              description: SHORTLY_FAULT_ERROR_RATIO is set in prod and has been failing requests for 15 minutes. Remove config.faultErrorRatio and redeploy.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#fault-injection-left-on
+
+  - name: a drill's short burst of injected faults stays quiet
+    interval: 1m
+    input_series:
+      - series: 'faults_injected_total{namespace="prod"}'
+        values: '0x5 0+30x5 150x30'
+    alert_rule_test:
+      - eval_time: 35m
+        alertname: ShortlyFaultInjectionOn
+        exp_alerts: []

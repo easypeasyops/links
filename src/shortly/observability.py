@@ -150,6 +150,12 @@ class Metrics:
             "Requests this pod is working on now (probes and /metrics excluded).",
             registry=self.registry,
         )
+        self.faults_injected = Counter(
+            "faults_injected",
+            "Requests failed on purpose by SHORTLY_FAULT_ERROR_RATIO (drills). Must be 0 in "
+            "normal operation.",
+            registry=self.registry,
+        )
         self.rate_limited = Counter(
             "rate_limited",
             "POST /links requests refused with 429 because the client was over its limit.",

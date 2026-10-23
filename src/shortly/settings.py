@@ -29,6 +29,9 @@ class Settings(BaseSettings):
     # Requests a pod works on at once; more are answered 503 + Retry-After immediately,
     # instead of queueing until every request is slow (docs/DESIGN.md, Capacity). 0 = off.
     max_concurrent_requests: int = Field(default=16, ge=0)
+    # DRILLS ONLY. This share of creates and redirects fails with 500 while probes stay
+    # green: a release that is ready but broken, to rehearse the canary catching it.
+    fault_error_ratio: float = Field(default=0.0, ge=0.0, le=1.0)
     # Per-client limit on POST /links (shortly.ratelimit). A quiet client may create
     # `burst` links at once, then one every 60/per_minute seconds. 0 turns limiting off.
     rate_limit_creates_per_minute: float = Field(default=60.0, ge=0)

@@ -379,6 +379,7 @@ All configuration comes from environment variables, parsed by `pydantic-settings
 | `SHORTLY_DB_POOL_TIMEOUT_SECONDS` | `1.0` | Longest wait for a pooled connection before a 503 |
 | `SHORTLY_DB_STATEMENT_TIMEOUT_MS` / `SHORTLY_DB_LOCK_TIMEOUT_MS` | `2000` / `1000` | Postgres cancels a statement running, or a lock wait lasting, longer than this; the request gets a 503. `0` = off. Migrations have none; the cleanup Job uses 30 s |
 | `SHORTLY_MAX_CONCURRENT_REQUESTS` | `16` | Requests one pod works on at once; more get a 503 at once (see Capacity). `0` = no limit |
+| `SHORTLY_FAULT_ERROR_RATIO` | `0` | **Drills only.** This share (0–1) of creates and redirects fails with 500 while probes pass: a release that is ready but broken. Logged as a warning at start; counted in `faults_injected_total`; `ShortlyFaultInjectionOn` opens a ticket if it stays on |
 | `SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE` | `60` | Sustained `POST /links` rate per client; `0` turns limiting off |
 | `SHORTLY_RATE_LIMIT_BURST` | `20` | Creates a quiet client may make at once |
 | `SHORTLY_CLEANUP_GRACE_DAYS` | `7` | Cleanup keeps links that expired less than this long ago (they still answer 410) |
@@ -417,6 +418,7 @@ Probe and scrape requests (`/healthz`, `/readyz`, `/metrics`) log at DEBUG so th
 | `db_pool_in_use` | gauge | — | Connections checked out now; near `db_pool_size` means the pool is the bottleneck |
 | `load_shed_total` | counter | reason = concurrency, pool, db_timeout | Requests rejected with 503 because the pod or the database was saturated |
 | `requests_in_flight` | gauge | — | Requests the pod is working on now (probes excluded); at `SHORTLY_MAX_CONCURRENT_REQUESTS`, it sheds |
+| `faults_injected_total` | counter | — | Requests failed on purpose by fault injection (drills). Must be 0 outside a drill |
 | `rate_limited_total` | counter | — | `POST /links` refused with 429: the client was over its limit. No client label: one series per address would be unbounded |
 
 **Cardinality rule.** The `route` label is the route template (`/{code}`), never the raw path. Raw paths would create one time series per link ever made. A test asserts that 50 distinct codes produce one series; unmatched paths share `route="unmatched"`.
@@ -463,6 +465,7 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 | `ShortlyAtMaxReplicas` | ticket | The HPA has no headroom left; uses kube-state-metrics |
 | `ShortlyCleanupNotRunning` | ticket | The cleanup CronJob's last success is over 3 hours old, or it has never succeeded; uses kube-state-metrics |
 | `ShortlyBackupNotRunning` | ticket | The Postgres backup CronJob's last success is over 2 hours old (2 missed hourly runs), or it has never succeeded; uses kube-state-metrics. Only where the kind backup CronJob exists |
+| `ShortlyFaultInjectionOn` | ticket | Fault injection has failed requests for 15 minutes: a drill left on, or the setting leaked into a release. Drills last minutes, so they stay quiet |
 | `ShortlyRateLimiting` | ticket | Over 10% of creates refused with 429 for 30 minutes: abuse, or a limit too tight for real users. 429s never burn the SLO, so without this a bad limit would be invisible |
 
 **How the rules are kept honest** (`tests/test_alert_rules.py`, which runs in CI):
@@ -768,6 +771,8 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | Vulnerable dependency published | CI image scan fails; release workflow refuses to publish | Red `build, scan` job |
 
 Expired links are deleted by the cleanup job after their grace period. Links without a TTL are kept forever, so the table still grows with every permanent link.
+
+**Fault injection (drills only).** Kubernetes and Helm can only roll back a release whose pods never become ready. The release that hurts users is the other kind: ready, passing every probe, and failing requests. To rehearse catching that, `SHORTLY_FAULT_ERROR_RATIO` (chart `config.faultErrorRatio`) makes a share of creates and redirects fail with 500 while probes stay green. It is checked inside the handlers, so injected failures keep their route and burn the SLO like real ones. Guards against leaving it on: it is never set in `deploy/envs/`, the chart renders no variable at 0, the app logs a warning at start, and `ShortlyFaultInjectionOn` opens a ticket after 15 minutes.
 
 ## Capacity
 

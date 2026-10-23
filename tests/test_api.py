@@ -124,3 +124,57 @@ async def test_probes_and_metrics_answer_while_the_threadpool_is_saturated(
             timings[path] = time.perf_counter() - start
         await asyncio.gather(*busy)
     assert all(t < 0.5 for t in timings.values()), timings  # queued, they'd wait about 1 s
+
+
+# ------------------------------------------------------------------ fault injection (drills)
+
+
+def test_fault_injection_off_by_default(clock: FakeClock) -> None:
+    metrics = Metrics()
+    c = TestClient(
+        create_app(Shortener(InMemoryStore(), clock=clock), base_url=BASE, metrics=metrics),
+        follow_redirects=False,
+    )
+    assert c.post("/links", json={"url": "https://example.com/"}).status_code == 201
+    assert metrics.registry.get_sample_value("faults_injected_total") == 0
+
+
+def test_fault_injection_fails_requests_but_not_probes(clock: FakeClock) -> None:
+    # A release that is ready but broken: probes pass (Kubernetes and Helm see a healthy
+    # rollout), creates and redirects fail with 500, counted on their own routes.
+    metrics = Metrics()
+    c = TestClient(
+        create_app(
+            Shortener(InMemoryStore(), clock=clock),
+            base_url=BASE,
+            metrics=metrics,
+            fault_error_ratio=1.0,
+        ),
+        follow_redirects=False,
+    )
+    assert c.get("/healthz").status_code == 200
+    assert c.get("/readyz").status_code == 200
+    assert c.post("/links", json={"url": "https://example.com/"}).status_code == 500
+    assert c.get("/abc1234").status_code == 500
+    sample = metrics.registry.get_sample_value
+    assert (
+        sample("http_requests_total", {"method": "GET", "route": "/{code}", "status": "500"}) == 1
+    )
+    assert (
+        sample("http_requests_total", {"method": "POST", "route": "/links", "status": "500"}) == 1
+    )
+    assert sample("faults_injected_total") == 2
+
+
+def test_fault_injection_fails_only_its_share(clock: FakeClock) -> None:
+    draws = iter([0.1, 0.9, 0.29, 0.31])  # ratio 0.3: the 1st and 3rd fail
+    c = TestClient(
+        create_app(
+            Shortener(InMemoryStore(), clock=clock),
+            base_url=BASE,
+            fault_error_ratio=0.3,
+            rand=lambda: next(draws),
+        ),
+        follow_redirects=False,
+    )
+    assert [c.get("/abc1234").status_code for _ in range(4)] == [500, 404, 500, 404]

@@ -89,6 +89,10 @@ max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
   value: {{ .Values.config.dbLockTimeoutMs | quote }}
 - name: SHORTLY_MAX_CONCURRENT_REQUESTS
   value: {{ .Values.config.maxConcurrentRequests | quote }}
+{{- if .Values.config.faultErrorRatio }}
+- name: SHORTLY_FAULT_ERROR_RATIO # DRILL: requests fail on purpose (see values.yaml)
+  value: {{ .Values.config.faultErrorRatio | quote }}
+{{- end }}
 - name: SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE
   value: {{ .Values.config.rateLimit.createsPerMinute | quote }}
 - name: SHORTLY_RATE_LIMIT_BURST
