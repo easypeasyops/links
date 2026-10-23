@@ -16,6 +16,17 @@ spec:
     {{- toYaml .Values.gateway.hostnames | nindent 4 }}
   rules:
     - backendRefs:
+        {{- if .Values.canary.enabled }}
+        # Argo Rollouts sets these weights during a release. 100/0 is the resting state, so
+        # an upgrade that re-applies them (before the Rollout starts its steps) is harmless.
+        - name: {{ include "shortly.fullname" . }}-stable
+          port: {{ .Values.service.port }}
+          weight: 100
+        - name: {{ include "shortly.fullname" . }}-canary
+          port: {{ .Values.service.port }}
+          weight: 0
+        {{- else }}
         - name: {{ include "shortly.fullname" . }}
           port: {{ .Values.service.port }}
+        {{- end }}
 {{- end }}

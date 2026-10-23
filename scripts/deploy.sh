@@ -10,7 +10,8 @@
 # release workflow from a release tag. A tag is accepted only on a kind-* kube context.
 #
 # Extra args are passed to helm (e.g. --set config.logLevel=DEBUG).
-# A failed rollout is rolled back automatically (--rollback-on-failure).
+# A failed rollout is rolled back automatically (--rollback-on-failure). In an environment
+# with canary.enabled (prod), the new version is a canary first; see below.
 set -euo pipefail
 
 ENV="${1:?usage: $0 <staging|prod> <image-ref> [helm args...]}"
@@ -45,14 +46,181 @@ else
   fi
 fi
 
-echo "deploying $REF → $ENV"
-helm upgrade --install shortly "$ROOT/deploy/helm/shortly" \
-  --namespace "$ENV" \
-  --values "$ROOT/deploy/envs/$ENV.yaml" \
-  "${image_args[@]}" \
-  --rollback-on-failure \
-  --wait \
-  --timeout "$TIMEOUT" \
-  "$@"
-kubectl -n "$ENV" rollout status deploy/shortly --timeout=60s
-helm -n "$ENV" history shortly --max 5
+# With canary.enabled (prod) the chart renders an Argo Rollout instead of a Deployment, and
+# the release is not done when helm returns: the Rollout then walks its steps.
+helm_args=(--namespace "$ENV" --values "$ROOT/deploy/envs/$ENV.yaml" "${image_args[@]}" "$@")
+canary=0
+if helm template shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
+  --show-only templates/rollout.yaml >/dev/null 2>&1; then
+  canary=1
+fi
+
+echo "deploying $REF → $ENV$( ((canary)) && echo ' (canary)')"
+if ((!canary)); then
+  helm upgrade --install shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
+    --rollback-on-failure --wait --timeout "$TIMEOUT"
+  kubectl -n "$ENV" rollout status deploy/shortly --timeout=60s
+  helm -n "$ENV" history shortly --max 5
+  exit 0
+fi
+
+# ------------------------------------------------------------------- canary (Argo Rollouts)
+# Driven from here, so this script still answers "did the release work?" with its exit code:
+#   1. helm applies the chart (hooks, i.e. migrations, still gate it) and returns
+#   2. the Rollout runs its steps: 10% → analysis → 50% → analysis → 100%
+#   3. Healthy on the new version: done. Aborted (analysis failed, canary never ready) or
+#      out of time: helm rollback, so helm's history matches what runs, and exit 1.
+# Knobs: CANARY_TIMEOUT (default 15m), CANARY_TRAFFIC=0 to send no synthetic traffic.
+CANARY_TIMEOUT="${CANARY_TIMEOUT:-15m}"
+ro() { kubectl -n "$ENV" get rollout shortly -o jsonpath="$1" 2>/dev/null; }
+seconds() { local d=$1; case "$d" in *m) echo $((${d%m} * 60)) ;; *s) echo "${d%s}" ;; *) echo "$d" ;; esac; }
+
+# One-time move from the Deployment to the Rollout without a gap: helm would delete the
+# Deployment as soon as the Rollout exists, before its pods are ready. "keep" makes helm
+# leave it serving; it is deleted below once the Rollout is Healthy.
+migrating=0
+if kubectl -n "$ENV" get deploy shortly >/dev/null 2>&1 && ! kubectl -n "$ENV" get rollout shortly >/dev/null 2>&1; then
+  echo "     migrating: the Deployment keeps serving until the Rollout is Healthy"
+  kubectl -n "$ENV" annotate deploy shortly helm.sh/resource-policy=keep --overwrite >/dev/null
+  migrating=1
+fi
+
+# --wait=legacy: helm's default watcher doesn't understand a Rollout's status; the loop
+# below does. It still waits for the hooks (migrations) and the Services.
+# --force-conflicts: Argo Rollouts also writes to objects Helm applies (the stable/canary
+# Services' selectors, the HTTPRoute's weights). Server-side apply calls that a conflict
+# and refuses. Forcing gives Helm back only the fields it declares; the controller keeps
+# the ones only it sets (the pod-template-hash selector), and resets the rest when it next
+# acts. Safe because nothing upgrades in the middle of a canary: this script waits for it.
+helm upgrade --install shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
+  --rollback-on-failure --force-conflicts --wait=legacy --timeout "$TIMEOUT"
+
+# Let the controller see the new spec before reading its status.
+gen=$(kubectl -n "$ENV" get rollout shortly -o jsonpath='{.metadata.generation}')
+for _ in $(seq 1 30); do [[ "$(ro '{.status.observedGeneration}')" == "$gen" ]] && break; sleep 1; done
+
+TRAFFIC_JOB="canary-traffic"
+stop_traffic() {
+  kubectl -n "$ENV" delete job "$TRAFFIC_JOB" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+  kubectl -n "$ENV" delete configmap "$TRAFFIC_JOB" --ignore-not-found >/dev/null 2>&1 || true
+}
+# Analysis judges the canary on real requests; with no users (kind), it would fail every
+# release for "too little traffic". So send some, the way users arrive: through the
+# Gateway, by hostname, at a fixed rate. A prod with real users runs CANARY_TRAFFIC=0.
+start_traffic() {
+  local host
+  host=$(kubectl -n "$ENV" get httproute shortly -o jsonpath='{.spec.hostnames[0]}')
+  kubectl -n "$ENV" create configmap "$TRAFFIC_JOB" --from-file=mixed.js="$ROOT/loadtest/k6/mixed.js" \
+    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl -n "$ENV" apply -f - >/dev/null <<YAML
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: $TRAFFIC_JOB
+  labels: { app.kubernetes.io/name: canary-traffic }
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: canary-traffic }
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 12345
+        runAsGroup: 12345
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: k6
+          image: ${K6_IMAGE:-grafana/k6:2.3.0}
+          args: [run, --quiet, --no-color, --no-thresholds, /scripts/mixed.js]
+          env:
+            - { name: BASE_URL, value: "${CANARY_TRAFFIC_URL:-http://shortly-gateway.envoy-gateway-system.svc}" }
+            - { name: HOST, value: "$host" }
+            - { name: RATE, value: "${CANARY_TRAFFIC_RATE:-20}" }
+            - { name: DURATION, value: "$CANARY_TIMEOUT" }
+            - { name: SEED_LINKS, value: "20" }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+      volumes:
+        - name: scripts
+          configMap: { name: $TRAFFIC_JOB }
+YAML
+  echo "     synthetic traffic: ${CANARY_TRAFFIC_RATE:-20} req/s through the Gateway as $host"
+}
+trap stop_traffic EXIT
+
+# Only for a real canary: a first install (no stable version yet) or a rollback inside
+# rollbackWindow skips the steps, so there is nothing to judge.
+stable=$(ro '{.status.stableRS}')
+if [[ -n "$stable" && "$(ro '{.status.currentPodHash}')" != "$stable" && "${CANARY_TRAFFIC:-1}" != 0 ]]; then
+  start_traffic
+fi
+
+# Follow the Rollout until it settles on the new version, or gives up on it.
+deadline=$((SECONDS + $(seconds "$CANARY_TIMEOUT")))
+last="" result=""
+while :; do
+  phase=$(ro '{.status.phase}') hash=$(ro '{.status.currentPodHash}') stable=$(ro '{.status.stableRS}')
+  if [[ "$phase" == Healthy && -n "$hash" && "$hash" == "$stable" ]]; then result=ok; break; fi
+  if [[ "$phase" == Degraded || "$(ro '{.status.abort}')" == true ]]; then result=aborted; break; fi
+  # Without its traffic the canary can only fail on "too little traffic": say why, now.
+  if [[ -n "$(kubectl -n "$ENV" get job "$TRAFFIC_JOB" -o jsonpath='{.status.failed}' 2>/dev/null)" ]]; then
+    echo "     the synthetic traffic Job failed; its log:" >&2
+    kubectl -n "$ENV" logs "job/$TRAFFIC_JOB" --tail=20 2>&1 | sed 's/^/       /' >&2 || true
+    kubectl -n "$ENV" patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}' >/dev/null
+    result="aborted (no synthetic traffic)"; break
+  fi
+  if ((SECONDS > deadline)); then
+    echo "     out of time after $CANARY_TIMEOUT: aborting the canary" >&2
+    kubectl -n "$ENV" patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}' >/dev/null
+    result=timeout; break
+  fi
+  line="step $(ro '{.status.currentStepIndex}')/$(ro '{.spec.strategy.canary.steps}' | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))'), canary weight $(ro '{.status.canary.weights.canary.weight}')%, $phase $(ro '{.status.message}')"
+  [[ "$line" != "$last" ]] && echo "     $line" && last=$line
+  sleep 5
+done
+stop_traffic
+
+if [[ "$result" == ok ]]; then
+  # A new Rollout starts at 1 replica until the HPA raises it to its floor (the chart leaves
+  # `replicas` to the HPA). Don't call it done, or remove the old Deployment, before then.
+  min=$(kubectl -n "$ENV" get hpa shortly -o jsonpath='{.spec.minReplicas}' 2>/dev/null || true)
+  for _ in $(seq 1 60); do
+    r=$(ro '{.status.readyReplicas}')
+    ((${r:-0} >= ${min:-1})) && break
+    sleep 2
+  done
+  if ((migrating)); then
+    kubectl -n "$ENV" delete deploy shortly --wait=false >/dev/null
+    echo "     migrated: the Rollout is Healthy; the old Deployment is deleted"
+  fi
+  echo "     Healthy: all traffic on the new version ($hash)"
+  helm -n "$ENV" history shortly --max 5
+  exit 0
+fi
+
+# Aborted: the stable pods have kept (or got back) all traffic already. Roll helm back too,
+# so the release history and the Rollout's spec say what is actually running.
+echo "FAILED: canary $result: $(ro '{.status.message}')" >&2
+run=$(kubectl -n "$ENV" get analysisrun -l rollouts-pod-template-hash="$hash" \
+  --sort-by=.metadata.creationTimestamp -o name 2>/dev/null | tail -n 1)
+if [[ -n "$run" ]]; then
+  kubectl -n "$ENV" get "$run" -o jsonpath='{range .status.metricResults[*]}{"     "}{.name}{": "}{.phase}{" (last value "}{.measurements[-1:].value}{")"}{"\n"}{end}' >&2 || true
+fi
+helm -n "$ENV" rollback shortly --force-conflicts --wait=legacy --timeout "$TIMEOUT" >&2
+# A rollback inside rollbackWindow skips the steps: back on stable within seconds.
+for _ in $(seq 1 60); do
+  [[ "$(ro '{.status.phase}')" == Healthy ]] && break
+  sleep 2
+done
+echo "     rolled back to helm revision $(helm -n "$ENV" history shortly --max 1 -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["revision"])'), Rollout $(ro '{.status.phase}')" >&2
+exit 1

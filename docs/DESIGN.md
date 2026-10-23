@@ -1,7 +1,7 @@
 # shortly — Design Document
 
-> Last updated 2026-10-22 for v0.6.0 plus the Gateway API front door on main / chart 0.8.0.
-> Expanded request data-flow and CI/CD "why each piece" sections. Mirrored at
+> Last updated 2026-10-22 for v0.6.0 plus the Gateway API front door, fault injection and prod
+> canary releases on main / chart 0.9.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -25,7 +25,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.6.0 plus main (chart 0.8.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, overload protection (a concurrency limit and database timeouts), Postgres backups with a restore drill, and the Gateway API front door (not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.6.0 plus main (chart 0.9.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, overload protection (a concurrency limit and database timeouts), Postgres backups with a restore drill, the Gateway API front door, and canary releases for prod with Argo Rollouts (the last three not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -606,8 +606,9 @@ This is the expensive rehearsal. `scripts/k8s-e2e.sh` runs the same steps CI and
 | 1–2. Staging deploy + create → 307 | Restricted Pod Security, migrate hook, app works | PSS would reject the pod in a hardened cluster; migrations must run once per release, not race as initContainers |
 | 3. Promote same image to prod | Staging bits == prod bits; HPA + PDB present | Rebuilds for prod silently change what you tested |
 | 3b. Rate limit across replicas | One client through the Service gets one burst, not N | Per-pod counters would look fine in a single-pod test and fail in prod |
-| 4. Broken release auto-rollback | 0 failed requests during a bad rollout | `maxUnavailable: 0` + Helm `--rollback-on-failure` must be rehearsed, not assumed |
-| 5. Manual `helm rollback` | Operators can undo a bad-but-ready release | Auto-rollback only covers "never became ready" |
+| 4. Broken release auto-rollback | 0 failed requests, through the Service and the Gateway, while a never-ready canary is aborted and rolled back | The canary's weight must not move to pods that aren't ready, and the abort path must be rehearsed, not assumed |
+| 5. Healthy canary, then manual `helm rollback` | A good release goes 10% → 50% → 100% with two Successful analyses; `helm rollback` returns in seconds without steps (`rollbackWindow`) | A canary that can't pass is as useless as one that can't fail; a rollback must not take 7 minutes |
+| 5b. Faulty canary | A release that is Ready but fails half its requests (`config.faultErrorRatio=0.5`) is aborted at 10% by `error-ratio`; users through the Gateway see failures only on the canary's share | Probes can't catch this release; only the analysis can, and only if it is tested against one |
 | 6. HPA drill | Under load, ready replicas increase | Proved that sync `/healthz` under overload caused restart storms; keeps that from regressing |
 | 7. Monitoring check | Scrape → rules → dashboard → Alertmanager route (the alert drill runs in the background during steps 3b–6) | Metrics without a firing path are decoration |
 | 8. Admission check | API server refuses unattested shortly images | `deploy.sh` alone can be bypassed with raw `kubectl` |
@@ -620,7 +621,8 @@ Chart lint + kubeconform run *before* kind starts, so a template typo fails in s
 **Keeping the kind job fast.** It is the slowest of the three jobs. Its time goes into waiting, not work, so the waits are kept short and overlap where they can:
 
 - The HPA drill stops the load as soon as the HPA adds a ready pod. Its 100 s duration is a ceiling.
-- The broken release's Helm timeout is 30 s. Its pods crash within seconds, so a longer wait proves nothing more.
+- The broken release's canary timeout is 45 s. Its pod crashes within seconds, so a longer wait proves nothing more.
+- The canary drills use short analyses (30 s delay, 2 measurements 15 s apart) instead of the default 60 s and 4 × 30 s; the logic is the same.
 - The staging alert drill runs alongside the prod drills.
 - `cluster.sh up` installs metrics-server, kube-prometheus-stack and Kyverno side by side.
 - A PR that changes only Markdown skips the cluster. The job still reports success, because it is a required check. A workflow-level paths filter would leave that check pending forever and block the merge. `docs/RUNBOOK.md` doesn't count as Markdown-only here, because the e2e reads the release digest from it. Pushes to main always run everything.
@@ -687,20 +689,72 @@ One Helm chart (`deploy/helm/shortly`, Helm 4) deploys the same image digest to 
 flowchart LR
   U[client] -->|Host: sho.rt.localhost| E[Envoy proxy<br/>envoy-gateway-system/shortly-gateway]
   U -->|Host: staging.sho.rt.localhost| E
-  E -->|HTTPRoute prod| P[prod: Service shortly]
+  E -->|HTTPRoute prod, weighted| P[prod: Services shortly-stable / shortly-canary]
   E -->|HTTPRoute staging| S[staging: Service shortly]
 ```
 
 | Choice | Why |
 | --- | --- |
-| Gateway API, not Ingress | The Kubernetes successor to Ingress: typed routes, weights and header matching in the spec instead of controller-specific annotations. Weighted backends are what prod's canary uses next |
+| Gateway API, not Ingress | The Kubernetes successor to Ingress: typed routes, weights and header matching in the spec instead of controller-specific annotations. Weighted backends are what prod's canary uses |
 | Envoy Gateway | A maintained, conformant Gateway API implementation, from the Envoy project. It ships the Gateway API CRDs itself (v1.6.1), so the two can't drift. ingress-nginx, the usual default, was retired in March 2026 and gets no security fixes |
 | One Gateway, routes per namespace | The platform owns the Gateway (namespace `gateway`); each environment owns its route. Only `staging` and `prod` may attach routes, so nothing else can capture a hostname |
 | `*.localhost` hostnames | They resolve to 127.0.0.1 everywhere, so a port-forward to the proxy gives real URLs in a browser (`http://sho.rt.localhost:8080/<code>`) |
 
 The `shortly` Service still exists and still serves in-cluster callers (probes, the e2e's direct checks, Prometheus scrapes). The Gateway is the user path. e2e step 3a proves that each hostname reaches its own environment, that a prod link doesn't resolve through staging's hostname, and that unknown hostnames get 404.
 
-**Argo Rollouts** is installed alongside (chart 2.43.6, Argo Rollouts v1.10.0) with its Gateway API traffic-router plugin (v0.17.0). The controller downloads the plugin when it starts and refuses it unless the checksum matches. The project publishes no checksums, so the pinned values were computed from the release binaries. That protects against a later swap, not against a bad original. It is unused until prod becomes a Rollout (canary releases, next).
+**Argo Rollouts** is installed alongside (chart 2.43.6, Argo Rollouts v1.10.0) with its Gateway API traffic-router plugin (v0.17.0). The controller downloads the plugin when it starts and refuses it unless the checksum matches. The project publishes no checksums, so the pinned values were computed from the release binaries. That protects against a later swap, not against a bad original.
+
+### Canary releases (prod)
+
+Kubernetes, and Helm's `--rollback-on-failure`, can only undo a release whose pods never become ready. The release that hurts users is the other kind: it starts, passes its probes, and then fails requests or answers slowly. A canary gives such a release a small share of real traffic first, measures it, and only then gives it the rest.
+
+With `canary.enabled` (prod only), the chart renders an Argo `Rollout` instead of the Deployment, from the same pod template (`templates/_podtemplate.tpl`), so the two can't drift. A new version then moves through these steps:
+
+```mermaid
+flowchart LR
+  A[helm upgrade:<br/>new pod template] --> W10[setWeight 10<br/>1 canary pod]
+  W10 --> X1{analysis}
+  X1 -->|pass| W50[setWeight 50]
+  W50 --> X2{analysis}
+  X2 -->|pass| P[100%: canary becomes stable<br/>old pods scaled down after 30 s]
+  X1 -->|fail| AB[abort: weight back to 0,<br/>canary scaled down]
+  X2 -->|fail| AB
+  AB --> RB[deploy.sh: helm rollback,<br/>exit 1]
+```
+
+**How traffic is split.** The HTTPRoute has two backends, the Services `shortly-stable` and `shortly-canary`. Argo Rollouts adds each version's `rollouts-pod-template-hash` to the matching Service's selector and sets the two weights on the route through the Gateway API plugin. The split is exact per request (10% of requests, not "1 of N pods"), because Envoy applies the weights; the number of canary pods only has to carry its share. The stable pods are never scaled down during the steps, so an abort is instant: the weight goes back to 0 and the stable pods already carry everything. The `shortly` Service still selects every pod, both versions, for in-cluster callers and for Prometheus.
+
+**What is measured** (`templates/analysistemplate.yaml`). Prometheus scrapes each pod with its pod-template hash as a label (the ServiceMonitor's `podTargetLabels`), so the canary's own series can be queried without a new metric in the app. Each step runs three metrics over a 1-minute rate window, on the canary's pods only, ignoring probe routes:
+
+| Metric | Passes when | Fails the step | Why |
+| --- | --- | --- | --- |
+| `traffic` | at least 0.5 req/s | on the first bad measurement | A canary nobody used proves nothing; "no data" must not pass |
+| `error-ratio` | 5xx share ≤ 1% | on the first bad measurement | What the availability SLOs count, load-shedding 503s included |
+| `redirect-p99` | p99 of `GET /{code}` ≤ 250 ms | on the second bad measurement | Coarse on purpose: a p99 from a few hundred requests is noisy. It catches a regression of several times, not a few ms |
+
+The thresholds are absolute ("good enough"), not relative ("no worse than stable"). They are easy to reason about, and the stable version meets them by a wide margin (see Capacity). Defaults: 60 s initial delay (two scrapes of the new pod), then 4 measurements 30 s apart, so a step takes about 3 minutes and a whole release about 7. Analysis runs only where the ServiceMonitor does (`monitoring.enabled` and the Prometheus Operator CRDs); without metrics each step is a plain 60 s pause.
+
+**Traffic to judge.** Analysis needs requests, and the kind cluster has no users. `deploy.sh` therefore sends synthetic traffic while a canary runs: a k6 Job in the namespace, 20 req/s of the usual mix (90% redirects, 10% creates), through the Gateway with prod's hostname, so it takes the same weighted path as a user. A prod with real users turns it off (`CANARY_TRAFFIC=0`); then the `traffic` metric is the guard against a quiet hour.
+
+**`deploy.sh` follows the Rollout**, so its exit code still answers "did the release work?":
+
+1. `helm upgrade --wait=legacy`. Helm 4's default watcher doesn't understand a Rollout's status; the legacy one still waits for the migration hook and the Services.
+2. If the new version is a canary, start the synthetic traffic, then poll the Rollout every 5 s, printing the step and the canary's weight.
+3. **Healthy** on the new pod hash: done, exit 0.
+4. **Aborted** (an analysis failed, or a canary pod wasn't ready within `progressDeadlineSeconds`, 180 s, with `progressDeadlineAbort`), or out of time (`CANARY_TIMEOUT`, 15 min; `deploy.sh` then aborts it itself): print the failed metrics, `helm rollback` so that Helm's history and the Rollout's spec say what actually runs, exit 1.
+
+**Rollbacks skip the steps.** `rollbackWindow: 3` lets the Rollout go back to any of its last three revisions at once, without steps or analysis: those pods already served all traffic, and an incident is the moment not to wait 7 minutes. A first install also goes straight to 100%: there is no stable version to compare against or fall back to.
+
+**Moving from the Deployment.** On the first canary-enabled upgrade, Helm would delete the Deployment as soon as the Rollout exists, before the Rollout's pods are ready. `deploy.sh` annotates the Deployment `helm.sh/resource-policy: keep` first, so it keeps serving, and deletes it once the Rollout is Healthy. Both sets of pods carry the selector labels, so the `shortly` Service, the PDB and the HPA (now pointed at the Rollout) cover the overlap.
+
+**What the canary doesn't catch:** a problem that only shows at full load, with a long delay (a slow leak), or in a route the synthetic mix doesn't use (it sends creates and redirects only). A migration is not canaried at all: it runs once, before any canary pod, so it must stay backward compatible (expand/contract) whatever the canary decides.
+
+| Choice | Why |
+| --- | --- |
+| Argo Rollouts | The common Kubernetes-native choice, with analysis built in. Flagger is the main alternative: similar, but drives a Deployment it copies, which makes "what is running" harder to read |
+| Rollout replaces the Deployment (inline template) | `workloadRef` (a Rollout pointing at a Deployment scaled to 0) keeps the Deployment as a template only. It leaves an object that looks like the workload and isn't, so the template is shared through a chart helper instead |
+| Synthetic traffic from `deploy.sh` | Without users, analysis can only fail or pass on nothing. A mesh's mirrored traffic or a separate synthetic monitor would do the same job in a real cluster |
+| Absolute thresholds, three metrics | A baseline comparison (stable vs canary, Kayenta-style) adapts to load but needs both sides to have enough traffic; at 20 req/s the canary sees 2 per second |
 
 **Build once, deploy many.** `scripts/deploy.sh <env> <image-ref>` takes a digest reference (`repo@sha256:…`) for released images; the bits tested in staging are the bits promoted to prod. A tag reference is accepted only on a `kind-*` context, for local images, which are loaded into kind first. The chart refuses to render with neither digest nor tag.
 
@@ -717,7 +771,7 @@ The attestation bundle is read from the registry (`--bundle-from-oci`), so the c
 
 | Policy | Kind | Rule | In kind |
 | --- | --- | --- | --- |
-| `shortly-require-release-provenance` | ImageValidatingPolicy | Any `ghcr.io/statsguy/shortly*` image in `staging` or `prod` must be a digest with SLSA provenance signed by `release.yml` at a `vX.Y.Z` tag, logged in Rekor, from a GitHub Actions workflow build. Pods, and the Pod templates of Deployments, StatefulSets, Jobs, CronJobs, ReplicaSets and DaemonSets | Deny |
+| `shortly-require-release-provenance` | ImageValidatingPolicy | Any `ghcr.io/statsguy/shortly*` image in `staging` or `prod` must be a digest with SLSA provenance signed by `release.yml` at a `vX.Y.Z` tag, logged in Rekor, from a GitHub Actions workflow build. Pods, and the Pod templates of Deployments, StatefulSets, Jobs, CronJobs, ReplicaSets and DaemonSets. A Rollout's template isn't checked itself (Kyverno doesn't know the kind), but the ReplicaSets and Pods it creates are | Deny |
 | `shortly-allowed-images` | ValidatingPolicy | Pods in `staging` or `prod` may only run the shortly release (by digest), `postgres:17-alpine` or `grafana/k6` | Audit (PolicyReports) |
 
 The two policies need each other. The provenance policy only looks at shortly's repository, so on its own it can be dodged by running some other image. The allowlist closes that, but it is Audit-only in kind, because local builds (`shortly:dev`, `shortly:e2e`) are how the cluster is developed and tested. In a real cluster it would be Deny.
@@ -726,7 +780,7 @@ The rules are the same as `verify-image.sh`, and a test asserts the two agree on
 
 It is tested at two levels. `tests/test_admission_policies.py` runs the same Kyverno engine (the CLI image, pinned by digest) against the real registry: the documented release passes, and a tag, an unattested digest and an unattested init container fail. Two mutated copies of the policy, one expecting `ci.yml` as signer and one a different build type, must refuse the real release, which proves the checks aren't passing everything. `scripts/admission-check.sh` (e2e step 8) then sends server-side dry runs through the live API server. It also proves that a digest that doesn't exist and a Deployment template are refused, and that the allowlist reports the local build.
 
-**Rollout.** `helm upgrade --install --rollback-on-failure --wait --timeout 3m`. `RollingUpdate` with `maxUnavailable: 0, maxSurge: 1` never drops below desired capacity: a new pod that never becomes ready stalls the rollout while old pods keep serving, Helm times out and rolls back. The drill measures this: 0 failed requests through the Service during a broken rollout.
+**Rollout.** Staging: `helm upgrade --install --rollback-on-failure --wait --timeout 3m`. `RollingUpdate` with `maxUnavailable: 0, maxSurge: 1` never drops below desired capacity: a new pod that never becomes ready stalls the rollout while old pods keep serving, Helm times out and rolls back. Prod: a canary (above). A canary pod that never becomes ready gets no traffic (the weight moves only once its pods are available), and the release is aborted and rolled back. The drill measures the prod case: 0 failed requests, through the Service and through the Gateway, during a broken release.
 
 **Probes.** startupProbe on `/healthz` (2 s × 30) gates the others; liveness `/healthz` every 10 s, 3 failures; readiness `/readyz` every 5 s, 2 failures; both with a 2 s timeout.
 
@@ -756,7 +810,7 @@ The allowed paths are proven by the steps before it, including Prometheus scrapi
 
 **Resources.** The CPU request (500m) is the measured usage at the per-pod design load, and it is what the HPA's percentage is computed against (see Capacity). Memory limit set (a leak OOM-kills one pod, not the node); no CPU limit (avoids CFS throttling on an idle node). Replicas spread across nodes with a topology spread constraint.
 
-**Autoscaling.** When `autoscaling.enabled` (the default; off in staging), the chart renders a `HorizontalPodAutoscaler` and leaves `replicas` out of the Deployment, because a value there would reset the live count on every `helm upgrade`. Rendering fails if CPU requests are missing (the HPA would never scale) or if `maxReplicas × dbPoolSize` exceeds `autoscaling.maxDbConnections`. The PodDisruptionBudget is rendered when the minimum replica count (HPA floor or fixed count) is above 1. `scripts/cluster.sh` installs metrics-server (pinned version, checksum-verified manifest) so the HPA has CPU data in kind.
+**Autoscaling.** When `autoscaling.enabled` (the default; off in staging), the chart renders a `HorizontalPodAutoscaler` (scaling the Rollout in prod, which has the same scale subresource) and leaves `replicas` out of the Deployment or Rollout, because a value there would reset the live count on every `helm upgrade`. Rendering fails if CPU requests are missing (the HPA would never scale) or if `maxReplicas × dbPoolSize` exceeds `autoscaling.maxDbConnections`. The PodDisruptionBudget is rendered when the minimum replica count (HPA floor or fixed count) is above 1. `scripts/cluster.sh` installs metrics-server (pinned version, checksum-verified manifest) so the HPA has CPU data in kind.
 
 **Labels.** `app.kubernetes.io/version` is the tag, or the first 12 hex characters of the digest. Chart 0.1.0 put `sha256:…` in the label, which the API server rejected (`:` is illegal); kubeconform missed it because JSON schemas don't encode label syntax. The e2e now server-side dry-runs the digest-mode render.
 
@@ -767,7 +821,11 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | Failure | System behaviour | How you see it |
 | --- | --- | --- |
 | Postgres unreachable | `/readyz` 503 → pods leave Service endpoints; `/healthz` stays 200, no restarts; recovers automatically via `pool_pre_ping` | `http_requests_total{route="/readyz",status="503"}`, ready replicas < desired, `database ping failed` warnings |
-| Bad release (crashes, fails readiness) | Rollout stalls; old pods keep serving (`maxUnavailable: 0`); Helm rolls back after 3 min | `deploy.sh` exits non-zero; `helm history` shows a rollback revision |
+| Bad release (crashes, fails readiness) | Staging: the rollout stalls, old pods keep serving (`maxUnavailable: 0`), Helm rolls back after 3 min. Prod: the canary pod never gets traffic; aborted after `progressDeadlineSeconds` (180 s), then rolled back | `deploy.sh` exits non-zero; `helm history` shows a rollback revision |
+| Bad release that is Ready (errors, slow) | Prod: analysis fails at the 10% step, the canary is aborted and rolled back; users saw at most about 10% of requests on it for about a minute. Staging has no canary: catch it there with the checks after a deploy | `deploy.sh` prints the failed metric (`error-ratio`, `redirect-p99`) and exits 1; `kubectl -n prod get analysisrun` |
+| Too little traffic during a canary | Analysis fails on `traffic` and the release is aborted, even if it is fine | `deploy.sh`: `traffic: Failed`; check the `canary-traffic` Job, or real traffic if `CANARY_TRAFFIC=0` |
+| Prometheus down during a canary | Every analysis query errors; after 4 errors in a row the analysis errors and the release is aborted. Running versions are unaffected | `deploy.sh`: metrics in `Error`; `kubectl -n monitoring get pods` |
+| Argo Rollouts controller down | Running pods keep serving and the HPA still scales the Rollout. Nothing new rolls out: `deploy.sh` waits until `CANARY_TIMEOUT` and fails | `kubectl -n argo-rollouts get pods`; Rollout `observedGeneration` behind |
 | Migration fails | Pre-upgrade Job fails; release aborted before any pod changes | Failed `shortly-migrate-<rev>` Job kept for `kubectl logs` |
 | Pod crash / OOM | Restarted by kubelet; prod keeps 1 of 2 serving | Restart count, `OOMKilled` reason |
 | Node drain / cluster upgrade | PDB keeps at least 1 prod pod; graceful drain on SIGTERM | Eviction events |
@@ -926,7 +984,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Provenance check | In `deploy.sh` and at admission, both failing closed | Only one of the two | `deploy.sh` gives a clear error before anything changes; admission covers every other path into the cluster |
 | Admission engine | Kyverno `ImageValidatingPolicy` (CEL) | Sigstore policy-controller; Kyverno `ClusterPolicy` `verifyImages` | Kyverno also runs the image allowlist, and its CLI tests the same engine offline. `ClusterPolicy` is deprecated as of Kyverno 1.19 |
 | Deploy target (now) | Local kind, staging + prod namespaces | Cloud cluster; PaaS | Free, realistic, chart portable to EKS/GKE |
-| Rollback | Helm `--rollback-on-failure` + rehearsed `helm rollback` | Manual only | Tested on every PR |
+| Rollback | Helm `--rollback-on-failure` + rehearsed `helm rollback`; in prod, canary abort then `helm rollback` | Manual only | Tested on every PR |
+| Progressive delivery | Argo Rollouts canary in prod, 10% → 50% → 100%, Prometheus analysis on the canary's pods | Blue-green; Flagger; rolling update only | A canary limits the damage of a Ready-but-broken release to its share of traffic; blue-green switches everyone at once, so it only helps after the fact. See Canary releases |
 | Alerting | Multi-window burn-rate alerts on SLOs, plus a few cause-based alerts | Threshold alerts on error rate or latency | Pages scale with user impact: a 1-minute blip doesn't page, a slow leak still opens a ticket |
 | SLO rules | A small generator from `slos.yaml`, output committed | Hand-written rules; Sloth or Pyrra | 4 SLOs × 8 windows is too repetitive to write by hand. The generator is about 170 lines that are easy to review, and needs no extra binary or CRD |
 | Who ships the rules | The app chart, from its prod release only | Every release, scoped with the operator's `enforcedNamespaceLabel`; a separate monitoring repo | Rules change with the code they describe and are reviewed in the same PR. One cluster-wide copy avoids duplicate series without the operator's multi-tenancy machinery |
@@ -974,13 +1033,15 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - The SLIs are measured in the app. Requests that never reach it (ingress or network failures) are invisible except through `ShortlyDown` and `ShortlyNotReady`; a load-balancer SLI would be more complete. Now that a Gateway sits in front, Envoy's own request metrics could supply that SLI; they aren't scraped yet.
 - At very low traffic one error is a large ratio, so burn-rate alerts can be noisy; a minimum-request-rate guard is not implemented.
 - Local kind only; no production cluster.
+- Canary analysis judges on synthetic traffic in kind (20 req/s, two routes). Thresholds are absolute and coarse; a slow leak or a rare route can pass. A canary also can't protect against a migration: it runs before the first canary pod.
+- Argo's Gateway API plugin is alpha (v0.17). Two writers share objects: Helm applies the stable/canary Services and the HTTPRoute, and Argo Rollouts edits their selectors and weights. Helm 4's server-side apply reports that as a conflict, so prod upgrades and rollbacks use `--force-conflicts` (found by the first CI run of this change: the upgrade failed, and so did its automatic rollback). Forcing resets the weights to 100/0, which is safe because an upgrade happens only when no canary runs (`deploy.sh` waits for each one to finish).
 - Backups are hourly dumps: up to an hour of writes can be lost (no point-in-time recovery), and a restore of a large database is slow (every index is rebuilt).
 - The bucket runs in the same cluster, on the same node, as the database. It shows the separation of credentials and network, not of failure domains: a real setup puts backups in another account or region, with versioning and object lock so a compromised cluster can't delete them.
 - Dumps are not encrypted, and the bucket has one identity for every environment.
 
 **Next steps, in rough priority order**
 
-1. Canary releases gated on the SLO metrics (Argo Rollouts).
+1. Canary analysis against the stable version as a baseline, and on Envoy's request metrics (what users see at the Gateway) as well as the app's.
 2. URL reputation check on targets (Google Safe Browsing or similar).
 3. Real cloud environment: Terraform + EKS/GKE, managed Postgres with point-in-time recovery and cross-region backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
 

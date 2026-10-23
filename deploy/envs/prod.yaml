@@ -19,3 +19,5 @@ podDisruptionBudget:
 monitoring:
   enabled: true
   clusterWide: true # this release ships the alert rules and dashboard for the cluster
+canary:
+  enabled: true # Argo Rollouts: 10% → 50% → 100%, judged by Prometheus (values.yaml)

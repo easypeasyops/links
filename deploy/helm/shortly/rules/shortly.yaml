@@ -19,14 +19,16 @@ groups:
 
       # Needs kube-state-metrics. One environment with zero available pods is down, even
       # though another one is still being scraped (ShortlyDown only catches "nothing anywhere").
+      # Counted over the ReplicaSets ("shortly-<pod hash>"), which a Deployment (staging) and
+      # an Argo Rollout (prod) both create: kube-state-metrics knows nothing about Rollouts.
       - alert: ShortlyNoAvailablePods
-        expr: kube_deployment_status_replicas_available{deployment="shortly"} == 0
+        expr: sum by (namespace) (kube_replicaset_status_ready_replicas{replicaset=~"shortly-[a-z0-9]+"}) == 0
         for: 1m
         labels:
           severity: page
         annotations:
           summary: shortly has no available pods
-          description: The Deployment has zero available replicas in this namespace, so every request to it fails.
+          description: The Deployment or Rollout has zero ready replicas in this namespace, so every request to it fails.
           runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#shortlynoavailablepods
 
       # Pods that fail readiness are removed from the Service. Users then get errors at the

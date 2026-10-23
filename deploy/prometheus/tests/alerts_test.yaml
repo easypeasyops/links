@@ -184,12 +184,17 @@ tests:
           - exp_labels: {job: shortly, severity: page}
             exp_annotations: *down
 
-  - name: a namespace with no available pods pages, the others stay quiet
+  - name: a namespace with no ready pods pages, the others stay quiet
     interval: 1m
     input_series:
-      - series: 'kube_deployment_status_replicas_available{namespace="staging",deployment="shortly"}'
+      # staging: a Deployment's one ReplicaSet goes to 0.
+      - series: 'kube_replicaset_status_ready_replicas{namespace="staging",replicaset="shortly-6d4f9c8b7"}'
         values: '1 1 0x10'
-      - series: 'kube_deployment_status_replicas_available{namespace="prod",deployment="shortly"}'
+      # prod: a Rollout keeps old ReplicaSets at 0 next to the live one. Their zeros must
+      # not page while another ReplicaSet has ready pods.
+      - series: 'kube_replicaset_status_ready_replicas{namespace="prod",replicaset="shortly-5b7c6d9f8"}'
+        values: '0x12'
+      - series: 'kube_replicaset_status_ready_replicas{namespace="prod",replicaset="shortly-7f8d9c6b5"}'
         values: '2x12'
     alert_rule_test:
       - eval_time: 2m # zero for 0 minutes: not yet
@@ -198,10 +203,10 @@ tests:
       - eval_time: 5m
         alertname: ShortlyNoAvailablePods
         exp_alerts:
-          - exp_labels: {namespace: staging, deployment: shortly, severity: page}
+          - exp_labels: {namespace: staging, severity: page}
             exp_annotations:
               summary: shortly has no available pods
-              description: The Deployment has zero available replicas in this namespace, so every request to it fails.
+              description: The Deployment or Rollout has zero ready replicas in this namespace, so every request to it fails.
               runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#shortlynoavailablepods
 
   - name: failing readiness pages

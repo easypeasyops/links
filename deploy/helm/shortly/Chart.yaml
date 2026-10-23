@@ -3,6 +3,6 @@ name: shortly
 description: URL shortener — FastAPI + Postgres
 type: application
 # Chart version: bump when the chart itself changes.
-version: 0.8.0
+version: 0.9.0
 # Default app version; deploys override the image by digest, so this is informational.
 appVersion: "0.6.0"

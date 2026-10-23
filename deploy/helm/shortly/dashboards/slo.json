@@ -376,7 +376,7 @@
             "type": "prometheus",
             "uid": "${datasource}"
           },
-          "expr": "kube_deployment_status_replicas_available{namespace=\"$namespace\", deployment=\"shortly\"}",
+          "expr": "sum(kube_replicaset_status_ready_replicas{namespace=\"$namespace\", replicaset=~\"shortly-[a-z0-9]+\"})",
           "legendFormat": "available"
         },
         {
