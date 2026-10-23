@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-22 for v0.6.0 plus the Gateway API front door, fault injection and prod canary releases on main / chart 0.9.0. Mirrored at
+> Last updated 2026-10-22 for v0.7.0 / chart 0.9.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -12,7 +12,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | --- | --- |
 | Repo | [github.com/statsguy/shortly](https://github.com/statsguy/shortly) |
 | Image | `ghcr.io/statsguy/shortly` — deploy by digest, never by tag |
-| Current release | v0.6.0, `sha256:737d173f98fdbfc4c39c5248a7f46d25d9b6d9ef3678c6dee9689f97207335df` (previous: v0.5.0, `sha256:4b855e2fb8875ee3622d5f5a5054d1d8105e715eacc6a9c6a1be0a023556bad6`) |
+| Current release | v0.7.0, `sha256:9df4c29bd25d9f69b0ce2f7776a0affeab4d2bca18c859668927e398f4a21670` (previous: v0.6.0, `sha256:737d173f98fdbfc4c39c5248a7f46d25d9b6d9ef3678c6dee9689f97207335df`) |
 | Environments | kind cluster `shortly`; namespaces `staging` (Deployment, 1 replica), `prod` (Argo Rollout, canary releases, HPA 2–4 replicas) |
 | Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
@@ -32,7 +32,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 
 ```bash
 # Most-used commands
-D=sha256:18754ab5bcb04cff0a5f65ae13e0e9fdbf05793c151ba2923a8f7532e9405f04
+D=sha256:9df4c29bd25d9f69b0ce2f7776a0affeab4d2bca18c859668927e398f4a21670
 scripts/deploy.sh staging ghcr.io/statsguy/shortly@$D     # deploy (auto-rollback on failure)
 scripts/deploy.sh prod    ghcr.io/statsguy/shortly@$D
 helm -n prod history shortly                               # revisions you can roll back to
