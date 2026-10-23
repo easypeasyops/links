@@ -629,7 +629,7 @@ Chart lint + kubeconform run *before* kind starts, so a template typo fails in s
 
 Together these cut the job from 9m24s to **5m07s** (PR #27): cluster setup 117 s → 62 s, the e2e 364 s → 166 s. The alert drill took 101 s and finished entirely behind the prod drills, and the HPA drill stopped at +58 s instead of running its full 100 s. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
 
-The canary drills (PR #40) brought it back to **8m19s**: the healthy canary takes 106 s and the faulty one 74 s, even with short analyses. They are the price of testing the one release type nothing else catches. If the job's time matters more later, the healthy-canary drill is the one to move to a nightly run: the faulty one is the guard.
+The canary drills (PR #40) brought it back to **8–10 minutes** (8m19s and 9m59s in the first green runs; the second also had the HPA drill doing a real scale-up again): the healthy canary takes 106–134 s and the faulty one 74–86 s, even with short analyses. They are the price of testing the one release type nothing else catches. If the job's time matters more later, the healthy-canary drill is the one to move to a nightly run: the faulty one is the guard.
 
 
 ### Release workflow — “Publish one immutable, attributable artifact”
@@ -749,7 +749,7 @@ The thresholds are absolute ("good enough"), not relative ("no worse than stable
 
 **Moving from the Deployment.** On the first canary-enabled upgrade, Helm would delete the Deployment as soon as the Rollout exists, before the Rollout's pods are ready. `deploy.sh` annotates the Deployment `helm.sh/resource-policy: keep` first, so it keeps serving, and deletes it once the Rollout is Healthy. Both sets of pods carry the selector labels, so the `shortly` Service, the PDB and the HPA (now pointed at the Rollout) cover the overlap.
 
-**Measured in CI** (e2e steps 4, 5, 5b, with the short analyses): a never-ready canary got no traffic at all, 0 failed requests through the Service and the Gateway; a healthy canary was promoted 10% → 50% → 100% in 106 s; a canary failing half its requests was aborted at 10% after 74 s, and meanwhile 6 of 539 redirects through the Gateway failed (1.1%, against about 5% if the canary had kept its share for the whole run). A `helm rollback` inside the window was Healthy within a second.
+**Measured in CI** (e2e steps 4, 5, 5b, with the short analyses): a never-ready canary got no traffic at all, 0 failed requests through the Service and the Gateway; a healthy canary was promoted 10% → 50% → 100% in 106–134 s; a canary failing half its requests was aborted at 10% after 74–86 s, and meanwhile 1.1–3.0% of redirects through the Gateway failed (6 of 539, 19 of 624), against the 5% a 10% canary failing half its requests would cause for as long as it ran. A `helm rollback` inside the window was Healthy within a second.
 
 **What the canary doesn't catch:** a problem that only shows at full load, with a long delay (a slow leak), or in a route the synthetic mix doesn't use (it sends creates and redirects only). A migration is not canaried at all: it runs once, before any canary pod, so it must stay backward compatible (expand/contract) whatever the canary decides.
 
