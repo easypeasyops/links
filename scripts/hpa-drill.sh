@@ -52,6 +52,14 @@ done
 [[ -n "$util" ]] || fail "HPA has no CPU metrics after 180 s (is metrics-server running?)"
 min=$(hpa '{.spec.minReplicas}')
 max=$(hpa '{.spec.maxReplicas}')
+# A Rollout counts pods it is about to remove (the old version, kept 30 s after a canary
+# is promoted or aborted). Wait for those to go, or "more ready pods" would prove nothing.
+settled() { local r; r=$(ready); ((${r:-0} <= min)); }
+for _ in $(seq 1 60); do
+  settled && break
+  sleep 2
+done
+settled || fail "prod has $(ready) ready replicas before the load, more than the HPA floor $min"
 pass "HPA reads CPU: ${util}% of request, replicas $(ready) (min $min, max $max)"
 
 # 2. Load from a pod in the namespace, through the Service, under the restricted PSS.

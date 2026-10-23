@@ -536,7 +536,7 @@ flowchart TB
   subgraph ci [CI · .github/workflows/ci.yml · every PR and main]
     check[Job: check<br/>lint · mypy · pytest ≥90%]
     image[Job: image<br/>build · Trivy · smoke.sh]
-    k8s[Job: k8s<br/>kind e2e · rollback · HPA · monitoring · admission · cleanup]
+    k8s[Job: k8s<br/>kind e2e · rollback · canary · HPA · monitoring · admission · cleanup]
   end
 
   subgraph release [Release · release.yml · only on tag vX.Y.Z]
@@ -628,6 +628,8 @@ Chart lint + kubeconform run *before* kind starts, so a template typo fails in s
 - A PR that changes only Markdown skips the cluster. The job still reports success, because it is a required check. A workflow-level paths filter would leave that check pending forever and block the merge. `docs/RUNBOOK.md` doesn't count as Markdown-only here, because the e2e reads the release digest from it. Pushes to main always run everything.
 
 Together these cut the job from 9m24s to **5m07s** (PR #27): cluster setup 117 s → 62 s, the e2e 364 s → 166 s. The alert drill took 101 s and finished entirely behind the prod drills, and the HPA drill stopped at +58 s instead of running its full 100 s. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
+
+The canary drills (PR #40) brought it back to **8m19s**: the healthy canary takes 106 s and the faulty one 74 s, even with short analyses. They are the price of testing the one release type nothing else catches. If the job's time matters more later, the healthy-canary drill is the one to move to a nightly run: the faulty one is the guard.
 
 
 ### Release workflow — “Publish one immutable, attributable artifact”
@@ -746,6 +748,8 @@ The thresholds are absolute ("good enough"), not relative ("no worse than stable
 **Rollbacks skip the steps.** `rollbackWindow: 3` lets the Rollout go back to any of its last three revisions at once, without steps or analysis: those pods already served all traffic, and an incident is the moment not to wait 7 minutes. A first install also goes straight to 100%: there is no stable version to compare against or fall back to.
 
 **Moving from the Deployment.** On the first canary-enabled upgrade, Helm would delete the Deployment as soon as the Rollout exists, before the Rollout's pods are ready. `deploy.sh` annotates the Deployment `helm.sh/resource-policy: keep` first, so it keeps serving, and deletes it once the Rollout is Healthy. Both sets of pods carry the selector labels, so the `shortly` Service, the PDB and the HPA (now pointed at the Rollout) cover the overlap.
+
+**Measured in CI** (e2e steps 4, 5, 5b, with the short analyses): a never-ready canary got no traffic at all, 0 failed requests through the Service and the Gateway; a healthy canary was promoted 10% → 50% → 100% in 106 s; a canary failing half its requests was aborted at 10% after 74 s, and meanwhile 6 of 539 redirects through the Gateway failed (1.1%, against about 5% if the canary had kept its share for the whole run). A `helm rollback` inside the window was Healthy within a second.
 
 **What the canary doesn't catch:** a problem that only shows at full load, with a long delay (a slow leak), or in a route the synthetic mix doesn't use (it sends creates and redirects only). A migration is not canaried at all: it runs once, before any canary pod, so it must stay backward compatible (expand/contract) whatever the canary decides.
 
