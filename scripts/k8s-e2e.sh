@@ -472,6 +472,10 @@ source = app["spec"]["source"]
 source["targetRevision"], source["repoURL"] = revision, repo
 source["helm"]["valuesObject"] = {  # applied after prod.yaml, like --set
     "image": {"repository": repository, "tag": tag, "digest": ""},
+    # The HPA drill (step 6) left prod at 4 pods, and the HPA keeps them for 5 minutes. A
+    # canary needs room for one more pod, which the CI node then lacks; a lower ceiling
+    # takes effect at once and doesn't touch the pod template.
+    "autoscaling": {"maxReplicas": 2},
     # CI-length canary analysis, as in step 5.
     "canary": {"analysis": {"initialDelay": "45s", "interval": "15s", "count": 2}},
 }

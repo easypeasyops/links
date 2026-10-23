@@ -514,7 +514,7 @@ kubectl -n argocd logs deploy/argocd-repo-server --tail=50
 | Synced, Degraded, Rollout aborted | The canary was refused | "Canary aborted" above, then revert the promotion |
 | Synced, Progressing for minutes | A canary in progress (about 7 minutes), or pods not becoming ready | `kubectl -n prod get rollout shortly`; "Deploy stuck or failed" |
 | OutOfSync, auto-sync not running | Someone turned auto-sync off (break glass) and didn't turn it back on | `kubectl apply -f deploy/argocd/applications.yaml` after checking git says what should run |
-| OutOfSync on the HTTPRoute only, during a canary | The `ignoreDifferences` on its weights was lost (an edited Application) | `kubectl apply -f deploy/argocd/applications.yaml` |
+| OutOfSync on the HTTPRoute or the `shortly-stable`/`shortly-canary` Services only | The Application lost its `ignoreDifferences` for what Argo Rollouts owns (an edited Application) | `kubectl apply -f deploy/argocd/applications.yaml` |
 
 ### Admission policy refuses pods
 
