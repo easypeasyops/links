@@ -24,6 +24,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history: tests/test_gitops.py checks prod's digest against everything
+          # staging has run on main.
+          fetch-depth: 0
 
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
@@ -87,7 +90,7 @@ jobs:
   k8s:
     name: deploy to kind, rollback drill
     runs-on: ubuntu-latest
-    timeout-minutes: 20 # usually about 5; a hung drill shouldn't hold a runner for long
+    timeout-minutes: 25 # usually about 14 (canary and GitOps drills); a hung drill shouldn't hold a runner
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -136,6 +139,9 @@ jobs:
           # The Kyverno admission policies (their verdicts are tested by pytest and step 8).
           docker run --rm -v "$PWD/deploy/policies:/p:ro" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
             -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" /p
+          # The Argo CD project and Applications (step 12 applies them for real).
+          docker run --rm -v "$PWD/deploy/argocd:/a:ro" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
+            -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" /a
 
       - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         if: steps.scope.outputs.e2e == 'true'
@@ -158,9 +164,14 @@ jobs:
       - name: Namespaces, Postgres, secrets
         if: steps.scope.outputs.e2e == 'true'
         run: scripts/cluster.sh up
+        env:
+          ARGOCD_APPS: "0" # Argo CD installed, not yet managing the app: e2e step 12 does that
 
       - name: Deploy, promote, rollback drill
         if: steps.scope.outputs.e2e == 'true'
         run: scripts/k8s-e2e.sh
         env:
           IMAGE: shortly:e2e
+          # Step 12 has Argo CD deploy prod from this exact commit (the PR's head, which
+          # GitHub serves; the merge commit CI checks out is not fetchable by Argo CD).
+          GITOPS_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}

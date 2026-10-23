@@ -1,4 +1,9 @@
 # Staging: same chart, same image digest prod will get; smaller and chattier.
+# The release this environment runs. Argo CD deploys whatever is here on main, so changing
+# this line in a merged PR IS the deploy (scripts/promote.sh writes it). CI verifies the
+# digest's release provenance.
+image:
+  digest: "sha256:9df4c29bd25d9f69b0ce2f7776a0affeab4d2bca18c859668927e398f4a21670" # v0.7.0
 replicaCount: 1
 autoscaling:
   enabled: false # one fixed, small pod: staging proves correctness, not capacity

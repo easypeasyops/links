@@ -1,0 +1,55 @@
+# Argo CD for the kind cluster (scripts/cluster.sh): GitOps for the app's two environments
+# (deploy/argocd/). One replica of everything, no SSO, no notifications: a laptop, not a
+# team. Reach the UI with a port-forward (RUNBOOK, Local cluster operations).
+global:
+  domain: localhost:8090
+
+configs:
+  params:
+    # The UI is reached through `kubectl port-forward` only, so no TLS between the browser
+    # and the server. Never on a cluster where the server is exposed.
+    server.insecure: true
+  cm:
+    # Check the repository for changes every 60 s instead of 180 s: a merged promotion PR
+    # reaches the cluster within a minute. (A webhook from GitHub would make it instant;
+    # it needs the server reachable from the internet, which a laptop isn't.)
+    timeout.reconciliation: 60s
+    # Admin login for the UI on a laptop; the generated password is in the Secret
+    # argocd-initial-admin-secret.
+    admin.enabled: true
+    statusbadge.enabled: false
+    exec.enabled: false
+
+dex:
+  enabled: false # no SSO
+notifications:
+  enabled: false
+applicationSet:
+  replicas: 0 # two Applications, written out: no generator needed (the chart has no off switch)
+
+controller:
+  replicas: 1
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 768Mi }
+server:
+  replicas: 1
+  resources:
+    requests: { cpu: 25m, memory: 64Mi }
+    limits: { memory: 256Mi }
+repoServer:
+  replicas: 1
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 512Mi }
+redis:
+  # The chart pulls Redis from ECR Public, which refuses anonymous pulls from shared runner
+  # addresses once their data limit is hit (CI failed with ImagePullBackOff, from both
+  # ecr-public.aws.com and public.ecr.aws). The same official image from Docker Hub, where
+  # postgres:17-alpine already comes from, pinned by the same digest.
+  image:
+    repository: docker.io/library/redis
+    tag: 8.6.4-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+    limits: { memory: 128Mi }

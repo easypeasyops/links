@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-22 for v0.7.0 / chart 0.9.0. Mirrored at
+> Last updated 2026-10-23 for v0.7.0 plus GitOps with Argo CD on main / chart 0.10.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -18,6 +18,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
 | Database | `postgres` StatefulSet per namespace; URL in Secret `shortly-db` key `url` |
 | Canary (prod) | New versions get 10%, then 50% of the Gateway's traffic, each step judged by Prometheus (traffic, 5xx ≤ 1%, redirect p99 ≤ 250 ms), then 100%: about 7 min. A failed step aborts and `deploy.sh` rolls back. Rollbacks to the last 3 revisions are immediate. See Deploy |
+| Deploys | GitOps: Argo CD (namespace `argocd`) syncs each environment from `deploy/envs/<env>.yaml` on `main` within 60 s. Promote with `scripts/promote.sh`; roll back by reverting the promotion PR. UI: `kubectl -n argocd port-forward svc/argocd-server 8090:80` |
 | Front door | Gateway `gateway/shortly` (Envoy Gateway); prod = `sho.rt.localhost`, staging = `staging.sho.rt.localhost`. Locally: `kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80`, then `http://sho.rt.localhost:8080/<code>` |
 | Endpoints | `/healthz` liveness · `/readyz` readiness on port 8000 · `/metrics` on port **9100** (Prometheus only, by NetworkPolicy) |
 | Backups | CronJob `postgres-backup` per namespace, hourly at :41 UTC → S3 bucket `shortly-backups/<ns>/` (SeaweedFS, namespace `backups`), 7 days. RPO up to 1 h; restore: `scripts/restore-drill.sh` and "Restore Postgres from a backup" |
@@ -33,10 +34,10 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 ```bash
 # Most-used commands
 D=sha256:9df4c29bd25d9f69b0ce2f7776a0affeab4d2bca18c859668927e398f4a21670
-scripts/deploy.sh staging ghcr.io/statsguy/shortly@$D     # deploy (auto-rollback on failure)
-scripts/deploy.sh prod    ghcr.io/statsguy/shortly@$D
-helm -n prod history shortly                               # revisions you can roll back to
-helm -n prod rollback shortly <REV> --force-conflicts --wait=legacy  # manual rollback (prod)
+scripts/promote.sh staging $D --pr                         # deploy = merge this PR (Argo CD syncs)
+scripts/promote.sh prod $D --pr                            # after staging ran it
+kubectl -n argocd get applications                         # SYNC STATUS / HEALTH per environment
+git log --oneline -5 -- deploy/envs/prod.yaml              # what prod ran; roll back = revert one
 kubectl -n prod get pods -l app.kubernetes.io/name=shortly # pod status
 kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=100
 kubectl -n prod get rollout shortly                        # prod: PHASE Healthy, or the canary's step
@@ -101,7 +102,7 @@ A release is a pushed `vX.Y.Z` tag on a `main` commit whose `pyproject.toml` ver
    ```
 3. Watch **Actions → Release**. It fails before publishing if the tag and version differ or the image scan finds a fixable HIGH/CRITICAL vulnerability.
 4. Copy the digest from the GitHub Release notes. Every deploy uses this digest.
-5. Check the provenance. `deploy.sh` does this itself before every deploy, but you can run the same check by hand:
+5. Check the provenance. `promote.sh` and CI do this themselves for every promotion, but you can run the same check by hand:
 
    ```bash
    D=sha256:<digest from the release notes>
@@ -109,7 +110,7 @@ A release is a pushed `vX.Y.Z` tag on a `main` commit whose `pyproject.toml` ver
    # verified: built by …/release.yml@refs/tags/v0.3.0, from … refs/tags/v0.3.0 @ <commit>
    ```
 
-   It must exit 0. Then record the digest in the Quick reference above: `tests/test_deploy_gate.py` verifies the digest documented there.
+   It must exit 0. Then record the digest in the Quick reference above (`tests/test_deploy_gate.py` verifies the digest documented there), and promote it: Deploy, below.
 
 **If the release workflow fails**
 
@@ -124,21 +125,22 @@ Never move or re-use a published tag; cut a new patch version instead.
 
 ## Deploy
 
-Deploy the verified digest to staging, check it, then promote the identical digest to prod. Never rebuild for prod.
+Staging and prod are deployed by **Argo CD from git** (docs/DESIGN.md, GitOps with Argo CD). What runs in an environment is the `image.digest` in `deploy/envs/<env>.yaml` on `main`; a merged PR that changes it is the deploy, and Argo CD applies it within a minute. Promote the verified digest to staging, check it, then promote the identical digest to prod. Never rebuild for prod.
 
-1. Set the digest and confirm the cluster context:
-
-   ```bash
-   D=sha256:<verified digest>
-   kubectl config current-context        # must be kind-shortly
-   ```
-2. Deploy to staging:
+1. Promote to staging. `promote.sh` verifies the digest's provenance, writes it into the env file with its version, and with `--pr` opens the PR:
 
    ```bash
-   scripts/deploy.sh staging ghcr.io/statsguy/shortly@$D
+   git switch main && git pull
+   scripts/promote.sh staging sha256:<digest from the release notes> --pr
    ```
 
-   The migration Job runs first, then pods roll out. Success prints a `helm history` table whose last row is `deployed`.
+   CI verifies the provenance again. **Merge the PR: that is the deploy.**
+2. Watch Argo CD sync it (the migration Job runs first, as a PreSync hook):
+
+   ```bash
+   kubectl -n argocd get application shortly-staging -w      # SYNC STATUS Synced, HEALTH Healthy
+   kubectl -n staging get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+   ```
 3. Check staging (see Health checks):
 
    ```bash
@@ -147,19 +149,26 @@ Deploy the verified digest to staging, check it, then promote the identical dige
    curl -s -X POST http://staging.sho.rt.localhost:8080/links -H 'content-type: application/json' -d '{"url":"https://example.com"}'
    curl -si http://staging.sho.rt.localhost:8080/<code from the response> | head -3   # expect 307 + Location
    ```
-4. Promote the same digest to prod:
+4. Promote the same digest to prod. `promote.sh` (and CI) refuse a digest that staging hasn't run on `main`:
 
    ```bash
-   scripts/deploy.sh prod ghcr.io/statsguy/shortly@$D
-   kubectl -n prod get rollout shortly   # PHASE Healthy, READY = desired (at least 2)
+   git switch main && git pull
+   scripts/promote.sh prod sha256:<same digest> --pr
    ```
 
-   Prod is a **canary**: `deploy.sh` prints each step (`step 1/4, canary weight 10%`, …) and returns after about 7 minutes, when the new version has all traffic, or with exit 1 when it was aborted and rolled back. See "Canary releases" below.
+   Merge it. Prod is a **canary**: the Rollout gives the new version 10%, then 50% of the traffic, judging each step (about 7 minutes; "Canary releases" below):
+
+   ```bash
+   kubectl -n prod get rollout shortly -w                     # step, weights, PHASE Healthy at the end
+   kubectl -n argocd get application shortly-prod             # Synced; Healthy once the canary is done
+   ```
 5. Watch for 15 minutes: 5xx ratio, p99 latency, restarts. The canary checks the first few minutes on a share of traffic; it doesn't replace this. If anything regresses, roll back (next section).
+
+The Argo CD UI shows the same, with diffs and history: `kubectl -n argocd port-forward svc/argocd-server 8090:80`, then `http://localhost:8090`, user `admin`, password from `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`.
 
 ### Canary releases
 
-What `deploy.sh prod` does after `helm upgrade` (docs/DESIGN.md, Canary releases):
+What happens in prod after a new version is synced (docs/DESIGN.md, Canary releases):
 
 | Step | Traffic on the new version | Judged by |
 | --- | --- | --- |
@@ -167,7 +176,7 @@ What `deploy.sh prod` does after `helm upgrade` (docs/DESIGN.md, Canary releases
 | 3–4 | 50% | the same |
 | done | 100%; old pods removed 30 s later | — |
 
-Each check, on the new version's pods only: at least 0.5 req/s of traffic, a 5xx ratio of at most 1%, and a redirect p99 of at most 250 ms. While it runs, `deploy.sh` sends 20 req/s of synthetic traffic through the Gateway (Job `canary-traffic`, links to `example.com`); with real users, run `CANARY_TRAFFIC=0 scripts/deploy.sh prod …`.
+Each check, on the new version's pods only: at least 0.5 req/s of traffic, a 5xx ratio of at most 1%, and a redirect p99 of at most 250 ms. While each analysis runs, its `synthetic-traffic` Job sends 20 req/s through the Gateway (links to `example.com`); with real users, set `canary.analysis.syntheticTraffic.enabled: false` in `deploy/envs/prod.yaml`.
 
 ```bash
 kubectl -n prod get rollout shortly -w                                   # PHASE, step, weights
@@ -176,20 +185,23 @@ kubectl -n prod get analysisrun                                          # one p
 kubectl -n prod get analysisrun <name> -o jsonpath='{range .status.metricResults[*]}{.name}: {.phase} {.measurements[-1:].value}{"\n"}{end}'
 ```
 
-Stop a canary by hand (traffic goes back to stable at once; then roll helm back so its history matches):
+Stop a canary by hand (traffic goes back to stable at once), then revert the promotion PR so git says what should run:
 
 ```bash
 kubectl -n prod patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}'
-helm -n prod rollback shortly --force-conflicts --wait=legacy
+gh pr list --state merged --search "deploy: in:title" --limit 3       # find the promotion PR
+git revert <its merge commit> && git push   # via a PR, as for any change to main
 ```
 
-Knobs: `CANARY_TIMEOUT` (default 15m; `deploy.sh` aborts the canary when it runs out), `CANARY_TRAFFIC_RATE` (20), `DEPLOY_TIMEOUT` (helm's own wait, 3m). Steps and thresholds are chart values (`canary:` in `values.yaml`).
+Steps and thresholds are chart values (`canary:` in `values.yaml`). An aborted canary leaves the Application **Degraded** until the revert is merged; that's expected (Argo CD and git agree, the Rollout refused the version).
+
+**First upgrade onto chart 0.10.0** (Argo CD takes over): `scripts/cluster.sh up` installs Argo CD and applies `deploy/argocd/`. Each Application adopts the resources `deploy.sh` created (same names) and syncs `main`; nothing restarts unless `main` differs from what runs. Then delete Helm's release records, so that a stray `helm` command can't act on resources Argo CD owns: `kubectl -n staging delete secret -l owner=helm,name=shortly` and the same for `prod`. From then on, `deploy.sh` refuses both environments.
 
 **First upgrade onto chart 0.9.0** (prod becomes a Rollout): `deploy.sh` keeps the old Deployment serving (it annotates it `helm.sh/resource-policy: keep`), waits for the Rollout to be Healthy, then deletes the Deployment, and prints `migrated`. Meanwhile it shows `first version, no canary`: the first Rollout version starts at 100% (there is no stable version yet), so this one deploy has no canary. If it fails, the rollback brings the Deployment back under Helm; check `kubectl -n prod get deploy,rollout`.
 
 **First upgrade onto chart 0.2.0** (the HPA arrives): the chart stops setting `replicas`, so Kubernetes may briefly set an existing prod Deployment to 1 replica until the HPA restores its minimum of 2, typically within 15 s. Do this upgrade at a quiet time, then check `kubectl -n prod get hpa,deploy shortly`. Fresh installs are not affected.
 
-**What `deploy.sh` does:** for a digest, it first verifies the image's provenance (`scripts/verify-image.sh`) and stops if that fails; a tag is accepted only on a `kind-*` context. Then it runs `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the environment's values file (prod: `--wait=legacy`, then it follows the canary). Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
+**`deploy.sh` (CI's e2e and break glass only).** It refuses an environment that Argo CD manages (`REFUSED: … deployed by Argo CD from git`). For a digest, it first verifies the image's provenance (`scripts/verify-image.sh`) and stops if that fails; a tag is accepted only on a `kind-*` context. Then it runs `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the environment's values file (prod: `--wait=legacy`, then it follows the canary). Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
 
 **If `deploy.sh` says REFUSED**, nothing was deployed:
 
@@ -200,15 +212,24 @@ Knobs: `CANARY_TIMEOUT` (default 15m; `deploy.sh` aborts the canary when it runs
 | `is a tag; outside kind, deploy a released digest` | A tag was passed against a non-kind cluster | Use the digest from the release notes |
 | `gh (GitHub CLI) is required` | `gh` isn't installed | `brew install gh` |
 
-**Break glass**, only when verification itself is broken (for example Sigstore is down) and a deploy can't wait: `INSECURE_SKIP_VERIFY=1 scripts/deploy.sh prod ghcr.io/statsguy/shortly@$D`. It prints a warning. Say so in the incident channel, and run `scripts/verify-image.sh` on that digest as soon as verification works again. This skips `deploy.sh`'s check only: the cluster's admission policy still applies (see [Admission policy refuses pods](#admission-policy-refuses-pods)).
-
-**If the deploy fails**, Helm has already rolled back (a fresh install is uninstalled); in prod, a failed canary was aborted first, so users only ever saw it on its share of traffic. Prod keeps serving. Find out why before retrying (prod canary: see [Canary aborted](#canary-aborted)):
+**Deploy by hand while Argo CD manages the environment** (break glass: git or GitHub is unreachable mid-incident, or the cluster must run something git doesn't say yet). Turn auto-sync off first, or Argo CD reverts you within seconds; turn it back on, from git, as soon as you can:
 
 ```bash
-helm -n prod history shortly
+kubectl -n argocd patch application shortly-prod --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
+ARGOCD_OVERRIDE=1 scripts/deploy.sh prod ghcr.io/statsguy/shortly@$D
+# afterwards: put the same digest in deploy/envs/prod.yaml via a PR, merge, then restore auto-sync:
+kubectl apply -f deploy/argocd/applications.yaml
+```
+
+Say so in the incident channel. If verification itself is broken (Sigstore down), add `INSECURE_SKIP_VERIFY=1` too; it prints a warning, and the cluster's admission policy still applies (see "Admission policy refuses pods").
+
+**If a deploy fails**, the old version keeps serving: a staging rollout that never gets ready stalls with the old pods up, and a failed prod canary is aborted, so users only saw it on its share of traffic. The Application shows Degraded (or the sync failed). Find out why, then revert the promotion PR (prod canary: see [Canary aborted](#canary-aborted)):
+
+```bash
+kubectl -n argocd get application shortly-prod -o jsonpath='{.status.operationState.message}{"\n"}'
 kubectl -n prod get events --sort-by=.lastTimestamp | tail -30
 kubectl -n prod get jobs                                      # a failed migrate Job is kept
-kubectl -n prod logs job/shortly-migrate-<REV>
+kubectl -n prod logs job/shortly-migrate-1
 kubectl -n prod logs -l app.kubernetes.io/name=shortly --previous --tail=50
 ```
 
@@ -216,38 +237,34 @@ kubectl -n prod logs -l app.kubernetes.io/name=shortly --previous --tail=50
 
 Roll back first, investigate second: when a release is bad, restore the last good revision, then debug from logs and the failed revision.
 
-**Automatic.** A deploy whose pods never become ready, or whose migration Job fails, is rolled back by `--rollback-on-failure` within the timeout (3 min). In prod, so is a canary that fails analysis or isn't ready within 180 s: `deploy.sh` aborts it and runs `helm rollback`. Nothing to do except find the cause.
+**Automatic.** A staging release whose pods never become ready stalls with the old pods serving. In prod, a canary that fails analysis or isn't ready within 180 s is aborted: all traffic stays on the old version. Either way the environment keeps working; git still names the bad digest, so finish with a manual rollback (the revert below) to make git true again.
 
-**Manual** (the release deployed fine but misbehaves):
+**Manual: revert the promotion** (the release deployed fine but misbehaves, or a canary was aborted):
 
-1. Find the last good revision:
+1. Find the promotion PR and revert it:
 
    ```bash
-   helm -n prod history shortly
+   git log --oneline -5 -- deploy/envs/prod.yaml        # "deploy: vX.Y.Z to prod"
+   git switch -c revert-prod main && git revert <commit> && git push -u origin revert-prod
+   gh pr create --fill                                  # CI checks the old digest's provenance again
    ```
 
-   Pick the newest row with status `superseded` that you trust, and note its REVISION.
-2. Roll back and wait:
+   Merge it. Argo CD syncs within a minute. In prod, going back to one of the last 3 versions skips the canary steps (`rollbackWindow`): Healthy within seconds.
+2. Verify:
 
    ```bash
-   helm -n prod rollback shortly <REV> --force-conflicts --wait=legacy --timeout 3m   # see below
-   kubectl -n prod get rollout shortly    # Healthy within seconds: no canary steps for the last 3 revisions
-   # staging: helm -n staging rollback shortly <REV> --wait; kubectl -n staging rollout status deploy/shortly
-   ```
-
-   In prod, `--force-conflicts` is required: Argo Rollouts writes to the Services and the HTTPRoute that Helm also applies, and without it Helm refuses with `Apply failed with 1 conflict`. `--wait=legacy` because Helm's default wait doesn't understand a Rollout.
-3. Verify through the Service:
-
-   ```bash
-   kubectl -n prod exec postgres-0 -- wget -q -O- http://shortly/readyz
+   kubectl -n argocd get application shortly-prod     # Synced, Healthy
    kubectl -n prod get rollout shortly -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+   kubectl -n prod exec postgres-0 -- wget -q -O- http://shortly/readyz
    ```
 
    The image must be the previous digest.
-4. Roll back staging too if the bad release is there, so the environments don't diverge.
-5. Open an incident note (see Incident process) with the bad digest and revision.
+3. Roll back staging the same way if the bad release is there, so the environments don't diverge.
+4. Open an incident note (see Incident process) with the bad digest and the revert PR.
 
-**Schema is not rolled back.** `helm rollback` does not run the pre-upgrade migration hook and does not downgrade the database. That is safe because every migration must be backward compatible with the previous version (expand/contract).
+**Faster than a PR**, when every minute counts: Argo CD can sync the Application to the previous git revision (UI: History and rollback; it turns auto-sync off while you're there). Merge the revert anyway, then turn auto-sync back on (`kubectl apply -f deploy/argocd/applications.yaml`): until then, git and the cluster disagree.
+
+**Schema is not rolled back.** A rollback runs the migration Job too (Argo CD runs it on every sync), but with the older image it finds the database at a revision it doesn't know and leaves the schema as it is (`migrate: the database is at a newer revision than this release (a rollback)` in its log). It never downgrades. That is safe because every migration must be backward compatible with the previous version (expand/contract).
 
 If a migration itself broke something and the old code cannot run on the new schema, downgrade **before** rolling back. Only the new image contains the new revision, so the old one cannot undo it:
 
@@ -259,7 +276,7 @@ If a migration itself broke something and the old code cannot run on the new sch
    kubectl -n prod exec $POD -- alembic downgrade -1
    kubectl -n prod exec $POD -- alembic current
    ```
-3. Then `helm rollback` as above.
+3. Then revert the promotion as above.
 
 **Rehearsal.** `scripts/k8s-e2e.sh` performs both an automatic and a manual rollback on every PR, plus a healthy and a faulty canary. If those steps start failing in CI, treat it as a broken rollback path, not a flaky test.
 
@@ -329,7 +346,7 @@ Start every incident with the same two questions: did something just change (`he
 ```mermaid
 flowchart TD
   A[Alert or user report] --> B{Release in the last hour?}
-  B -- yes --> R[Roll back<br/>helm rollback to last good, then verify]
+  B -- yes --> R[Roll back<br/>revert the promotion PR, then verify]
   B -- no --> C{"/readyz returning 503?"}
   C -- yes --> D[Database playbook<br/>check postgres-0; app recovers itself]
   C -- no --> E{Pods restarting?}
@@ -439,7 +456,7 @@ kubectl -n prod logs <pod> --previous --tail=30
 
 ### Deploy stuck or failed
 
-Helm rolls back automatically after 3 minutes. To see why:
+The old version keeps serving (a stalled rollout, or an aborted canary). If Argo CD itself didn't apply the change, see "A merged change didn't deploy (Argo CD)" below. To see why the pods didn't come up:
 
 ```bash
 kubectl -n prod get pods,jobs
@@ -457,7 +474,7 @@ kubectl -n prod get events --sort-by=.lastTimestamp | tail -30
 
 ### Canary aborted
 
-`deploy.sh prod` printed `FAILED: canary aborted` (or `timeout`) and rolled back. Users only saw the new version on its share of traffic, at most 50% and usually 10%, for a few minutes. Prod is back on the previous version; check that first, then find out why:
+The prod Rollout aborted a new version (`kubectl -n argocd get application shortly-prod` shows Degraded; with `deploy.sh`, it printed `FAILED: canary aborted`). Users only saw the new version on its share of traffic, at most 50% and usually 10%, for a few minutes. Prod is serving the previous version; check that first, then find out why, then revert the promotion PR (Roll back):
 
 ```bash
 kubectl -n prod get rollout shortly                     # PHASE Healthy, on the old pod hash
@@ -470,12 +487,34 @@ kubectl -n prod get events --sort-by=.lastTimestamp | grep -i -E 'rollout|analys
 | --- | --- | --- |
 | `error-ratio: Failed` | The new version answered 5xx on more than 1% of its requests | Its logs: `kubectl -n prod logs -l rollouts-pod-template-hash=<hash> --tail=200` (the canary's pods are kept 30 s after the abort; staging still runs the same digest). A real bug: fix it in a new release |
 | `redirect-p99: Failed` | Redirects on the new version were slower than 250 ms at p99, twice | A slow query or a CPU regression: compare with `scripts/loadtest.sh` on staging |
-| `traffic: Failed` | Too little traffic to judge, not a bad release | Did the `canary-traffic` Job run (`kubectl -n prod get jobs`, k6 image pull)? With `CANARY_TRAFFIC=0`, real traffic was below 0.5 req/s at 10%: deploy at a busier time, or use the synthetic traffic |
+| `traffic: Failed` | Too little traffic to judge, not a bad release | Did the analysis's `synthetic-traffic` Job run (`kubectl -n prod get jobs`, k6 image pull, its logs)? With synthetic traffic off, real traffic was below 0.5 req/s at 10%: deploy at a busier time, or turn it on |
 | metrics in `Error` | Analysis couldn't query Prometheus | `kubectl -n monitoring get pods`; the Rollout aborts after 4 errors in a row. Fix Prometheus, then deploy again |
 | `ProgressDeadlineExceeded` | A canary pod wasn't ready within 180 s | Same as a crash loop or Pending pod: CrashLoopBackOff and Deploy stuck playbooks |
 | `out of time` | The canary didn't finish in `CANARY_TIMEOUT` (15 min) | Was the Argo Rollouts controller running (`kubectl -n argo-rollouts get pods`)? |
 
 Don't retry the same digest hoping for a different result: the analysis is deterministic enough that a second run will fail the same way, at the same cost.
+
+### A merged change didn't deploy (Argo CD)
+
+The promotion PR is merged, but the environment still runs the old version, or `kubectl -n argocd get applications` shows something other than Synced and Healthy.
+
+```bash
+kubectl -n argocd get applications
+kubectl -n argocd get application shortly-prod -o jsonpath='{.status.sync.revision}{"\n"}{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}{.status.operationState.phase}: {.status.operationState.message}{"\n"}'
+git rev-parse origin/main                                    # what it should have synced
+kubectl -n argocd get pods
+kubectl -n argocd logs deploy/argocd-repo-server --tail=50
+```
+
+| What you see | Cause | Fix |
+| --- | --- | --- |
+| Synced, but to an older revision | Not polled yet (every 60 s), or the repo server can't reach GitHub | Wait a minute; `kubectl -n argocd annotate application shortly-prod argocd.argoproj.io/refresh=normal --overwrite` forces a check; then repo-server logs |
+| `ComparisonError` | The chart doesn't render with that env file (a typo, a bad value) | The message names the template; fix it in a PR. Nothing changed in the cluster |
+| OutOfSync, sync failed, `PreSync` hook failed | The migration Job failed | `kubectl -n prod logs job/shortly-migrate-1`; fix in a new release or revert. The old version keeps serving |
+| Synced, Degraded, Rollout aborted | The canary was refused | "Canary aborted" above, then revert the promotion |
+| Synced, Progressing for minutes | A canary in progress (about 7 minutes), or pods not becoming ready | `kubectl -n prod get rollout shortly`; "Deploy stuck or failed" |
+| OutOfSync, auto-sync not running | Someone turned auto-sync off (break glass) and didn't turn it back on | `kubectl apply -f deploy/argocd/applications.yaml` after checking git says what should run |
+| OutOfSync on the HTTPRoute or the `shortly-stable`/`shortly-canary` Services only | The Application lost its `ignoreDifferences` for what Argo Rollouts owns (an edited Application) | `kubectl apply -f deploy/argocd/applications.yaml` |
 
 ### Admission policy refuses pods
 
@@ -613,7 +652,7 @@ kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=500 | grep 'FAULT 
 helm -n prod get values shortly | grep -i fault
 ```
 
-Fix: redeploy the current release digest **without** the setting (`scripts/deploy.sh prod <digest>`, no `--set config.faultErrorRatio`), or `helm rollback` to the revision before it. Then find out how it got there: it must never be in `deploy/envs/`.
+Fix: if it is in `deploy/envs/`, revert that change (a PR); Argo CD removes it within a minute. If someone set it by hand, Argo CD's self-heal has already removed it, unless auto-sync is off: turn it back on (`kubectl apply -f deploy/argocd/applications.yaml`). Then find out how it got there: it must never be in `deploy/envs/`.
 
 ### Backup job not running
 
@@ -780,7 +819,7 @@ Don't run load tests against prod. The drill runs against the kind `prod` namesp
 2. Add or update a promtool test in `deploy/prometheus/tests/alerts_test.yaml`. It needs one case where the alert fires and one where it must stay quiet.
 3. Give every alert a `runbook_url` pointing at a section of this runbook. Write the section first.
 4. Run `uv run pytest tests/test_alert_rules.py`; it needs Docker for the promtool step.
-5. Check it live: in kind, `scripts/deploy.sh prod …` and watch Prometheus → Alerts, then Alertmanager. Or without Kubernetes: `docker compose --profile app --profile obs up -d` and `http://localhost:9090/alerts`. Cause the condition and watch the alert go from pending to firing.
+5. Check it live: in kind, merge it (Argo CD deploys the prod release, which ships the rules) and watch Prometheus → Alerts, then Alertmanager. Or without Kubernetes: `docker compose --profile app --profile obs up -d` and `http://localhost:9090/alerts`. Cause the condition and watch the alert go from pending to firing.
 6. Update DESIGN.md (SLOs and alerting) and the Quick reference above in the same PR.
 
 ## Incident process

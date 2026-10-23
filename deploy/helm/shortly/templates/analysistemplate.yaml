@@ -47,6 +47,60 @@ spec:
             (sum(rate(http_requests_total{ {{- $sel }}, route!~"/healthz|/readyz", status=~"5.."}[1m])) or vector(0))
             /
             sum(rate(http_requests_total{ {{- $sel }}, route!~"/healthz|/readyz"}[1m]))
+{{- with $a.syntheticTraffic }}{{ if .enabled }}
+    # Not a check: the traffic the checks above judge. Lasts as long as the step's analysis.
+    {{- $delay := trimSuffix "s" (toString $a.initialDelay) }}
+    {{- $interval := trimSuffix "s" (toString $a.interval) }}
+    {{- if not (and (regexMatch "^[0-9]+s$" (toString $a.initialDelay)) (regexMatch "^[0-9]+s$" (toString $a.interval))) }}
+    {{- fail "canary.analysis.initialDelay and .interval must be in seconds (\"60s\") when syntheticTraffic is enabled" }}
+    {{- end }}
+    {{- /* Until the step's last measurement (initialDelay + (count-1) x interval), plus 10 s:
+           the step ends when every metric has, this one included. */}}
+    {{- $seconds := add (atoi $delay) (mul (atoi $interval) (sub (int $a.count) 1)) 10 }}
+    - name: synthetic-traffic
+      provider:
+        job:
+          spec:
+            backoffLimit: 0
+            activeDeadlineSeconds: {{ add $seconds 120 }}
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/name: canary-traffic
+                  app.kubernetes.io/instance: {{ $.Release.Name }}
+              spec:
+                restartPolicy: Never
+                automountServiceAccountToken: false
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 12345
+                  runAsGroup: 12345
+                  seccompProfile: { type: RuntimeDefault }
+                containers:
+                  - name: k6
+                    image: {{ .image }}
+                    args: [run, --quiet, --no-color, --no-thresholds, /scripts/canary-traffic.js]
+                    env:
+                      - { name: BASE_URL, value: {{ .url | quote }} }
+                      - { name: HOST, value: {{ first $.Values.gateway.hostnames | quote }} }
+                      - { name: RATE, value: {{ .rate | quote }} }
+                      - { name: DURATION, value: "{{ $seconds }}s" }
+                    resources:
+                      requests: { cpu: 50m, memory: 64Mi }
+                      limits: { memory: 256Mi }
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities: { drop: [ALL] }
+                    volumeMounts:
+                      - { name: scripts, mountPath: /scripts, readOnly: true }
+                      - { name: tmp, mountPath: /tmp }
+                volumes:
+                  - name: scripts
+                    configMap: { name: {{ include "shortly.fullname" $ }}-canary-traffic }
+                  - name: tmp
+                    emptyDir: { sizeLimit: 64Mi }
+{{- end }}{{ end }}
     - name: redirect-p99
       initialDelay: {{ $a.initialDelay }}
       interval: {{ $a.interval }}
@@ -58,4 +112,16 @@ spec:
           address: {{ $a.prometheusUrl }}
           query: |
             histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{ {{- $sel }}, method="GET", route="/{code}"}[1m])))
+{{- if $a.syntheticTraffic.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "shortly.fullname" . }}-canary-traffic
+  labels:
+    {{- include "shortly.labels" . | nindent 4 }}
+data:
+  canary-traffic.js: |
+    {{- .Files.Get "files/canary-traffic.js" | nindent 4 }}
+{{- end }}
 {{- end }}

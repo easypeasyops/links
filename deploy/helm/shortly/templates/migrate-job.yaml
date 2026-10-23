@@ -37,7 +37,22 @@ spec:
         - name: migrate
           image: {{ include "shortly.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["alembic", "upgrade", "head"]
+          # `alembic upgrade head`, except when the database is AHEAD of this image: its
+          # revision is one this release doesn't know, which happens exactly on a rollback
+          # (a reverted promotion, or an older digest redeployed). Expand/contract makes
+          # the old code work on the newer schema, so the right move is to leave it alone.
+          # (Helm skipped hooks on `helm rollback`; Argo CD runs them on every sync.)
+          command:
+            - sh
+            - -c
+            - |
+              out=$(alembic upgrade head 2>&1); rc=$?
+              printf '%s\n' "$out"
+              if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "Can't locate revision identified by"; then
+                echo "migrate: the database is at a newer revision than this release (a rollback); schema left as it is"
+                exit 0
+              fi
+              exit "$rc"
           env:
             {{- include "shortly.env" . | nindent 12 }}
           securityContext:

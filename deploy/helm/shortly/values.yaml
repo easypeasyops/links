@@ -123,6 +123,15 @@ canary:
     minRequestRate: 0.5 # req/s: below this there's too little traffic to judge: fail
     maxErrorRatio: 0.01 # 5xx share of all non-probe requests; one bad measurement aborts
     maxRedirectP99Seconds: 0.25 # coarse: small samples make p99 noisy; 2 bad ones abort
+    # Requests to judge the canary on: a k6 Job runs beside each analysis step, sending this
+    # many req/s through the Gateway with the first gateway hostname (files/canary-traffic.js).
+    # Part of the analysis, so a canary started by anyone (Argo CD, deploy.sh) gets it.
+    # A prod with real users turns it off; then `minRequestRate` guards a quiet hour.
+    syntheticTraffic:
+      enabled: true
+      rate: 20
+      image: grafana/k6:2.3.0
+      url: http://shortly-gateway.envoy-gateway-system.svc
   pauseWithoutAnalysis: 60s
 
 resources:

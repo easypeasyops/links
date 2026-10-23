@@ -9,6 +9,10 @@
 # A digest is deployed only after scripts/verify-image.sh proves it was built by this repo's
 # release workflow from a release tag. A tag is accepted only on a kind-* kube context.
 #
+# Where Argo CD manages an environment (scripts/cluster.sh applies deploy/argocd/), releases
+# go through git instead (scripts/promote.sh) and this script refuses. It remains the way
+# CI's e2e deploys local builds, and the break-glass path.
+#
 # Extra args are passed to helm (e.g. --set config.logLevel=DEBUG).
 # A failed rollout is rolled back automatically (--rollback-on-failure). In an environment
 # with canary.enabled (prod), the new version is a canary first; see below.
@@ -23,6 +27,16 @@ TIMEOUT="${DEPLOY_TIMEOUT:-3m}"
 case "$ENV" in staging | prod) ;; *) echo "unknown env: $ENV" >&2; exit 2 ;; esac
 
 context=$(kubectl config current-context 2>/dev/null || true)
+
+# Where Argo CD manages the environment (deploy/argocd/), git is the deploy: a release
+# reaches it by a merged PR to deploy/envs/$ENV.yaml (scripts/promote.sh), and anything
+# deployed by hand here would be reverted by Argo CD's self-heal within a minute.
+if [[ -n "$(kubectl -n argocd get application "shortly-$ENV" -o name 2>/dev/null)" && "${ARGOCD_OVERRIDE:-}" != 1 ]]; then
+  echo "REFUSED: $ENV is deployed by Argo CD from git (application shortly-$ENV)." >&2
+  echo "  Promote with: scripts/promote.sh $ENV <digest>, then merge the PR." >&2
+  echo "  Break glass: RUNBOOK, \"Deploy by hand while Argo CD manages the environment\"." >&2
+  exit 1
+fi
 
 if [[ "$REF" == *@sha256:* ]]; then
   # Released images deploy only if their provenance proves they came from this repo's
@@ -39,7 +53,8 @@ else
   # builds on kind only. Anything else deploys a released digest.
   [[ "$context" == kind-* ]] \
     || { echo "REFUSED: $REF is a tag; outside kind, deploy a released digest (repo@sha256:...)" >&2; exit 1; }
-  image_args=(--set "image.repository=${REF%:*}" --set "image.tag=${REF##*:}")
+  # image.digest="" too: the env file names a release digest, and a digest wins over a tag.
+  image_args=(--set "image.repository=${REF%:*}" --set "image.tag=${REF##*:}" --set "image.digest=")
   # A local tag only exists on this machine; copy it into the kind node.
   if docker image inspect "$REF" >/dev/null 2>&1; then
     kind load docker-image "$REF" --name "${context#kind-}"
@@ -70,7 +85,8 @@ fi
 #   2. the Rollout runs its steps: 10% → analysis → 50% → analysis → 100%
 #   3. Healthy on the new version: done. Aborted (analysis failed, canary never ready) or
 #      out of time: helm rollback, so helm's history matches what runs, and exit 1.
-# Knobs: CANARY_TIMEOUT (default 15m), CANARY_TRAFFIC=0 to send no synthetic traffic.
+# Knobs: CANARY_TIMEOUT (default 15m). The canary's synthetic traffic is a chart value
+# (canary.analysis.syntheticTraffic.enabled), e.g. --set ...enabled=false with real users.
 CANARY_TIMEOUT="${CANARY_TIMEOUT:-15m}"
 ro() { kubectl -n "$ENV" get rollout shortly -o jsonpath="$1" 2>/dev/null; }
 seconds() { local d=$1; case "$d" in *m) echo $((${d%m} * 60)) ;; *s) echo "${d%s}" ;; *) echo "$d" ;; esac; }
@@ -99,71 +115,9 @@ helm upgrade --install shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
 gen=$(kubectl -n "$ENV" get rollout shortly -o jsonpath='{.metadata.generation}')
 for _ in $(seq 1 30); do [[ "$(ro '{.status.observedGeneration}')" == "$gen" ]] && break; sleep 1; done
 
-TRAFFIC_JOB="canary-traffic"
-stop_traffic() {
-  kubectl -n "$ENV" delete job "$TRAFFIC_JOB" --ignore-not-found --wait=false >/dev/null 2>&1 || true
-  kubectl -n "$ENV" delete configmap "$TRAFFIC_JOB" --ignore-not-found >/dev/null 2>&1 || true
-}
-# Analysis judges the canary on real requests; with no users (kind), it would fail every
-# release for "too little traffic". So send some, the way users arrive: through the
-# Gateway, by hostname, at a fixed rate. A prod with real users runs CANARY_TRAFFIC=0.
-start_traffic() {
-  local host
-  host=$(kubectl -n "$ENV" get httproute shortly -o jsonpath='{.spec.hostnames[0]}')
-  kubectl -n "$ENV" create configmap "$TRAFFIC_JOB" --from-file=mixed.js="$ROOT/loadtest/k6/mixed.js" \
-    --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  kubectl -n "$ENV" apply -f - >/dev/null <<YAML
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: $TRAFFIC_JOB
-  labels: { app.kubernetes.io/name: canary-traffic }
-spec:
-  backoffLimit: 0
-  ttlSecondsAfterFinished: 300
-  template:
-    metadata:
-      labels: { app.kubernetes.io/name: canary-traffic }
-    spec:
-      restartPolicy: Never
-      automountServiceAccountToken: false
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 12345
-        runAsGroup: 12345
-        seccompProfile: { type: RuntimeDefault }
-      containers:
-        - name: k6
-          image: ${K6_IMAGE:-grafana/k6:2.3.0}
-          args: [run, --quiet, --no-color, --no-thresholds, /scripts/mixed.js]
-          env:
-            - { name: BASE_URL, value: "${CANARY_TRAFFIC_URL:-http://shortly-gateway.envoy-gateway-system.svc}" }
-            - { name: HOST, value: "$host" }
-            - { name: RATE, value: "${CANARY_TRAFFIC_RATE:-20}" }
-            - { name: DURATION, value: "$CANARY_TIMEOUT" }
-            - { name: SEED_LINKS, value: "20" }
-          resources:
-            requests: { cpu: 50m, memory: 64Mi }
-            limits: { memory: 256Mi }
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities: { drop: [ALL] }
-          volumeMounts:
-            - { name: scripts, mountPath: /scripts, readOnly: true }
-      volumes:
-        - name: scripts
-          configMap: { name: $TRAFFIC_JOB }
-YAML
-  echo "     synthetic traffic: ${CANARY_TRAFFIC_RATE:-20} req/s through the Gateway as $host"
-}
-trap stop_traffic EXIT
-
-# Only for a real canary: a first install (no stable version yet) or a rollback inside
-# rollbackWindow skips the steps, so there is nothing to judge.
-stable=$(ro '{.status.stableRS}') first_stable=$stable
-if [[ -n "$stable" && "$(ro '{.status.currentPodHash}')" != "$stable" && "${CANARY_TRAFFIC:-1}" != 0 ]]; then
-  start_traffic
-fi
+# The canary's traffic is part of its analysis (chart: canary.analysis.syntheticTraffic),
+# so a canary gets it however it started: here, or by Argo CD.
+first_stable=$(ro '{.status.stableRS}')
 
 # Follow the Rollout until it settles on the new version, or gives up on it.
 deadline=$((SECONDS + $(seconds "$CANARY_TIMEOUT")))
@@ -172,13 +126,6 @@ while :; do
   phase=$(ro '{.status.phase}') hash=$(ro '{.status.currentPodHash}') stable=$(ro '{.status.stableRS}')
   if [[ "$phase" == Healthy && -n "$hash" && "$hash" == "$stable" ]]; then result=ok; break; fi
   if [[ "$phase" == Degraded || "$(ro '{.status.abort}')" == true ]]; then result=aborted; break; fi
-  # Without its traffic the canary can only fail on "too little traffic": say why, now.
-  if [[ -n "$(kubectl -n "$ENV" get job "$TRAFFIC_JOB" -o jsonpath='{.status.failed}' 2>/dev/null)" ]]; then
-    echo "     the synthetic traffic Job failed; its log:" >&2
-    kubectl -n "$ENV" logs "job/$TRAFFIC_JOB" --tail=20 2>&1 | sed 's/^/       /' >&2 || true
-    kubectl -n "$ENV" patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}' >/dev/null
-    result="aborted (no synthetic traffic)"; break
-  fi
   if ((SECONDS > deadline)); then
     echo "     out of time after $CANARY_TIMEOUT: aborting the canary" >&2
     kubectl -n "$ENV" patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}' >/dev/null
@@ -193,7 +140,6 @@ while :; do
   [[ "$line" != "$last" ]] && echo "     $line" && last=$line
   sleep 5
 done
-stop_traffic
 
 if [[ "$result" == ok ]]; then
   # A new Rollout starts at 1 replica until the HPA raises it to its floor (the chart leaves

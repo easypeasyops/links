@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-22 for v0.7.0 / chart 0.9.0. Mirrored at
+> Last updated 2026-10-23 for v0.7.0 plus GitOps with Argo CD on main / chart 0.10.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -24,7 +24,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.7.0 and chart 0.9.0: the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, overload protection (a concurrency limit and database timeouts), Postgres backups with a restore drill, the Gateway API front door, drill-only fault injection, and canary releases for prod with Argo Rollouts. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.7.0 plus main (chart 0.10.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, overload protection (a concurrency limit and database timeouts), Postgres backups with a restore drill, the Gateway API front door, drill-only fault injection, canary releases for prod with Argo Rollouts, and GitOps with Argo CD (the last one not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -546,10 +546,10 @@ flowchart TB
     ghRel[GitHub Release with digest]
   end
 
-  subgraph deployPath [Deploy · human or script]
-    verify[verify-image.sh<br/>attestation must be release.yml @ tag]
-    stg[deploy.sh staging @digest]
-    prod[deploy.sh prod @same digest]
+  subgraph deployPath [Deploy · GitOps]
+    verify[promote.sh: verify-image.sh<br/>attestation must be release.yml @ tag]
+    stg[PR: digest in deploy/envs/staging.yaml<br/>CI re-verifies; merge → Argo CD syncs]
+    prod[PR: same digest in prod.yaml<br/>CI: staging ran it; merge → canary]
     admit[Kyverno at API server<br/>same rules, every path]
   end
 
@@ -614,6 +614,7 @@ This is the expensive rehearsal. `scripts/k8s-e2e.sh` runs the same steps CI and
 | 9. NetworkPolicy refusals | Metrics port and Postgres reject strangers; controls still succeed | A CNI that ignores NetworkPolicy accepts the objects silently; only a refusal test catches that |
 | 10. Expired-link cleanup | The CronJob's Job deletes exactly the links past their grace period, and the concurrently built index is valid | Deletes on a live table are where data loss hides; a wrong cutoff or a failed index build must fail CI, not prod |
 | 11. Backup and restore | Prod's backup Job dumps and uploads; only backup pods reach the bucket; the dump restores into a fresh Postgres with the same revision, every link and a canary | Backups are only real once restored; this proves it on every PR, and times it |
+| 12. GitOps | Argo CD takes prod over from the PR's own commit, reverts a hand edit, and runs a full canary it started, without fighting Argo Rollouts over the weights | Two controllers on one object is where GitOps setups break; the first canary under Argo CD must not be in prod |
 
 Chart lint + kubeconform run *before* kind starts, so a template typo fails in seconds. A PR that changes only Markdown (other than `docs/RUNBOOK.md`) skips the job's steps and still passes the required check.
 
@@ -628,7 +629,7 @@ Chart lint + kubeconform run *before* kind starts, so a template typo fails in s
 
 Together these cut the job from 9m24s to **5m07s** (PR #27): cluster setup 117 s → 62 s, the e2e 364 s → 166 s. The alert drill took 101 s and finished entirely behind the prod drills, and the HPA drill stopped at +58 s instead of running its full 100 s. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
 
-The canary drills (PR #40) brought it back to **8–10 minutes** (8m19s and 9m59s in the first green runs; the second also had the HPA drill doing a real scale-up again): the healthy canary takes 106–134 s and the faulty one 74–86 s, even with short analyses. They are the price of testing the one release type nothing else catches. If the job's time matters more later, the healthy-canary drill is the one to move to a nightly run: the faulty one is the guard.
+The canary drills (PR #40) brought it back to **8–10 minutes** (8m19s and 9m59s in the first green runs; the second also had the HPA drill doing a real scale-up again): the healthy canary takes 106–134 s and the faulty one 74–86 s, even with short analyses. They are the price of testing the one release type nothing else catches. If the job's time matters more later, the healthy-canary drill is the one to move to a nightly run: the faulty one is the guard. The GitOps drill (step 12, PR #46) adds about 4 minutes more (taking prod over 13 s, self-heal 2 s, a full canary through Argo CD 215 s), bringing the job to about 15 minutes; its timeout is 25. The next step, if it matters, is two kind jobs in parallel: the drills that only touch prod don't need staging's.
 
 
 ### Release workflow — “Publish one immutable, attributable artifact”
@@ -705,60 +706,6 @@ The `shortly` Service still exists and still serves in-cluster callers (probes, 
 
 **Argo Rollouts** is installed alongside (chart 2.43.6, Argo Rollouts v1.10.0) with its Gateway API traffic-router plugin (v0.17.0). The controller downloads the plugin when it starts and refuses it unless the checksum matches. The project publishes no checksums, so the pinned values were computed from the release binaries. That protects against a later swap, not against a bad original.
 
-### Canary releases (prod)
-
-Kubernetes, and Helm's `--rollback-on-failure`, can only undo a release whose pods never become ready. The release that hurts users is the other kind: it starts, passes its probes, and then fails requests or answers slowly. A canary gives such a release a small share of real traffic first, measures it, and only then gives it the rest.
-
-With `canary.enabled` (prod only), the chart renders an Argo `Rollout` instead of the Deployment, from the same pod template (`templates/_podtemplate.tpl`), so the two can't drift. A new version then moves through these steps:
-
-```mermaid
-flowchart LR
-  A[helm upgrade:<br/>new pod template] --> W10[setWeight 10<br/>1 canary pod]
-  W10 --> X1{analysis}
-  X1 -->|pass| W50[setWeight 50]
-  W50 --> X2{analysis}
-  X2 -->|pass| P[100%: canary becomes stable<br/>old pods scaled down after 30 s]
-  X1 -->|fail| AB[abort: weight back to 0,<br/>canary scaled down]
-  X2 -->|fail| AB
-  AB --> RB[deploy.sh: helm rollback,<br/>exit 1]
-```
-
-**How traffic is split.** The HTTPRoute has two backends, the Services `shortly-stable` and `shortly-canary`. Argo Rollouts adds each version's `rollouts-pod-template-hash` to the matching Service's selector and sets the two weights on the route through the Gateway API plugin. The split is exact per request (10% of requests, not "1 of N pods"), because Envoy applies the weights; the number of canary pods only has to carry its share. The stable pods are never scaled down during the steps, so an abort is instant: the weight goes back to 0 and the stable pods already carry everything. The `shortly` Service still selects every pod, both versions, for in-cluster callers and for Prometheus.
-
-**What is measured** (`templates/analysistemplate.yaml`). Prometheus scrapes each pod with its pod-template hash as a label (the ServiceMonitor's `podTargetLabels`), so the canary's own series can be queried without a new metric in the app. Each step runs three metrics over a 1-minute rate window, on the canary's pods only, ignoring probe routes:
-
-| Metric | Passes when | Fails the step | Why |
-| --- | --- | --- | --- |
-| `traffic` | at least 0.5 req/s | on the second bad measurement | A canary nobody used proves nothing; "no data" must not pass. One miss is allowed because the first measurement can land before Prometheus has scraped the new pod twice |
-| `error-ratio` | 5xx share ≤ 1% | on the first bad measurement | What the availability SLOs count, load-shedding 503s included |
-| `redirect-p99` | p99 of `GET /{code}` ≤ 250 ms | on the second bad measurement | Coarse on purpose: a p99 from a few hundred requests is noisy. It catches a regression of several times, not a few ms |
-
-The thresholds are absolute ("good enough"), not relative ("no worse than stable"). They are easy to reason about, and the stable version meets them by a wide margin (see Capacity). Defaults: 60 s initial delay (two scrapes of the new pod), then 4 measurements 30 s apart, so a step takes about 3 minutes and a whole release about 7. Analysis runs only where the ServiceMonitor does (`monitoring.enabled` and the Prometheus Operator CRDs); without metrics each step is a plain 60 s pause.
-
-**Traffic to judge.** Analysis needs requests, and the kind cluster has no users. `deploy.sh` therefore sends synthetic traffic while a canary runs: a k6 Job in the namespace, 20 req/s of the usual mix (90% redirects, 10% creates), through the Gateway with prod's hostname, so it takes the same weighted path as a user. A prod with real users turns it off (`CANARY_TRAFFIC=0`); then the `traffic` metric is the guard against a quiet hour.
-
-**`deploy.sh` follows the Rollout**, so its exit code still answers "did the release work?":
-
-1. `helm upgrade --wait=legacy`. Helm 4's default watcher doesn't understand a Rollout's status; the legacy one still waits for the migration hook and the Services.
-2. If the new version is a canary, start the synthetic traffic, then poll the Rollout every 5 s, printing the step and the canary's weight.
-3. **Healthy** on the new pod hash: done, exit 0.
-4. **Aborted** (an analysis failed, or a canary pod wasn't ready within `progressDeadlineSeconds`, 180 s, with `progressDeadlineAbort`), or out of time (`CANARY_TIMEOUT`, 15 min; `deploy.sh` then aborts it itself): print the failed metrics, `helm rollback` so that Helm's history and the Rollout's spec say what actually runs, exit 1.
-
-**Rollbacks skip the steps.** `rollbackWindow: 3` lets the Rollout go back to any of its last three revisions at once, without steps or analysis: those pods already served all traffic, and an incident is the moment not to wait 7 minutes. A first install also goes straight to 100%: there is no stable version to compare against or fall back to.
-
-**Moving from the Deployment.** On the first canary-enabled upgrade, Helm would delete the Deployment as soon as the Rollout exists, before the Rollout's pods are ready. `deploy.sh` annotates the Deployment `helm.sh/resource-policy: keep` first, so it keeps serving, and deletes it once the Rollout is Healthy. Both sets of pods carry the selector labels, so the `shortly` Service, the PDB and the HPA (now pointed at the Rollout) cover the overlap.
-
-**Measured in CI** (e2e steps 4, 5, 5b, with the short analyses): a never-ready canary got no traffic at all, 0 failed requests through the Service and the Gateway; a healthy canary was promoted 10% → 50% → 100% in 106–134 s; a canary failing half its requests was aborted at 10% after 74–86 s, and meanwhile 1.1–3.0% of redirects through the Gateway failed (6 of 539, 19 of 624), against the 5% a 10% canary failing half its requests would cause for as long as it ran. A `helm rollback` inside the window was Healthy within a second.
-
-**What the canary doesn't catch:** a problem that only shows at full load, with a long delay (a slow leak), or in a route the synthetic mix doesn't use (it sends creates and redirects only). A migration is not canaried at all: it runs once, before any canary pod, so it must stay backward compatible (expand/contract) whatever the canary decides.
-
-| Choice | Why |
-| --- | --- |
-| Argo Rollouts | The common Kubernetes-native choice, with analysis built in. Flagger is the main alternative: similar, but drives a Deployment it copies, which makes "what is running" harder to read |
-| Rollout replaces the Deployment (inline template) | `workloadRef` (a Rollout pointing at a Deployment scaled to 0) keeps the Deployment as a template only. It leaves an object that looks like the workload and isn't, so the template is shared through a chart helper instead |
-| Synthetic traffic from `deploy.sh` | Without users, analysis can only fail or pass on nothing. A mesh's mirrored traffic or a separate synthetic monitor would do the same job in a real cluster |
-| Absolute thresholds, three metrics | A baseline comparison (stable vs canary, Kayenta-style) adapts to load but needs both sides to have enough traffic; at 20 req/s the canary sees 2 per second |
-
 **Build once, deploy many.** `scripts/deploy.sh <env> <image-ref>` takes a digest reference (`repo@sha256:…`) for released images; the bits tested in staging are the bits promoted to prod. A tag reference is accepted only on a `kind-*` context, for local images, which are loaded into kind first. The chart refuses to render with neither digest nor tag.
 
 **Provenance gate.** Before deploying a digest, `deploy.sh` runs `scripts/verify-image.sh`, which checks the image's signed SLSA provenance with `gh attestation verify`. The deploy is refused unless:
@@ -817,6 +764,102 @@ The allowed paths are proven by the steps before it, including Prometheus scrapi
 
 **Labels.** `app.kubernetes.io/version` is the tag, or the first 12 hex characters of the digest. Chart 0.1.0 put `sha256:…` in the label, which the API server rejected (`:` is illegal); kubeconform missed it because JSON schemas don't encode label syntax. The e2e now server-side dry-runs the digest-mode render.
 
+### Canary releases (prod)
+
+Kubernetes, and Helm's `--rollback-on-failure`, can only undo a release whose pods never become ready. The release that hurts users is the other kind: it starts, passes its probes, and then fails requests or answers slowly. A canary gives such a release a small share of real traffic first, measures it, and only then gives it the rest.
+
+With `canary.enabled` (prod only), the chart renders an Argo `Rollout` instead of the Deployment, from the same pod template (`templates/_podtemplate.tpl`), so the two can't drift. A new version then moves through these steps:
+
+```mermaid
+flowchart LR
+  A[helm upgrade:<br/>new pod template] --> W10[setWeight 10<br/>1 canary pod]
+  W10 --> X1{analysis}
+  X1 -->|pass| W50[setWeight 50]
+  W50 --> X2{analysis}
+  X2 -->|pass| P[100%: canary becomes stable<br/>old pods scaled down after 30 s]
+  X1 -->|fail| AB[abort: weight back to 0,<br/>canary scaled down]
+  X2 -->|fail| AB
+  AB --> RB[deploy.sh: helm rollback,<br/>exit 1]
+```
+
+**How traffic is split.** The HTTPRoute has two backends, the Services `shortly-stable` and `shortly-canary`. Argo Rollouts adds each version's `rollouts-pod-template-hash` to the matching Service's selector and sets the two weights on the route through the Gateway API plugin. The split is exact per request (10% of requests, not "1 of N pods"), because Envoy applies the weights; the number of canary pods only has to carry its share. The stable pods are never scaled down during the steps, so an abort is instant: the weight goes back to 0 and the stable pods already carry everything. The `shortly` Service still selects every pod, both versions, for in-cluster callers and for Prometheus.
+
+**What is measured** (`templates/analysistemplate.yaml`). Prometheus scrapes each pod with its pod-template hash as a label (the ServiceMonitor's `podTargetLabels`), so the canary's own series can be queried without a new metric in the app. Each step runs three metrics over a 1-minute rate window, on the canary's pods only, ignoring probe routes:
+
+| Metric | Passes when | Fails the step | Why |
+| --- | --- | --- | --- |
+| `traffic` | at least 0.5 req/s | on the second bad measurement | A canary nobody used proves nothing; "no data" must not pass. One miss is allowed because the first measurement can land before Prometheus has scraped the new pod twice |
+| `error-ratio` | 5xx share ≤ 1% | on the first bad measurement | What the availability SLOs count, load-shedding 503s included |
+| `redirect-p99` | p99 of `GET /{code}` ≤ 250 ms | on the second bad measurement | Coarse on purpose: a p99 from a few hundred requests is noisy. It catches a regression of several times, not a few ms |
+
+The thresholds are absolute ("good enough"), not relative ("no worse than stable"). They are easy to reason about, and the stable version meets them by a wide margin (see Capacity). Defaults: 60 s initial delay (two scrapes of the new pod), then 4 measurements 30 s apart, so a step takes about 3 minutes and a whole release about 7. Analysis runs only where the ServiceMonitor does (`monitoring.enabled` and the Prometheus Operator CRDs); without metrics each step is a plain 60 s pause.
+
+**Traffic to judge.** Analysis needs requests, and the kind cluster has no users. So each analysis step runs a fourth metric that is not a check: a k6 Job (`synthetic-traffic`, script in `files/canary-traffic.js`) sending 20 req/s of redirects and creates through the Gateway with prod's hostname, for as long as the step's checks run, so it takes the same weighted path as a user. Being part of the analysis, it comes with every canary, whoever started it (Argo CD or `deploy.sh`). A prod with real users turns it off (`canary.analysis.syntheticTraffic.enabled: false`); then the `traffic` metric is the guard against a quiet hour. (Until chart 0.10.0, `deploy.sh` started this traffic itself, which a canary started by Argo CD would not have had.)
+
+**`deploy.sh` follows the Rollout**, so its exit code still answers "did the release work?":
+
+1. `helm upgrade --wait=legacy`. Helm 4's default watcher doesn't understand a Rollout's status; the legacy one still waits for the migration hook and the Services.
+2. Poll the Rollout every 5 s, printing the step and the canary's weight.
+3. **Healthy** on the new pod hash: done, exit 0.
+4. **Aborted** (an analysis failed, or a canary pod wasn't ready within `progressDeadlineSeconds`, 180 s, with `progressDeadlineAbort`), or out of time (`CANARY_TIMEOUT`, 15 min; `deploy.sh` then aborts it itself): print the failed metrics, `helm rollback` so that Helm's history and the Rollout's spec say what actually runs, exit 1.
+
+**Rollbacks skip the steps.** `rollbackWindow: 3` lets the Rollout go back to any of its last three revisions at once, without steps or analysis: those pods already served all traffic, and an incident is the moment not to wait 7 minutes. A first install also goes straight to 100%: there is no stable version to compare against or fall back to.
+
+**Moving from the Deployment.** On the first canary-enabled upgrade, Helm would delete the Deployment as soon as the Rollout exists, before the Rollout's pods are ready. `deploy.sh` annotates the Deployment `helm.sh/resource-policy: keep` first, so it keeps serving, and deletes it once the Rollout is Healthy. Both sets of pods carry the selector labels, so the `shortly` Service, the PDB and the HPA (now pointed at the Rollout) cover the overlap.
+
+**Measured in CI** (e2e steps 4, 5, 5b, with the short analyses): a never-ready canary got no traffic at all, 0 failed requests through the Service and the Gateway; a healthy canary was promoted 10% → 50% → 100% in 106–134 s; a canary failing half its requests was aborted at 10% after 74–86 s, and meanwhile 1.1–3.0% of redirects through the Gateway failed (6 of 539, 19 of 624), against the 5% a 10% canary failing half its requests would cause for as long as it ran. A `helm rollback` inside the window was Healthy within a second.
+
+**What the canary doesn't catch:** a problem that only shows at full load, with a long delay (a slow leak), or in a route the synthetic mix doesn't use (it sends creates and redirects only). A migration is not canaried at all: it runs once, before any canary pod, so it must stay backward compatible (expand/contract) whatever the canary decides.
+
+| Choice | Why |
+| --- | --- |
+| Argo Rollouts | The common Kubernetes-native choice, with analysis built in. Flagger is the main alternative: similar, but drives a Deployment it copies, which makes "what is running" harder to read |
+| Rollout replaces the Deployment (inline template) | `workloadRef` (a Rollout pointing at a Deployment scaled to 0) keeps the Deployment as a template only. It leaves an object that looks like the workload and isn't, so the template is shared through a chart helper instead |
+| Synthetic traffic as an analysis metric | Without users, analysis can only fail or pass on nothing. As part of the analysis it runs exactly while a canary is judged, whoever started it. A mesh's mirrored traffic or a separate synthetic monitor would do the same job in a real cluster |
+| Absolute thresholds, three metrics | A baseline comparison (stable vs canary, Kayenta-style) adapts to load but needs both sides to have enough traffic; at 20 req/s the canary sees 2 per second |
+
+### GitOps with Argo CD
+
+Since chart 0.10.0, nobody runs `helm upgrade` against staging or prod. **Argo CD** (chart 10.11.1, Argo CD v3.5.6, installed by `scripts/cluster.sh`) deploys both from git, and git is the only way in:
+
+```mermaid
+flowchart LR
+  R[release.yml<br/>tag vX.Y.Z → digest] --> P1[scripts/promote.sh staging<br/>verify provenance, write digest]
+  P1 --> PR1[PR: deploy/envs/staging.yaml] --> CI1{CI: provenance,<br/>chart, e2e}
+  CI1 -->|merge| M1[main] -->|≤ 60 s| A1[Argo CD syncs staging]
+  A1 --> P2[scripts/promote.sh prod<br/>+ staging ran it?] --> PR2[PR: deploy/envs/prod.yaml] --> CI2{CI: same,<br/>+ staging first}
+  CI2 -->|merge| M2[main] -->|≤ 60 s| A2[Argo CD syncs prod] --> C[Rollout: 10% → 50% → 100%]
+```
+
+**What is in git.** `deploy/argocd/` holds an AppProject (one repository, the two namespaces, nothing cluster-scoped) and an Application per environment. Each renders `deploy/helm/shortly` from `main` with `deploy/envs/<env>.yaml`, which now names the release digest itself (`image.digest`). Argo CD polls `main` every 60 s. Sync is automatic, with `prune` (a resource removed from the chart is removed from the cluster) and `selfHeal` (a hand edit is put back within seconds).
+
+**A merged PR is a deploy, a revert is a rollback.** `scripts/promote.sh <env> <digest>` checks the digest's provenance (the same `verify-image.sh` as `deploy.sh`) and writes it, with its version, into the env file; `--pr` also opens the PR. Merging is the approval. Reverting the PR is the rollback; for prod inside the Rollout's `rollbackWindow` that takes seconds, without canary steps.
+
+**The guards `deploy.sh` used to apply now run in CI**, on the files, because whatever is merged gets deployed:
+
+| Guard | Where | Why |
+| --- | --- | --- |
+| Every digest in `deploy/envs/` has release provenance | `tests/test_gitops.py` (integration, real registry), and `promote.sh` before writing | A hand-edited digest must not reach the cluster unchecked. The cluster's admission policy (Kyverno) still refuses it too |
+| Prod names only a digest staging has run on `main` | `tests/test_gitops.py`, against the merge commit's first parent; `promote.sh` | "Staging first" was a habit with `deploy.sh`; now it's a check. A PR that sets both at once is refused |
+| Env files hold `image.digest` only, never a tag | `tests/test_gitops.py` | A tag can move; git must say exactly what runs |
+| The two Applications differ only by environment | `tests/test_gitops.py` | Staging must rehearse what prod does |
+
+**Argo CD and Argo Rollouts share prod.** Argo CD applies the Rollout; Argo Rollouts then moves the HTTPRoute's weights during a canary. It also adds the pod-template-hash to the stable and canary Services' selectors. Without help, Argo CD would see those as OutOfSync and self-heal would undo the canary (100/0 back on the route mid-canary). The Applications ignore exactly those fields (`ignoreDifferences` on the route's weights and on the Services' hash selector and ownership annotation, with `RespectIgnoreDifferences`). They also compare with a server-side diff (`ServerSideDiff=true`): the API server fills defaults into the route's lists, which a client-side diff of a CRD reports as drift forever. Both were found by e2e step 12, not in prod. The canary's synthetic traffic moved from `deploy.sh` into the analysis itself (a k6 Job metric), so a canary started by Argo CD is judged on the same traffic as one started by hand.
+
+**What a failed canary looks like now.** The Rollout aborts and all traffic stays on the old version, as before. But git still names the new digest, so the Application shows Degraded until someone reverts the PR. That is on purpose: the cluster never quietly disagrees with git for long, and the revert is the record of the decision.
+
+**`deploy.sh` stays for two jobs:** CI's e2e, which deploys a local build to a cluster without Applications, and break glass. It refuses an environment whose Application exists (`ARGOCD_OVERRIDE=1` overrides, after auto-sync is turned off: RUNBOOK).
+
+**Proven on every PR** (e2e step 12; first green run: takeover 13 s, a hand edit reverted in 2 s, the canary 215 s): Argo CD takes prod over from the PR's own commit (the local build instead of the digest), reverts a hand edit of the PodDisruptionBudget, then runs a full canary started by a change to the Application, with analysis and synthetic traffic, while staying in sync.
+
+| Choice | Why |
+| --- | --- |
+| Argo CD | The common Kubernetes-native GitOps controller, with Rollout health built in and the same project as Argo Rollouts. Flux is the main alternative: lighter, no UI; either fits |
+| Pull (Argo CD polls git), not push (CI runs `helm upgrade`) | The cluster needs no credentials in CI, and drift is corrected, not just avoided. Push would need a kubeconfig in GitHub, which a laptop cluster can't offer anyway |
+| Same repository, `deploy/envs/` | The chart and its values are reviewed together. A separate config repository separates permissions and history, which a team of one doesn't need yet |
+| Auto-sync for both, promotion by PR | One approval per environment, in git, with CI in front of it. Manual sync would add a second approval outside git |
+| App only; the platform stays in `cluster.sh` | Smaller first step. Moving Envoy Gateway, Argo Rollouts, monitoring, Kyverno and backups under Argo CD (app-of-apps) is the follow-up |
+
 ## Reliability and failure modes
 
 Each failure below degrades predictably and is visible in at least one signal; [RUNBOOK.md](RUNBOOK.md) has the response for each.
@@ -826,8 +869,13 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | Postgres unreachable | `/readyz` 503 → pods leave Service endpoints; `/healthz` stays 200, no restarts; recovers automatically via `pool_pre_ping` | `http_requests_total{route="/readyz",status="503"}`, ready replicas < desired, `database ping failed` warnings |
 | Bad release (crashes, fails readiness) | Staging: the rollout stalls, old pods keep serving (`maxUnavailable: 0`), Helm rolls back after 3 min. Prod: the canary pod never gets traffic; aborted after `progressDeadlineSeconds` (180 s), then rolled back | `deploy.sh` exits non-zero; `helm history` shows a rollback revision |
 | Bad release that is Ready (errors, slow) | Prod: analysis fails at the 10% step, the canary is aborted and rolled back; users saw at most about 10% of requests on it for about a minute. Staging has no canary: catch it there with the checks after a deploy | `deploy.sh` prints the failed metric (`error-ratio`, `redirect-p99`) and exits 1; `kubectl -n prod get analysisrun` |
-| Too little traffic during a canary | Analysis fails on `traffic` and the release is aborted, even if it is fine | `deploy.sh`: `traffic: Failed`; check the `canary-traffic` Job, or real traffic if `CANARY_TRAFFIC=0` |
+| Too little traffic during a canary | Analysis fails on `traffic` and the release is aborted, even if it is fine | `traffic: Failed` in the AnalysisRun; check its `synthetic-traffic` Job, or real traffic if synthetic traffic is off |
+| Argo CD down (controller or repo server) | Nothing new deploys and drift isn't corrected; running pods, canaries in progress and rollbacks inside the Rollout are unaffected | A merged promotion doesn't reach the cluster; `kubectl -n argocd get pods`, `kubectl -n argocd get applications` |
+| GitHub unreachable from the cluster | Same as Argo CD down: the last synced state keeps running | Application condition `ComparisonError` |
+| A promoted release fails its canary | Traffic stays on the old version; the Application is Degraded until the promotion PR is reverted | `kubectl -n argocd get application shortly-prod` Degraded; Rollout aborted |
+| A bad change merged to the chart or an env file | Argo CD applies it within a minute to that environment; a render error leaves the old state running | Application `ComparisonError` or Degraded; revert the PR |
 | Prometheus down during a canary | Every analysis query errors; after 4 errors in a row the analysis errors and the release is aborted. Running versions are unaffected | `deploy.sh`: metrics in `Error`; `kubectl -n monitoring get pods` |
+| No room for a canary pod (nodes full, the HPA at its ceiling) | The canary pod stays Pending; after `progressDeadlineSeconds` (180 s) the release is aborted, the old pods keep serving | Rollout aborted: `ReplicaSet … has timed out progressing`; `FailedScheduling … Insufficient cpu` events. A canary needs headroom for one extra pod (found by e2e step 12, after the HPA drill had filled the CI node) |
 | Argo Rollouts controller down | Running pods keep serving and the HPA still scales the Rollout. Nothing new rolls out: `deploy.sh` waits until `CANARY_TIMEOUT` and fails | `kubectl -n argo-rollouts get pods`; Rollout `observedGeneration` behind |
 | Migration fails | Pre-upgrade Job fails; release aborted before any pod changes | Failed `shortly-migrate-<rev>` Job kept for `kubectl logs` |
 | Pod crash / OOM | Restarted by kubelet; prod keeps 1 of 2 serving | Restart count, `OOMKilled` reason |
@@ -988,6 +1036,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Admission engine | Kyverno `ImageValidatingPolicy` (CEL) | Sigstore policy-controller; Kyverno `ClusterPolicy` `verifyImages` | Kyverno also runs the image allowlist, and its CLI tests the same engine offline. `ClusterPolicy` is deprecated as of Kyverno 1.19 |
 | Deploy target (now) | Local kind, staging + prod namespaces | Cloud cluster; PaaS | Free, realistic, chart portable to EKS/GKE |
 | Rollback | Helm `--rollback-on-failure` + rehearsed `helm rollback`; in prod, canary abort then `helm rollback` | Manual only | Tested on every PR |
+| Deploys | GitOps: Argo CD syncs each environment from `deploy/envs/` on main; promotion is a PR | `deploy.sh` run by a person; CI running `helm upgrade` (push) | Git is the record of what runs and who approved it; drift is corrected, not just avoided; no cluster credentials in CI. See GitOps with Argo CD |
 | Progressive delivery | Argo Rollouts canary in prod, 10% → 50% → 100%, Prometheus analysis on the canary's pods | Blue-green; Flagger; rolling update only | A canary limits the damage of a Ready-but-broken release to its share of traffic; blue-green switches everyone at once, so it only helps after the fact. See Canary releases |
 | Alerting | Multi-window burn-rate alerts on SLOs, plus a few cause-based alerts | Threshold alerts on error rate or latency | Pages scale with user impact: a 1-minute blip doesn't page, a slow leak still opens a ticket |
 | SLO rules | A small generator from `slos.yaml`, output committed | Hand-written rules; Sloth or Pyrra | 4 SLOs × 8 windows is too repetitive to write by hand. The generator is about 170 lines that are easy to review, and needs no extra binary or CRD |
@@ -1039,6 +1088,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - The SLIs are measured in the app. Requests that never reach it (ingress or network failures) are invisible except through `ShortlyDown` and `ShortlyNotReady`; a load-balancer SLI would be more complete. Now that a Gateway sits in front, Envoy's own request metrics could supply that SLI; they aren't scraped yet.
 - At very low traffic one error is a large ratio, so burn-rate alerts can be noisy; a minimum-request-rate guard is not implemented.
 - Local kind only; no production cluster.
+- GitOps: Argo CD polls GitHub every 60 s (no webhook: a laptop isn't reachable from GitHub), so a merge takes up to a minute to land. One replica of each Argo CD component, admin login with a generated password, no SSO: fine for a laptop, not for a team.
+- Argo CD manages the app only. The platform (Envoy Gateway, Argo Rollouts, monitoring, Kyverno, backups, Argo CD itself) is still installed imperatively by `scripts/cluster.sh`.
 - Canary analysis judges on synthetic traffic in kind (20 req/s, two routes). Thresholds are absolute and coarse; a slow leak or a rare route can pass. A canary also can't protect against a migration: it runs before the first canary pod.
 - Argo's Gateway API plugin is alpha (v0.17). Two writers share objects: Helm applies the stable/canary Services and the HTTPRoute, and Argo Rollouts edits their selectors and weights. Helm 4's server-side apply reports that as a conflict, so prod upgrades and rollbacks use `--force-conflicts` (found by the first CI run of this change: the upgrade failed, and so did its automatic rollback). Forcing resets the weights to 100/0, which is safe because an upgrade happens only when no canary runs (`deploy.sh` waits for each one to finish).
 - Backups are hourly dumps: up to an hour of writes can be lost (no point-in-time recovery), and a restore of a large database is slow (every index is rebuilt).
@@ -1047,9 +1098,10 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 
 **Next steps, in rough priority order**
 
-1. Canary analysis against the stable version as a baseline, and on Envoy's request metrics (what users see at the Gateway) as well as the app's.
-2. URL reputation check on targets (Google Safe Browsing or similar).
-3. Real cloud environment: Terraform + EKS/GKE, managed Postgres with point-in-time recovery and cross-region backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
+1. The platform under Argo CD too (app-of-apps), and alerts on Argo CD itself (an Application OutOfSync or Degraded for too long).
+2. Canary analysis against the stable version as a baseline, and on Envoy's request metrics (what users see at the Gateway) as well as the app's.
+3. URL reputation check on targets (Google Safe Browsing or similar).
+4. Real cloud environment: Terraform + EKS/GKE, managed Postgres with point-in-time recovery and cross-region backups, GitHub OIDC deploys, and alert receivers wired to a real pager.
 
 **Open questions**
 
