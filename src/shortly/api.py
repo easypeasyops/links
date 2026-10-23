@@ -4,6 +4,7 @@ No business logic lives here, so the service stays testable without HTTP.
 """
 
 import logging
+import random
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -51,8 +52,10 @@ def create_app(
     tracer_provider: TracerProvider | None = None,
     rate_limiter: RateLimiter | None = None,
     max_concurrent_requests: int = 0,
+    fault_error_ratio: float = 0.0,
     serve_metrics: bool = True,
     on_shutdown: Callable[[], None] = lambda: None,
+    rand: Callable[[], float] = random.random,
 ) -> FastAPI:
     """Build the app around an already-wired ``Shortener``.
 
@@ -61,8 +64,27 @@ def create_app(
     metrics registry, and an in-memory span exporter. ``rate_limiter=None``: no limit.
     ``serve_metrics=False``: no /metrics here (production serves it on its own port).
     ``max_concurrent_requests``: shed requests beyond this many in flight (0: no limit).
+    ``fault_error_ratio``: drills only, see ``inject_fault`` below (0: off).
     """
     metrics = metrics or Metrics()
+    if fault_error_ratio > 0:
+        log.warning(
+            "FAULT INJECTION IS ON: %.0f%% of creates and redirects will fail with 500",
+            fault_error_ratio * 100,
+            extra={"fault_error_ratio": fault_error_ratio},
+        )
+
+    def inject_fault() -> None:
+        """Fail this request with a 500, for a ``fault_error_ratio`` share of requests.
+
+        For drills only: it makes a release that is *ready but broken*, the failure a canary
+        exists to catch (probes pass, so Kubernetes and Helm see a healthy rollout; users
+        see errors). Called inside the handlers, so a failed request keeps its route
+        template and counts against the SLO like any real 500.
+        """
+        if fault_error_ratio > 0 and rand() < fault_error_ratio:
+            metrics.faults_injected.inc()
+            raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "injected fault (drill)")
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -119,6 +141,7 @@ def create_app(
         responses={429: {"description": "Too many links created; see Retry-After"}},
     )
     def create_link(body: CreateLink, request: Request) -> LinkOut:
+        inject_fault()
         # Only creates are limited: they write a row that lives forever and can carry abuse
         # (masking phishing links). Redirects are cheap reads; flooding them is a DoS
         # problem for the edge, not something one pod can fix by counting.
@@ -153,6 +176,7 @@ def create_app(
     # the event loop. (An `async def` here with a sync driver would.)
     @app.get("/{code}")
     def follow(code: str) -> RedirectResponse:
+        inject_fault()
         try:
             target = shortener.resolve(code)
         except LinkNotFoundError as exc:
@@ -260,6 +284,7 @@ def create_app_from_env() -> FastAPI:
         tracer_provider=provider,
         rate_limiter=limiter,
         max_concurrent_requests=settings.max_concurrent_requests,
+        fault_error_ratio=settings.fault_error_ratio,
         serve_metrics=stop_metrics is None,
         on_shutdown=shutdown,
     )

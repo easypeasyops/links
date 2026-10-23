@@ -543,6 +543,18 @@ kubectl -n prod exec postgres-0 -- psql -U shortly shortly -c \
   "select count(*) from links where expires_at < now() - interval '7 days'"
 ```
 
+### Fault injection left on
+
+`ShortlyFaultInjectionOn` (ticket) means `faults_injected_total` has been rising for 15 minutes: requests are failing **on purpose**. Fault injection is for canary drills, which last minutes, so either a drill was abandoned or `config.faultErrorRatio` leaked into a release.
+
+```bash
+kubectl -n prod get deploy,rollout -o yaml 2>/dev/null | grep -A1 SHORTLY_FAULT_ERROR_RATIO   # which release has it
+kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=500 | grep 'FAULT INJECTION IS ON'
+helm -n prod get values shortly | grep -i fault
+```
+
+Fix: redeploy the current release digest **without** the setting (`scripts/deploy.sh prod <digest>`, no `--set config.faultErrorRatio`), or `helm rollback` to the revision before it. Then find out how it got there: it must never be in `deploy/envs/`.
+
 ### Backup job not running
 
 `ShortlyBackupNotRunning` (ticket) means the `postgres-backup` CronJob hasn't succeeded for over 2 hours, or never has. Nothing user-facing breaks, but every hour without a backup is an hour of links that a database loss would take with it.

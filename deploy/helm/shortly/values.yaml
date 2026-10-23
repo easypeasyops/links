@@ -54,6 +54,10 @@ config:
   # of queueing until every request is slow. Sized from the load test (docs/DESIGN.md,
   # Capacity): well above what a pod needs at capacity, well below a queue of seconds.
   maxConcurrentRequests: 16
+  # DRILLS ONLY: this share (0-1) of creates and redirects fails with 500 while probes stay
+  # green, i.e. a release that is ready but broken. The canary drill sets it to prove that
+  # analysis catches such a release. Never set in deploy/envs/. 0 renders no variable at all.
+  faultErrorRatio: 0
   # /metrics is served on this port, not the app port: the Service exposes it to Prometheus
   # only, and the NetworkPolicy below admits nothing else to it.
   metricsPort: 9100

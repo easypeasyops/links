@@ -88,6 +88,19 @@ groups:
           description: For 30 minutes, more than 1 in 10 POST /links requests got 429. Find out whether it is abuse or a limit that is too tight for legitimate clients.
           runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#rate-limiting-429-on-post-links
 
+      # Fault injection is for drills, which last minutes. Still on after 15 minutes means a
+      # drill was abandoned or the setting leaked into a release: users are getting 500s on
+      # purpose. The availability SLO burns too, but this names the cause.
+      - alert: ShortlyFaultInjectionOn
+        expr: sum by (namespace) (rate(faults_injected_total[5m])) > 0
+        for: 15m
+        labels:
+          severity: ticket
+        annotations:
+          summary: Fault injection is failing requests on purpose
+          description: SHORTLY_FAULT_ERROR_RATIO is set in {{ $labels.namespace }} and has been failing requests for 15 minutes. Remove config.faultErrorRatio and redeploy.
+          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#fault-injection-left-on
+
       # Needs kube-state-metrics. A cron job that stops running fails silently: nothing
       # breaks for weeks, then the table is huge. Fires when the last success is over
       # 3 hours old (3 missed hourly runs), or the CronJob has existed for 3 hours
