@@ -42,7 +42,9 @@ def stubs(tmp_path: Path) -> tuple[Path, Path]:
     bin_dir.mkdir()
     scripts = {
         "kubectl": 'if [ "$1 $2" = "config current-context" ]; then echo "$FAKE_CONTEXT"; fi',
-        "helm": "",
+        # `helm template --show-only templates/rollout.yaml` fails: no Rollout rendered, so
+        # deploy.sh takes the plain Deployment path (the canary path is tested in kind, e2e).
+        "helm": 'if [ "$1" = template ]; then exit 1; fi',
         "kind": "",
         "docker": "exit 1",  # `docker image inspect`: the image isn't local
         "gh": 'if [ -n "$FAKE_GH_OUTPUT" ]; then echo "$FAKE_GH_OUTPUT"; '

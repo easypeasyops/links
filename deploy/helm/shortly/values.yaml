@@ -100,6 +100,31 @@ gateway:
   namespace: gateway
   hostnames: []
 
+# Canary releases with Argo Rollouts (docs/DESIGN.md, Canary releases). Needs the Argo
+# Rollouts controller with its Gateway API plugin (scripts/cluster.sh) and gateway.enabled.
+# On: a Rollout replaces the Deployment; a new release first gets each `weights` share of
+# the Gateway's traffic in turn, and moves on only if analysis passes; else it is aborted
+# and all traffic stays on the old version. A first install, or a rollback to one of the
+# last `rollbackWindow` revisions, skips the steps.
+canary:
+  enabled: false
+  weights: [10, 50] # % of traffic to the new version per step; 100 follows the last
+  # A pod that isn't ready this long after its step starts aborts the release.
+  progressDeadlineSeconds: 180
+  rollbackWindow: 3
+  # Rendered only where Prometheus scrapes the app (monitoring.enabled and the Prometheus
+  # Operator CRDs): no metrics, no analysis. Without it each step is a plain `pause`.
+  analysis:
+    prometheusUrl: http://kps-prometheus.monitoring.svc:9090
+    initialDelay: 60s # let Prometheus discover and scrape the new pods twice first
+    interval: 30s
+    count: 4 # measurements per step, so a step lasts initialDelay + count x interval
+    # Judged on the CANARY's pods only (label rollouts_pod_template_hash), over [1m].
+    minRequestRate: 0.5 # req/s: below this there's too little traffic to judge: fail
+    maxErrorRatio: 0.01 # 5xx share of all non-probe requests; one bad measurement aborts
+    maxRedirectP99Seconds: 0.25 # coarse: small samples make p99 noisy; 2 bad ones abort
+  pauseWithoutAnalysis: 60s
+
 resources:
   requests:
     cpu: 500m # measured ~0.5 cores at 250 req/s; also the HPA's 100%

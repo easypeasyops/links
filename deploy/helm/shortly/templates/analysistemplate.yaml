@@ -1,0 +1,59 @@
+{{- if include "shortly.canaryAnalysis" . }}
+{{- $a := .Values.canary.analysis }}
+{{- /* Argo's own placeholders, kept away from Helm's template engine. */}}
+{{- $hash := "{{args.canary-hash}}" }}
+{{- $sel := printf "namespace=%q, rollouts_pod_template_hash=%q" .Release.Namespace $hash }}
+# What a canary step checks, on the canary's pods only. Prometheus scrapes each pod with its
+# rollouts-pod-template-hash label (the ServiceMonitor's podTargetLabels), so the canary's
+# series are told apart from the stable pods' without any new metric in the app.
+# Absolute thresholds, not "no worse than stable": simple to reason about, and the stable
+# version meets them by a wide margin (docs/DESIGN.md, Capacity).
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: {{ include "shortly.fullname" . }}-canary
+  labels:
+    {{- include "shortly.labels" . | nindent 4 }}
+spec:
+  args:
+    - name: canary-hash
+  metrics:
+    # Too little traffic proves nothing: fail rather than pass a canary nobody used.
+    # (`or vector(0)`: no series at all is 0 req/s, a clear failure, not a query error.)
+    - name: traffic
+      initialDelay: {{ $a.initialDelay }}
+      interval: {{ $a.interval }}
+      count: {{ $a.count }}
+      failureLimit: 0
+      successCondition: result[0] >= {{ $a.minRequestRate }}
+      provider:
+        prometheus:
+          address: {{ $a.prometheusUrl }}
+          query: |
+            sum(rate(http_requests_total{ {{- $sel }}, route!~"/healthz|/readyz"}[1m])) or vector(0)
+    # Server errors, including 503 from load shedding: what the availability SLOs count.
+    - name: error-ratio
+      initialDelay: {{ $a.initialDelay }}
+      interval: {{ $a.interval }}
+      count: {{ $a.count }}
+      failureLimit: 0
+      successCondition: result[0] <= {{ $a.maxErrorRatio }}
+      provider:
+        prometheus:
+          address: {{ $a.prometheusUrl }}
+          query: |
+            (sum(rate(http_requests_total{ {{- $sel }}, route!~"/healthz|/readyz", status=~"5.."}[1m])) or vector(0))
+            /
+            sum(rate(http_requests_total{ {{- $sel }}, route!~"/healthz|/readyz"}[1m]))
+    - name: redirect-p99
+      initialDelay: {{ $a.initialDelay }}
+      interval: {{ $a.interval }}
+      count: {{ $a.count }}
+      failureLimit: 1
+      successCondition: result[0] <= {{ $a.maxRedirectP99Seconds }}
+      provider:
+        prometheus:
+          address: {{ $a.prometheusUrl }}
+          query: |
+            histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{ {{- $sel }}, method="GET", route="/{code}"}[1m])))
+{{- end }}

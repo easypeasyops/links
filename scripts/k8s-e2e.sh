@@ -13,8 +13,10 @@
 #   3. the SAME image promotes to prod: autoscaled (HPA, min 2) + a PodDisruptionBudget,
 #      and the per-client rate limit holds exactly across its replicas
 #  3a. users reach each environment through the Gateway, by hostname, and only their own
-#   4. a broken release is rolled back automatically, with ZERO failed requests meanwhile
-#   5. a manual `helm rollback` restores a previous revision
+#   4. a broken release (never ready) is rolled back automatically, ZERO failed requests
+#   5. prod's canary: a healthy release goes 10% → 50% → 100% on passing analysis; a
+#      manual `helm rollback` restores the previous one at once (rollbackWindow)
+#  5b. a release that is ready but failing half its requests is aborted by analysis at 10%
 #   6. under load, the HPA adds ready pods (scripts/hpa-drill.sh; skip with HPA_DRILL=0)
 #   7. monitoring works end to end: scrape, rules, dashboard queries (scripts/monitoring-check.sh),
 #      and a real alert routed by Alertmanager (scripts/alert-drill.sh, run in the background
@@ -51,6 +53,7 @@ on_exit() {
       kubectl -n "$ns" logs -l app.kubernetes.io/name=shortly --all-containers --tail=30 || true
       helm -n "$ns" history shortly || true
       kubectl -n "$ns" get httproute -o wide || true
+      kubectl -n "$ns" get rollout,analysisrun -o wide 2>/dev/null || true
     done
     kubectl -n gateway get gateway shortly -o wide || true
   fi
@@ -76,7 +79,11 @@ forward() {
 in_cluster() { kubectl -n "$1" exec postgres-0 -- wget -q -O /dev/null -T 2 "http://shortly$2" 2>/dev/null; }
 
 revision() { helm -n "$1" status shortly -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'; }
-deployed_image() { kubectl -n "$1" get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}'; }
+# prod runs an Argo Rollout (canary.enabled), staging a Deployment: same pod template.
+workload() { if kubectl -n "$1" get rollout shortly >/dev/null 2>&1; then echo rollout/shortly; else echo deploy/shortly; fi; }
+deployed_image() { kubectl -n "$1" get "$(workload "$1")" -o jsonpath='{.spec.template.spec.containers[0].image}'; }
+pod_env() { kubectl -n "$1" get "$(workload "$1")" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$2\")].value}"; }
+ro() { kubectl -n prod get rollout shortly -o jsonpath="$1"; }
 
 # ---------------------------------------------------------------- 0. digest-mode render
 # Releases deploy by digest, but this test deploys a local image by tag. Render the digest
@@ -113,12 +120,14 @@ pass "staging: migrated, ready, create → 307, metrics on port 9100 only"
 
 # ---------------------------------------------------------------- 3. promote to prod
 "$ROOT/scripts/deploy.sh" prod "$IMAGE" >/dev/null
-ready=$(kubectl -n prod get deploy shortly -o jsonpath='{.status.readyReplicas}')
+[[ "$(workload prod)" == rollout/shortly ]] || fail "prod is not an Argo Rollout (canary.enabled?)"
+ready=$(kubectl -n prod get rollout shortly -o jsonpath='{.status.readyReplicas}')
 [[ "$ready" == 2 ]] || fail "prod has $ready ready replicas, want 2"
 kubectl -n prod get pdb shortly >/dev/null || fail "prod PodDisruptionBudget missing"
 kubectl -n prod get hpa shortly >/dev/null || fail "prod HorizontalPodAutoscaler missing"
 [[ "$(deployed_image prod)" == "$(deployed_image staging)" ]] || fail "prod runs a different image than staging"
-pass "promoted the same image to prod: 2/2 ready, PDB and HPA present"
+[[ "$(kubectl -n prod get hpa shortly -o jsonpath='{.spec.scaleTargetRef.kind}')" == Rollout ]] || fail "prod HPA doesn't scale the Rollout"
+pass "promoted the same image to prod: a Rollout, 2/2 ready, PDB and HPA (on the Rollout) present"
 
 in_cluster prod /readyz || fail "prod not reachable through its Service"
 
@@ -146,7 +155,7 @@ pass "gateway: sho.rt.localhost → prod, staging.sho.rt.localhost → staging (
 
 # ---------------------------------------------------------------- 7a. alert drill, in the background
 # It scales staging to zero and waits about 90 s for ShortlyNoAvailablePods to reach
-# Alertmanager. Steps 3b-6 only touch prod, so it runs alongside them instead of after them.
+# Alertmanager. Steps 3b-6 (canary drills included) only touch prod, so it runs alongside them instead of after them.
 # It starts after 3a, which needs staging up (the gateway checks reach both environments).
 # Collected in step 7, before anything uses staging again.
 monitoring=0
@@ -186,31 +195,33 @@ max=$(python3 -c "import math,sys; print($burst + math.ceil(($(date +%s.%N) - $t
 ((created <= max)) || fail "rate limit: $created creates succeeded, at most $max allowed (burst + refill)"
 ((refused > 0)) || fail "rate limit: $((burst + 5)) creates from one client, none refused"
 [[ "$(create_as "198.51.100.$((RANDOM % 250 + 1))")" == 201 ]] || fail "rate limit: another client was refused too"
-pass "rate limit: one client got $created creates (burst $burst, at most $max with refill), then 429s, across $(kubectl -n prod get deploy shortly -o jsonpath='{.status.readyReplicas}') pods; other clients unaffected"
+pass "rate limit: one client got $created creates (burst $burst, at most $max with refill), then 429s, across $(kubectl -n prod get rollout shortly -o jsonpath='{.status.readyReplicas}') pods; other clients unaffected"
 
 good_rev=$(revision prod)
 good_image=$(deployed_image prod)
 
 # ---------------------------------------------------------------- 4. automatic rollback
 # A bad config value makes the new pods fail at boot (Settings validation). They never
-# become ready, so the rollout can't progress; maxUnavailable=0 keeps the old pods serving;
-# helm times out and rolls back. Meanwhile we hit prod's Service and count failures, from
-# before the upgrade until the rollback is done.
-# 30 s is plenty for the timeout: the new pods crash within seconds of starting, and the
-# rollout cannot get unstuck. A longer wait proves nothing more.
+# become ready, so the canary never gets traffic and can't progress; the stable pods keep
+# serving; deploy.sh aborts the Rollout when CANARY_TIMEOUT runs out and rolls helm back.
+# Meanwhile we hit prod through its Service AND the Gateway (where the canary's weight
+# lives), and count failures, from before the upgrade until the rollback is done.
+# 45 s is plenty: the new pod crashes within seconds and cannot get unstuck.
+in_gateway() { [[ "$(gw sho.rt.localhost "$1")" == "200 " ]]; }
 errors_file=$(mktemp) stop_file=$(mktemp -u)
 (
   errors=0
-  end=$((SECONDS + 180)) # a backstop only
+  end=$((SECONDS + 240)) # a backstop only
   while [[ ! -e "$stop_file" ]] && ((SECONDS < end)); do
     in_cluster prod /readyz || errors=$((errors + 1))
+    in_gateway /readyz || errors=$((errors + 1))
     sleep 0.2
   done
   echo "$errors" >"$errors_file"
 ) &
 load_pid=$!
 
-if DEPLOY_TIMEOUT=30s "$ROOT/scripts/deploy.sh" prod "$IMAGE" \
+if CANARY_TIMEOUT=45s CANARY_TRAFFIC=0 "$ROOT/scripts/deploy.sh" prod "$IMAGE" \
   --set config.logLevel=NOT_A_LEVEL --set migrations.enabled=false >/dev/null 2>&1; then
   fail "broken release was accepted"
 fi
@@ -219,22 +230,107 @@ wait "$load_pid"
 errors=$(cat "$errors_file")
 
 [[ "$(deployed_image prod)" == "$good_image" ]] || fail "prod not back on the good image"
+[[ "$(pod_env prod SHORTLY_LOG_LEVEL)" == INFO ]] || fail "prod's Rollout not back on the good config"
+[[ "$(ro '{.status.phase}')" == Healthy ]] || fail "Rollout is $(ro '{.status.phase}') after the rollback"
 status=$(helm -n prod status shortly -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
 [[ "$status" == deployed ]] || fail "release status is $status"
 [[ "$errors" == 0 ]] || fail "$errors failed requests during the bad rollout"
 pass "broken release auto-rolled back (now revision $(revision prod)); 0 failed requests during it"
 
-# ---------------------------------------------------------------- 5. manual rollback
-"$ROOT/scripts/deploy.sh" prod "$IMAGE" --set config.logLevel=DEBUG >/dev/null
-[[ "$(kubectl -n prod get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SHORTLY_LOG_LEVEL")].value}')" == DEBUG ]] \
-  || fail "DEBUG release didn't apply"
-helm -n prod rollback shortly "$good_rev" --wait --timeout 2m >/dev/null
-level=$(kubectl -n prod get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].env[?(@.name=="SHORTLY_LOG_LEVEL")].value}')
+# Canary analysis needs Prometheus. Fast settings for CI: each step is judged on 2
+# measurements 15 s apart, after 30 s for Prometheus to scrape the new pod (default 60 s,
+# 4 x 30 s: values.yaml). Without monitoring, steps are short plain pauses.
+if ((monitoring)); then
+  canary_fast=(--set canary.analysis.initialDelay=30s --set canary.analysis.interval=15s --set canary.analysis.count=2)
+else
+  canary_fast=(--set canary.pauseWithoutAnalysis=5s)
+fi
+# Every measurement of every AnalysisRun for one pod hash: "name=Phase ..." per run.
+analysis_runs() {
+  kubectl -n prod get analysisrun -l "rollouts-pod-template-hash=$1" --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{range .items[*]}{.status.phase}{" "}{end}'
+}
+
+# ---------------------------------------------------------------- 5. good canary, manual rollback
+# A healthy new version (only the log level differs) goes 10% → 50% → 100%, passing analysis
+# at each step, with deploy.sh's synthetic traffic through the Gateway.
+start=$SECONDS
+"$ROOT/scripts/deploy.sh" prod "$IMAGE" --set config.logLevel=DEBUG "${canary_fast[@]}" >/dev/null \
+  || fail "a healthy canary was not promoted"
+took=$((SECONDS - start))
+[[ "$(pod_env prod SHORTLY_LOG_LEVEL)" == DEBUG ]] || fail "DEBUG release didn't apply"
+hash=$(ro '{.status.stableRS}')
+weight=$(ro '{.status.canary.weights.stable.weight}')
+[[ "$weight" == 100 || -z "$weight" ]] || fail "stable weight is $weight after promotion, want 100"
+runs="no analysis (monitoring off)"
+if ((monitoring)); then
+  runs=$(analysis_runs "$hash")
+  [[ "$runs" == "Successful Successful " ]] || fail "analysis runs for the promoted canary: '$runs', want two Successful"
+  runs="analysis Successful at 10% and 50%"
+fi
+pass "healthy canary promoted 10% → 50% → 100% in ${took}s ($runs)"
+
+# Back to the good revision with helm: inside rollbackWindow, so no steps, no analysis.
+start=$SECONDS
+helm -n prod rollback shortly "$good_rev" --wait=legacy --timeout 2m >/dev/null
+for _ in $(seq 1 60); do
+  [[ "$(ro '{.status.phase}')" == Healthy && "$(ro '{.status.stableRS}')" == "$(ro '{.status.currentPodHash}')" ]] && break
+  sleep 2
+done
+took=$((SECONDS - start))
+level=$(pod_env prod SHORTLY_LOG_LEVEL)
 [[ "$level" == INFO ]] || fail "rollback didn't restore config (log level $level)"
-# The rollback replaced every pod; wait for the rollout, then check via the Service.
-kubectl -n prod rollout status deploy/shortly --timeout=90s >/dev/null
+[[ "$(ro '{.status.phase}')" == Healthy ]] || fail "Rollout is $(ro '{.status.phase}') after helm rollback"
+((took < 60)) || fail "helm rollback took ${took}s: it should skip the canary steps (rollbackWindow)"
 in_cluster prod /readyz || fail "prod unhealthy after rollback"
-pass "manual helm rollback to revision $good_rev restored the previous release"
+in_gateway /readyz || fail "prod unreachable through the Gateway after rollback"
+pass "manual helm rollback to revision $good_rev restored the previous release in ${took}s (rollbackWindow: no canary steps)"
+
+# ---------------------------------------------------------------- 5b. bad canary is aborted
+# The release that probes can't catch: ready, but half of its creates and redirects fail
+# (config.faultErrorRatio, a drill-only switch). Analysis must see the canary's error ratio
+# and abort at the first step, while users mostly never notice: only the canary's share
+# of traffic (10%) could fail at all. We measure that share through the Gateway.
+if ((monitoring)); then
+  gw_code2=$(kubectl -n prod exec postgres-0 -- wget -q -O - -T 5 --header "Host: sho.rt.localhost" \
+    --header 'content-type: application/json' --header "X-Forwarded-For: 203.0.113.251" \
+    --post-data '{"url":"https://gateway-e2e.invalid/canary"}' "$GW/links" \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])')
+  counts_file=$(mktemp) stop_file=$(mktemp -u)
+  (
+    ok=0 bad=0
+    end=$((SECONDS + 300)) # a backstop only
+    while [[ ! -e "$stop_file" ]] && ((SECONDS < end)); do
+      if [[ "$(gw sho.rt.localhost "/$gw_code2")" == "307 "* ]]; then ok=$((ok + 1)); else bad=$((bad + 1)); fi
+    done
+    echo "$ok $bad" >"$counts_file"
+  ) &
+  load_pid=$!
+  start=$SECONDS
+  if "$ROOT/scripts/deploy.sh" prod "$IMAGE" --set config.faultErrorRatio=0.5 "${canary_fast[@]}" \
+    >/dev/null 2>&1; then
+    fail "a canary failing half its requests was promoted"
+  fi
+  took=$((SECONDS - start))
+  touch "$stop_file"
+  wait "$load_pid"
+  read -r ok bad <"$counts_file"
+  [[ -z "$(pod_env prod SHORTLY_FAULT_ERROR_RATIO)" ]] || fail "prod still has fault injection after the abort"
+  [[ "$(ro '{.status.phase}')" == Healthy ]] || fail "Rollout is $(ro '{.status.phase}') after the abort"
+  bad_hash=$(kubectl -n prod get analysisrun --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{.items[-1:].metadata.labels.rollouts-pod-template-hash}')
+  [[ "$(analysis_runs "$bad_hash")" == "Failed " ]] || fail "bad canary's analysis: '$(analysis_runs "$bad_hash")', want one Failed"
+  failed_metric=$(kubectl -n prod get analysisrun -l "rollouts-pod-template-hash=$bad_hash" \
+    -o jsonpath='{.items[0].status.metricResults[?(@.phase=="Failed")].name}')
+  [[ "$failed_metric" == *error-ratio* ]] || fail "analysis failed on '$failed_metric', want error-ratio"
+  total=$((ok + bad))
+  ((total > 50)) || fail "only $total requests measured through the Gateway"
+  # 10% of traffic x 50% faulty = 5% expected; 15% would mean more than the canary's share.
+  ((bad * 100 <= total * 15)) || fail "$bad of $total redirects failed: more than the canary's 10% share"
+  pass "faulty canary aborted at 10% in ${took}s (analysis: error-ratio Failed), rolled back; users saw $bad of $total redirects fail ($((bad * 1000 / total / 10)).$((bad * 1000 / total % 10))%)"
+else
+  echo "skip bad-canary drill: no Prometheus, so no analysis (MONITORING=0?)"
+fi
 
 # ---------------------------------------------------------------- 6. autoscaling
 if [[ "${HPA_DRILL:-1}" != 0 ]]; then

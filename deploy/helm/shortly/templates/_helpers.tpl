@@ -128,3 +128,9 @@ capabilities:
 {{- define "shortly.minReplicas" -}}
 {{- if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }}
 {{- end -}}
+
+{{/* "true" when a canary is judged by Prometheus analysis: only where Prometheus scrapes
+     the app (the ServiceMonitor's condition). Empty otherwise: no metrics, no analysis. */}}
+{{- define "shortly.canaryAnalysis" -}}
+{{- if and .Values.canary.enabled .Values.monitoring.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}true{{ end -}}
+{{- end -}}

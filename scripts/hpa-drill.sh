@@ -37,7 +37,8 @@ cleanup() {
 trap cleanup EXIT
 
 hpa() { kubectl -n "$NS" get hpa shortly -o jsonpath="$1" 2>/dev/null; }
-ready() { kubectl -n "$NS" get deploy shortly -o jsonpath='{.status.readyReplicas}'; }
+# prod is an Argo Rollout (canary.enabled); other namespaces a Deployment.
+ready() { kubectl -n "$NS" get rollout shortly -o jsonpath='{.status.readyReplicas}' 2>/dev/null || kubectl -n "$NS" get deploy shortly -o jsonpath='{.status.readyReplicas}'; }
 
 kubectl -n "$NS" get hpa shortly >/dev/null 2>&1 || fail "no HPA in $NS (autoscaling.enabled=false?)"
 

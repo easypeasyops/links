@@ -14,6 +14,8 @@ const RATE = Number(__ENV.RATE || 100); // total requests per second
 const DURATION = __ENV.DURATION || "30s";
 const SEED = Number(__ENV.SEED_LINKS || 500);
 const CREATE_SHARE = Number(__ENV.CREATE_SHARE || 0.1);
+// Through a Gateway, the Host header picks the environment (scripts/deploy.sh, canary).
+const HOST = __ENV.HOST ? { Host: __ENV.HOST } : {};
 
 const createRate = Math.max(1, Math.round(RATE * CREATE_SHARE));
 const redirectRate = Math.max(1, RATE - createRate);
@@ -66,7 +68,7 @@ export const options = {
 // load test, a single real client, after its burst.
 const fakeClient = () =>
   `198.${18 + Math.floor(Math.random() * 2)}.${Math.floor(Math.random() * 256)}.${1 + Math.floor(Math.random() * 254)}`;
-const createHeaders = () => ({ "content-type": "application/json", "x-forwarded-for": fakeClient() });
+const createHeaders = () => ({ "content-type": "application/json", "x-forwarded-for": fakeClient(), ...HOST });
 
 // 307 and 201 are successes; everything else counts toward http_req_failed.
 http.setResponseCallback(http.expectedStatuses(201, 307));
@@ -84,7 +86,7 @@ export function setup() {
 
 export function redirect(data) {
   const code = data.codes[Math.floor(Math.random() * data.codes.length)];
-  const res = http.get(`${BASE}/${code}`, { redirects: 0, tags: { name: "GET /{code}" } });
+  const res = http.get(`${BASE}/${code}`, { redirects: 0, headers: HOST, tags: { name: "GET /{code}" } });
   check(res, { "307": (r) => r.status === 307 });
 }
 
