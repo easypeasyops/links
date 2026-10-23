@@ -606,7 +606,7 @@ This is the expensive rehearsal. `scripts/k8s-e2e.sh` runs the same steps CI and
 | 4. Broken release auto-rollback | 0 failed requests during a bad rollout | `maxUnavailable: 0` + Helm `--rollback-on-failure` must be rehearsed, not assumed |
 | 5. Manual `helm rollback` | Operators can undo a bad-but-ready release | Auto-rollback only covers "never became ready" |
 | 6. HPA drill | Under load, ready replicas increase | Proved that sync `/healthz` under overload caused restart storms; keeps that from regressing |
-| 7. Monitoring check | Scrape → rules → dashboard → Alertmanager route (the alert drill runs in the background during steps 3–6) | Metrics without a firing path are decoration |
+| 7. Monitoring check | Scrape → rules → dashboard → Alertmanager route (the alert drill runs in the background during steps 3b–6) | Metrics without a firing path are decoration |
 | 8. Admission check | API server refuses unattested shortly images | `deploy.sh` alone can be bypassed with raw `kubectl` |
 | 9. NetworkPolicy refusals | Metrics port and Postgres reject strangers; controls still succeed | A CNI that ignores NetworkPolicy accepts the objects silently; only a refusal test catches that |
 | 10. Expired-link cleanup | The CronJob's Job deletes exactly the links past their grace period, and the concurrently built index is valid | Deletes on a live table are where data loss hides; a wrong cutoff or a failed index build must fail CI, not prod |

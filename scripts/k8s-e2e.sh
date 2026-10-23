@@ -18,7 +18,7 @@
 #   6. under load, the HPA adds ready pods (scripts/hpa-drill.sh; skip with HPA_DRILL=0)
 #   7. monitoring works end to end: scrape, rules, dashboard queries (scripts/monitoring-check.sh),
 #      and a real alert routed by Alertmanager (scripts/alert-drill.sh, run in the background
-#      during steps 3-6; both skipped when the stack isn't installed)
+#      during steps 3b-6; both skipped when the stack isn't installed)
 #   8. admission refuses shortly images without release provenance, even from hand-run
 #      kubectl (scripts/admission-check.sh; skipped when Kyverno isn't installed)
 #   9. network policies are enforced: the metrics port and Postgres refuse other pods
@@ -111,18 +111,6 @@ forward staging 18081 9100 /metrics
 curl -sf http://127.0.0.1:18081/metrics | grep -q 'links_created_total 1.0' || fail "staging metrics"
 pass "staging: migrated, ready, create → 307, metrics on port 9100 only"
 
-# ---------------------------------------------------------------- 7a. alert drill, in the background
-# It scales staging to zero and waits about 90 s for ShortlyNoAvailablePods to reach
-# Alertmanager. Steps 3-6 only touch prod, so it runs alongside them instead of after them.
-# Collected in step 7, before anything uses staging again.
-monitoring=0
-kubectl get crd prometheusrules.monitoring.coreos.com >/dev/null 2>&1 && monitoring=1
-if ((monitoring)); then
-  "$ROOT/scripts/alert-drill.sh" >"$ALERT_LOG" 2>&1 &
-  ALERT_PID=$!
-  echo "     alert drill started in the background (staging scaled to 0)"
-fi
-
 # ---------------------------------------------------------------- 3. promote to prod
 "$ROOT/scripts/deploy.sh" prod "$IMAGE" >/dev/null
 ready=$(kubectl -n prod get deploy shortly -o jsonpath='{.status.readyReplicas}')
@@ -155,6 +143,19 @@ gw_code=$(kubectl -n prod exec postgres-0 -- wget -q -O - -T 5 --header "Host: s
 [[ "$(gw staging.sho.rt.localhost "/$gw_code")" == "404 " ]] || fail "gateway: a prod link resolved through staging's hostname"
 [[ "$(gw unknown.example /readyz)" == "404 " ]] || fail "gateway: an unknown hostname was routed somewhere"
 pass "gateway: sho.rt.localhost → prod, staging.sho.rt.localhost → staging (create → 307 via the gateway), no cross-environment leaks, unknown hosts 404"
+
+# ---------------------------------------------------------------- 7a. alert drill, in the background
+# It scales staging to zero and waits about 90 s for ShortlyNoAvailablePods to reach
+# Alertmanager. Steps 3b-6 only touch prod, so it runs alongside them instead of after them.
+# It starts after 3a, which needs staging up (the gateway checks reach both environments).
+# Collected in step 7, before anything uses staging again.
+monitoring=0
+kubectl get crd prometheusrules.monitoring.coreos.com >/dev/null 2>&1 && monitoring=1
+if ((monitoring)); then
+  "$ROOT/scripts/alert-drill.sh" >"$ALERT_LOG" 2>&1 &
+  ALERT_PID=$!
+  echo "     alert drill started in the background (staging scaled to 0)"
+fi
 
 # ---------------------------------------------------------------- 3b. rate limit
 # One client, through the Service, so kube-proxy spreads the requests over both pods: the
