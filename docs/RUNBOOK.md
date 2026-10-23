@@ -705,7 +705,9 @@ Check whether the running digest is affected (the SBOM is attached to the image)
 
 Every CI step can be reproduced locally with the same command; reproduce before you guess.
 
-A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the kind job's steps; the job passes with the notice "Docs-only change". If a PR you expected to be tested shows that notice, check its file list.
+The kind e2e runs as two jobs in parallel, `kind e2e (platform)` and `kind e2e (delivery)`; the required check `deploy to kind, rollback drill` fails if either does, so open the failing one. Platform covers steps 3b and 6–12 (rate limit, HPA, monitoring, admission, network policies, cleanup, backups, GitOps); delivery covers 4, 5 and 5b (rollbacks and canaries). To rerun just one half locally: `E2E_SUITE=delivery IMAGE=shortly:e2e scripts/k8s-e2e.sh`.
+
+A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the kind jobs' steps; they pass with the notice "Docs-only change". If a PR you expected to be tested shows that notice, check its file list.
 
 | Job → step | Usual cause | Reproduce and fix |
 | --- | --- | --- |
@@ -758,7 +760,7 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Reset one environment's data (then redeploy so migrations recreate the schema) | `kubectl -n staging delete statefulset postgres && kubectl -n staging delete pvc data-postgres-0 && scripts/cluster.sh up` |
 | Deploy a local build (kind only; tags are refused elsewhere) | `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev` |
 | Check an image's provenance | `scripts/verify-image.sh ghcr.io/statsguy/shortly@sha256:…` |
-| Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step) |
+| Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step; `E2E_SUITE=platform` or `delivery` runs one CI half) |
 | Autoscaling drill only | `scripts/hpa-drill.sh` (stops once the HPA adds a ready pod; `RATE=1500 DURATION=240s FULL=1` for a longer push to the end, with k6's summary) |
 | Watch autoscaling | `kubectl -n prod get hpa shortly -w` |
 | Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 scripts/cluster.sh up` |

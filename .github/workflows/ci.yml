@@ -88,20 +88,20 @@ jobs:
           SHORTLY_IMAGE: shortly:ci
   
   # Two kind clusters in parallel, each running half of the e2e drills (E2E_SUITE in
-  # scripts/k8s-e2e.sh): the platform checks, and the delivery drills (rollbacks, canaries,
-  # GitOps). One cluster ran them in about 14 minutes; two take about 7.
+  # scripts/k8s-e2e.sh): the platform checks plus GitOps, and the delivery drills (rollbacks
+  # and canaries). One cluster ran them in about 14 minutes; two take about 8.
   k8s:
     name: kind e2e (${{ matrix.suite }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15 # usually about 7; a hung drill shouldn't hold a runner
+    timeout-minutes: 15 # usually about 8; a hung drill shouldn't hold a runner
     strategy:
       fail-fast: false # a failure in one half shouldn't hide the other half's result
       matrix:
         include:
-          # Platform: everything but Argo CD (unused there).
-          - { suite: platform, argocd: "0", policies: "1", backups: "1" }
-          # Delivery: no admission policies or backups (unused there), so it starts sooner.
-          - { suite: delivery, argocd: "1", policies: "0", backups: "0" }
+          # Platform: everything.
+          - { suite: platform, argocd: "1", policies: "1", backups: "1" }
+          # Delivery: no Argo CD, admission policies or backups (unused there).
+          - { suite: delivery, argocd: "0", policies: "0", backups: "0" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

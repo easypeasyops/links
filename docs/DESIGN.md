@@ -535,7 +535,7 @@ flowchart TB
   subgraph ci [CI · .github/workflows/ci.yml · every PR and main]
     check[Job: check<br/>lint · mypy · pytest ≥90%]
     image[Job: image<br/>build · Trivy · smoke.sh]
-    k8s[Job: k8s<br/>kind e2e · rollback · canary · HPA · monitoring · admission · cleanup]
+    k8s[Jobs: kind e2e ×2, in parallel<br/>platform · delivery: rollback · canary · GitOps · HPA · monitoring · admission]
   end
 
   subgraph release [Release · release.yml · only on tag vX.Y.Z]
@@ -597,7 +597,7 @@ Building a container is a different product from "pytest passed." This job build
 
 #### Job `k8s` — “Will Kubernetes actually run and recover this?”
 
-This is the expensive rehearsal. `scripts/k8s-e2e.sh` runs the same steps CI and a laptop use. Each step exists because a real incident or near-miss taught that unit tests are not enough.
+This is the expensive rehearsal. `scripts/k8s-e2e.sh` runs the same steps CI and a laptop use. Each step exists because a real incident or near-miss taught that unit tests are not enough. CI runs it as **two kind clusters in parallel** (`E2E_SUITE`): both deploy staging and prod (steps 0–3a), then *platform* runs 3b and 6–12 and *delivery* runs 4, 5 and 5b. A small job named `deploy to kind, rollback drill` reports both results as the one required check, so the ruleset doesn't change when the split does. A laptop runs everything in one cluster (`E2E_SUITE=all`, the default).
 
 | Step (in `k8s-e2e.sh`) | What it proves | Why it is needed |
 | --- | --- | --- |
@@ -622,14 +622,15 @@ Chart lint + kubeconform run *before* kind starts, so a template typo fails in s
 
 - The HPA drill stops the load as soon as the HPA adds a ready pod. Its 100 s duration is a ceiling.
 - The broken release's canary timeout is 45 s. Its pod crashes within seconds, so a longer wait proves nothing more.
-- The canary drills use short analyses (45 s delay, 2 measurements 15 s apart) instead of the default 60 s and 4 × 30 s; the logic is the same.
+- Every e2e deploy adds `deploy/kind/e2e-values.yaml`: Prometheus scrapes every 5 s, and canary analysis waits 20 s, then checks twice 10 s apart (production: 15 s scrapes, 60 s, 4 × 30 s). Same logic, shorter clocks.
 - The staging alert drill runs alongside the prod drills.
-- `cluster.sh up` installs metrics-server, kube-prometheus-stack and Kyverno side by side.
+- `cluster.sh up` installs its add-ons side by side, and each kind job installs only what its half uses (the delivery cluster skips Argo CD, Kyverno and backups).
+- The two halves run on two runners at once.
 - A PR that changes only Markdown skips the cluster. The job still reports success, because it is a required check. A workflow-level paths filter would leave that check pending forever and block the merge. `docs/RUNBOOK.md` doesn't count as Markdown-only here, because the e2e reads the release digest from it. Pushes to main always run everything.
 
 Together these cut the job from 9m24s to **5m07s** (PR #27): cluster setup 117 s → 62 s, the e2e 364 s → 166 s. The alert drill took 101 s and finished entirely behind the prod drills, and the HPA drill stopped at +58 s instead of running its full 100 s. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
 
-The canary drills (PR #40) brought it back to **8–10 minutes** (8m19s and 9m59s in the first green runs; the second also had the HPA drill doing a real scale-up again): the healthy canary takes 106–134 s and the faulty one 74–86 s, even with short analyses. They are the price of testing the one release type nothing else catches. If the job's time matters more later, the healthy-canary drill is the one to move to a nightly run: the faulty one is the guard. The GitOps drill (step 12, PR #46) adds about 4 minutes more (taking prod over 13 s, self-heal 2 s, a full canary through Argo CD 215 s), bringing the job to about 15 minutes; its timeout is 25. The next step, if it matters, is two kind jobs in parallel: the drills that only touch prod don't need staging's.
+The canary drills (PR #40) brought it back to **8–10 minutes** (8m19s and 9m59s in the first green runs; the second also had the HPA drill doing a real scale-up again): the healthy canary takes 106–134 s and the faulty one 74–86 s, even with short analyses. They are the price of testing the one release type nothing else catches. If the job's time matters more later, the healthy-canary drill is the one to move to a nightly run: the faulty one is the guard. The GitOps drill (step 12, PR #46) adds about 4 minutes more (taking prod over 13 s, self-heal 2 s, a full canary through Argo CD 215 s), bringing the job to about 15 minutes; its timeout is 25. Two kind jobs in parallel with faster analysis clocks (PRs #49, #50) brought it back to **about 8 minutes**: the first split run took 9m48s with GitOps in the delivery half, while the platform half finished in 5m48s, so GitOps moved to the platform half. The canaries now take 64–113 s each instead of 86–215 s. The cost is twice the runner minutes and two cluster setups (about 2.5 minutes each).
 
 
 ### Release workflow — “Publish one immutable, attributable artifact”
