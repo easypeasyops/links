@@ -102,7 +102,7 @@ A release is a pushed `vX.Y.Z` tag on a `main` commit whose `pyproject.toml` ver
    ```
 3. Watch **Actions → Release**. It fails before publishing if the tag and version differ or the image scan finds a fixable HIGH/CRITICAL vulnerability.
 4. Copy the digest from the GitHub Release notes. Every deploy uses this digest.
-5. Check the provenance. `deploy.sh` does this itself before every deploy, but you can run the same check by hand:
+5. Check the provenance. `promote.sh` and CI do this themselves for every promotion, but you can run the same check by hand:
 
    ```bash
    D=sha256:<digest from the release notes>
@@ -110,7 +110,7 @@ A release is a pushed `vX.Y.Z` tag on a `main` commit whose `pyproject.toml` ver
    # verified: built by …/release.yml@refs/tags/v0.3.0, from … refs/tags/v0.3.0 @ <commit>
    ```
 
-   It must exit 0. Then record the digest in the Quick reference above: `tests/test_deploy_gate.py` verifies the digest documented there.
+   It must exit 0. Then record the digest in the Quick reference above (`tests/test_deploy_gate.py` verifies the digest documented there), and promote it: Deploy, below.
 
 **If the release workflow fails**
 

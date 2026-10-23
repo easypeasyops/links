@@ -10,6 +10,11 @@ kind: Application
 metadata:
   name: shortly-staging
   namespace: argocd
+  annotations:
+    # Compare with the API server's own dry run, not a client-side diff: the API server
+    # fills defaults into the HTTPRoute's lists (group, kind, path match), which a client-
+    # side diff of a CRD reports as drift, so self-heal would re-apply the route forever.
+    argocd.argoproj.io/compare-options: ServerSideDiff=true
 spec:
   project: shortly
   source:
@@ -45,6 +50,11 @@ kind: Application
 metadata:
   name: shortly-prod
   namespace: argocd
+  annotations:
+    # Compare with the API server's own dry run, not a client-side diff: the API server
+    # fills defaults into the HTTPRoute's lists (group, kind, path match), which a client-
+    # side diff of a CRD reports as drift, so self-heal would re-apply the route forever.
+    argocd.argoproj.io/compare-options: ServerSideDiff=true
 spec:
   project: shortly
   source:

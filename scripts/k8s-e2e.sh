@@ -455,7 +455,7 @@ if [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applications.argoproj.io >
   synced_healthy() { [[ "$(app '{.status.sync.status}/{.status.health.status}')" == Synced/Healthy ]]; }
   wait_app() { # seconds what -> waits until Synced and Healthy on the newest spec
     for _ in $(seq 1 "$(($1 / 3))"); do synced_healthy && return 0; sleep 3; done
-    kubectl -n argocd get application shortly-prod -o yaml | sed -n '/^status:/,$p' | head -60 >&2
+    { kubectl -n argocd get application shortly-prod -o jsonpath='{range .status.resources[?(@.status!="Synced")]}{.kind}/{.name}: {.status}{"\n"}{end}{.status.operationState.message}{"\n"}' || true; } >&2
     fail "GitOps: $2: application shortly-prod is $(app '{.status.sync.status}/{.status.health.status}')"
   }
   repo=${GITOPS_REPO:-https://github.com/statsguy/shortly.git}
