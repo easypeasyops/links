@@ -37,13 +37,20 @@ spec:
     retry:
       limit: 3
       backoff: { duration: 10s, factor: 2, maxDuration: 1m }
-  # Argo Rollouts moves the HTTPRoute's weights during a canary (prod). Without this, Argo CD
-  # would see the route as OutOfSync, and self-heal would put 100/0 back mid-canary.
+  # Fields Argo Rollouts owns in prod. Without these, Argo CD would see prod as OutOfSync,
+  # and self-heal would undo the canary: the HTTPRoute's weights (it moves them during a
+  # canary), and on the stable/canary Services the pod-template-hash it adds to each
+  # selector and the annotation that marks the Service as its own.
   ignoreDifferences:
     - group: gateway.networking.k8s.io
       kind: HTTPRoute
       jqPathExpressions:
         - .spec.rules[].backendRefs[].weight
+    - group: ""
+      kind: Service
+      jqPathExpressions:
+        - .spec.selector["rollouts-pod-template-hash"]
+        - .metadata.annotations["argo-rollouts.argoproj.io/managed-by-rollouts"]
 ---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -77,10 +84,17 @@ spec:
     retry:
       limit: 3
       backoff: { duration: 10s, factor: 2, maxDuration: 1m }
-  # Argo Rollouts moves the HTTPRoute's weights during a canary (prod). Without this, Argo CD
-  # would see the route as OutOfSync, and self-heal would put 100/0 back mid-canary.
+  # Fields Argo Rollouts owns in prod. Without these, Argo CD would see prod as OutOfSync,
+  # and self-heal would undo the canary: the HTTPRoute's weights (it moves them during a
+  # canary), and on the stable/canary Services the pod-template-hash it adds to each
+  # selector and the annotation that marks the Service as its own.
   ignoreDifferences:
     - group: gateway.networking.k8s.io
       kind: HTTPRoute
       jqPathExpressions:
         - .spec.rules[].backendRefs[].weight
+    - group: ""
+      kind: Service
+      jqPathExpressions:
+        - .spec.selector["rollouts-pod-template-hash"]
+        - .metadata.annotations["argo-rollouts.argoproj.io/managed-by-rollouts"]
