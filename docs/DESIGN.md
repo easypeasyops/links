@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-22 for v0.5.0 plus unreleased overload protection and backups on main / chart 0.7.0.
+> Last updated 2026-10-22 for v0.6.0 / chart 0.7.0.
 > Expanded request data-flow and CI/CD "why each piece" sections. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
@@ -9,7 +9,7 @@
 
 shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /{code}` redirects to the target with a 307. It is built as a production-shaped reference service, so the operational machinery around it (CI, supply chain, observability, deploys, rollback) matters as much as the feature.
 
-**Status:** v0.5.0 released 2026-10-22 as `ghcr.io/statsguy/shortly@sha256:4b855e2fb887…` (amd64 + arm64), with signed SLSA provenance (previous: v0.4.0, 2026-10-21). It deploys to local Kubernetes (kind) in `staging` and `prod` namespaces.
+**Status:** v0.6.0 released 2026-10-22 as `ghcr.io/statsguy/shortly@sha256:737d173f98fd…` (amd64 + arm64), with signed SLSA provenance (previous: v0.5.0, 2026-10-22). It deploys to local Kubernetes (kind) in `staging` and `prod` namespaces.
 
 **Goals**
 
@@ -25,7 +25,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.5.0 plus main (chart 0.7.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, overload protection (a concurrency limit and database timeouts; not yet in a release), and Postgres backups with a restore drill. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.6.0 and chart 0.7.0: the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, overload protection (a concurrency limit and database timeouts), and Postgres backups with a restore drill. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
