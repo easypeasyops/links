@@ -12,6 +12,7 @@
 #   2. the app works in-cluster (readiness, create → redirect, metrics)
 #   3. the SAME image promotes to prod: autoscaled (HPA, min 2) + a PodDisruptionBudget,
 #      and the per-client rate limit holds exactly across its replicas
+#  3a. users reach each environment through the Gateway, by hostname, and only their own
 #   4. a broken release is rolled back automatically, with ZERO failed requests meanwhile
 #   5. a manual `helm rollback` restores a previous revision
 #   6. under load, the HPA adds ready pods (scripts/hpa-drill.sh; skip with HPA_DRILL=0)
@@ -49,7 +50,9 @@ on_exit() {
       kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -20 || true
       kubectl -n "$ns" logs -l app.kubernetes.io/name=shortly --all-containers --tail=30 || true
       helm -n "$ns" history shortly || true
+      kubectl -n "$ns" get httproute -o wide || true
     done
+    kubectl -n gateway get gateway shortly -o wide || true
   fi
   exit "$status"
 }
@@ -130,6 +133,28 @@ kubectl -n prod get hpa shortly >/dev/null || fail "prod HorizontalPodAutoscaler
 pass "promoted the same image to prod: 2/2 ready, PDB and HPA present"
 
 in_cluster prod /readyz || fail "prod not reachable through its Service"
+
+# ---------------------------------------------------------------- 3a. through the gateway
+# Users come in through the Gateway (deploy/kind/gateway.yaml), routed by hostname. From a
+# pod, as a client would: the Envoy proxy's Service, with the Host header deciding where to.
+GW=http://shortly-gateway.envoy-gateway-system.svc
+gw() { # host path [extra wget args...] -> prints "STATUS LOCATION"
+  local host=$1 path=$2; shift 2
+  kubectl -n prod exec postgres-0 -- wget -S -O /dev/null -T 5 --header "Host: $host" "$@" "$GW$path" 2>&1 \
+    | awk '/^  HTTP\//{if (!s) s=$2} /^  [Ll]ocation:/{if (!l) l=$2} END{print s, l}' # first response only: wget follows redirects
+}
+[[ "$(gw sho.rt.localhost /readyz)" == "200 " ]] || fail "gateway: prod /readyz via sho.rt.localhost"
+[[ "$(gw staging.sho.rt.localhost /readyz)" == "200 " ]] || fail "gateway: staging /readyz via staging.sho.rt.localhost"
+gw_code=$(kubectl -n prod exec postgres-0 -- wget -q -O - -T 5 --header "Host: sho.rt.localhost" \
+  --header 'content-type: application/json' --header "X-Forwarded-For: 203.0.113.250" \
+  --post-data '{"url":"https://gateway-e2e.invalid/via-gateway"}' "$GW/links" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])' 2>/dev/null || true)
+[[ -n "$gw_code" ]] || fail "gateway: create through sho.rt.localhost failed"
+[[ "$(gw sho.rt.localhost "/$gw_code")" == "307 https://gateway-e2e.invalid/via-gateway" ]] || fail "gateway: prod redirect"
+# The same code under staging's hostname is staging's database: not found. Routes don't leak.
+[[ "$(gw staging.sho.rt.localhost "/$gw_code")" == "404 " ]] || fail "gateway: a prod link resolved through staging's hostname"
+[[ "$(gw unknown.example /readyz)" == "404 " ]] || fail "gateway: an unknown hostname was routed somewhere"
+pass "gateway: sho.rt.localhost → prod, staging.sho.rt.localhost → staging (create → 307 via the gateway), no cross-environment leaks, unknown hosts 404"
 
 # ---------------------------------------------------------------- 3b. rate limit
 # One client, through the Service, so kube-proxy spreads the requests over both pods: the

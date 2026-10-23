@@ -88,6 +88,14 @@ service:
   type: ClusterIP
   port: 80
 
+# Route users in through a Gateway API Gateway (deploy/kind/gateway.yaml in kind). Off by
+# default: the chart works without one, and a cluster without the Gateway API CRDs.
+gateway:
+  enabled: false
+  name: shortly
+  namespace: gateway
+  hostnames: []
+
 resources:
   requests:
     cpu: 500m # measured ~0.5 cores at 250 req/s; also the HPA's 100%

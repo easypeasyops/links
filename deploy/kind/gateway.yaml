@@ -1,0 +1,70 @@
+# The cluster's front door: one Gateway (Gateway API, served by Envoy Gateway) that routes
+# by hostname to each environment. Applied by scripts/cluster.sh after Envoy Gateway is up.
+#
+#   prod     sho.rt.localhost          staging  staging.sho.rt.localhost
+#
+# `.localhost` names resolve to 127.0.0.1 on any machine, so after
+#   kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80
+# http://sho.rt.localhost:8080/<code> works in a browser, through the same route users take.
+#
+# The chart's HTTPRoute (deploy/helm/shortly/templates/httproute.yaml) attaches each release
+# to this Gateway. In prod, Argo Rollouts shifts that route's weights during a canary.
+---
+# How Envoy Gateway runs the proxy for this class: a ClusterIP Service with a fixed name.
+# kind has no load balancer, and a fixed name is something scripts and docs can rely on.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: shortly
+  namespace: envoy-gateway-system
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        name: shortly-gateway
+        type: ClusterIP
+      envoyDeployment:
+        replicas: 1
+        container:
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+  parametersRef:
+    group: gateway.envoyproxy.io
+    kind: EnvoyProxy
+    name: shortly
+    namespace: envoy-gateway-system
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: gateway
+  labels:
+    pod-security.kubernetes.io/enforce: restricted # holds no pods; the proxy runs in envoy-gateway-system
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: shortly
+  namespace: gateway
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      # Only the app namespaces may attach routes: a route elsewhere can't capture a hostname.
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchExpressions:
+              - { key: kubernetes.io/metadata.name, operator: In, values: [staging, prod] }

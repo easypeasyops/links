@@ -3,6 +3,9 @@
 autoscaling:
   minReplicas: 2
   maxReplicas: 4
+gateway:
+  enabled: true
+  hostnames: ["sho.rt.localhost"]
 config:
   baseUrl: "http://sho.rt.localhost"
   logLevel: INFO

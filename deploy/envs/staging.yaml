@@ -2,6 +2,9 @@
 replicaCount: 1
 autoscaling:
   enabled: false # one fixed, small pod: staging proves correctness, not capacity
+gateway:
+  enabled: true
+  hostnames: ["staging.sho.rt.localhost"]
 config:
   baseUrl: "http://staging.sho.rt.localhost"
   logLevel: DEBUG
