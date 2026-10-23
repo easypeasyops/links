@@ -6,6 +6,7 @@
 #   MONITORING=0 scripts/cluster.sh up # skip kube-prometheus-stack (saves ~1 GB of RAM)
 #   POLICIES=0 scripts/cluster.sh up   # skip Kyverno and the admission policies
 #   BACKUPS=0 scripts/cluster.sh up    # skip the backup bucket and the backup CronJobs
+#   ARGOCD=0 scripts/cluster.sh up      # skip Argo CD altogether (CI's platform e2e job)
 #   ARGOCD_APPS=0 scripts/cluster.sh up # install Argo CD, but don't let it manage the app
 #                                       # (CI: the e2e deploys with deploy.sh instead)
 #
@@ -65,7 +66,7 @@ up() {
   install_metrics_server & pids+=($!)
   install_gateway & pids+=($!)
   install_rollouts & pids+=($!)
-  install_argocd & pids+=($!)
+  if [[ "${ARGOCD:-1}" != 0 ]]; then install_argocd & pids+=($!); fi
   if [[ "${MONITORING:-1}" != 0 ]]; then install_monitoring & pids+=($!); fi
   if [[ "${POLICIES:-1}" != 0 ]]; then install_policies & pids+=($!); fi
   if [[ "${BACKUPS:-1}" != 0 ]]; then install_backups & pids+=($!); fi
@@ -109,7 +110,7 @@ up() {
   echo "cluster ready: namespaces ${ENVS[*]}"
 
   # Last, once Postgres and the secrets exist: from here on, git decides what runs.
-  if [[ "${ARGOCD_APPS:-1}" != 0 ]]; then
+  if [[ "${ARGOCD:-1}" != 0 && "${ARGOCD_APPS:-1}" != 0 ]]; then
     kubectl apply -f "$ROOT/deploy/argocd/project.yaml" -f "$ROOT/deploy/argocd/applications.yaml" >/dev/null
     # Wait for Synced AND Healthy. Healthy alone comes first when Argo CD adopts resources
     # that already run, before its first sync has applied main (seen on the first takeover:

@@ -63,7 +63,12 @@ fi
 
 # With canary.enabled (prod) the chart renders an Argo Rollout instead of a Deployment, and
 # the release is not done when helm returns: the Rollout then walks its steps.
-helm_args=(--namespace "$ENV" --values "$ROOT/deploy/envs/$ENV.yaml" "${image_args[@]}" "$@")
+# DEPLOY_EXTRA_VALUES: one more values file, after the environment's (the e2e's shorter
+# clocks, deploy/kind/e2e-values.yaml). Not for real deploys.
+extra_values=()
+[[ -n "${DEPLOY_EXTRA_VALUES:-}" ]] && extra_values=(--values "$DEPLOY_EXTRA_VALUES")
+helm_args=(--namespace "$ENV" --values "$ROOT/deploy/envs/$ENV.yaml" "${image_args[@]}" \
+  ${extra_values[@]+"${extra_values[@]}"} "$@")
 canary=0
 if helm template shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
   --show-only templates/rollout.yaml >/dev/null 2>&1; then
