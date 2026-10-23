@@ -6,6 +6,9 @@
 #   MONITORING=0 scripts/cluster.sh up # skip kube-prometheus-stack (saves ~1 GB of RAM)
 #   POLICIES=0 scripts/cluster.sh up   # skip Kyverno and the admission policies
 #   BACKUPS=0 scripts/cluster.sh up    # skip the backup bucket and the backup CronJobs
+#
+# Always installed: Envoy Gateway (the Gateway API implementation that is the cluster's
+# front door) and Argo Rollouts (prod's canary releases). The app's chart depends on both.
 #   scripts/cluster.sh down
 set -euo pipefail
 
@@ -26,6 +29,20 @@ MONITORING_DIGEST=sha256:04047e500c803dc8d2bc284ecb43e9229bb32b5c36bd13fc89592c8
 KYVERNO_CHART=oci://ghcr.io/kyverno/charts/kyverno
 KYVERNO_VERSION=3.9.1
 KYVERNO_DIGEST=sha256:720542b97bdbc2633535c2297332690d21cfbb944053eb1ec1f0dbe8e3895444
+# Envoy Gateway: the Gateway API implementation (it ships the Gateway API CRDs, v1.6.1, so
+# the two can't drift apart).
+GATEWAY_CHART=oci://docker.io/envoyproxy/gateway-helm
+GATEWAY_VERSION=v1.9.2
+GATEWAY_DIGEST=sha256:be034275b55deeddd6b7bc1f4da6eeb02b8efc418a4a29e2b1977851b24b1e63
+# Argo Rollouts, and its Gateway API traffic-router plugin. The controller downloads the
+# plugin when it starts and refuses it unless the checksum matches. The project publishes no
+# checksums, so these were computed from the release binaries when this version was pinned.
+ROLLOUTS_CHART=oci://ghcr.io/argoproj/argo-helm/argo-rollouts
+ROLLOUTS_VERSION=2.43.6 # Argo Rollouts v1.10.0
+ROLLOUTS_DIGEST=sha256:ea68b0aed72752c8c8aa8d948c62d8d6076a255c5e6238648769bf1b01137f21
+GATEWAYAPI_PLUGIN_VERSION=v0.17.0
+GATEWAYAPI_PLUGIN_SHA256_amd64=1904ca787d33107c140521899d61fff030ee75d99908bd175fca5a4647759061
+GATEWAYAPI_PLUGIN_SHA256_arm64=5221279f7bf2c9b2c0ff6ed7ff12718ecce1d4892f1ff5e5224bb723cfd0fd92
 
 up() {
   if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
@@ -39,6 +56,8 @@ up() {
   # here on the API server refuses unverified shortly images.
   local pids=() failed=0
   install_metrics_server & pids+=($!)
+  install_gateway & pids+=($!)
+  install_rollouts & pids+=($!)
   if [[ "${MONITORING:-1}" != 0 ]]; then install_monitoring & pids+=($!); fi
   if [[ "${POLICIES:-1}" != 0 ]]; then install_policies & pids+=($!); fi
   if [[ "${BACKUPS:-1}" != 0 ]]; then install_backups & pids+=($!); fi
@@ -137,6 +156,38 @@ install_policies() {
       --timeout=120s >/dev/null
   done
   echo "policies ready: Kyverno $KYVERNO_VERSION, $(ls "$ROOT"/deploy/policies/*.yaml | wc -l | tr -d ' ') policies"
+}
+
+install_gateway() {
+  kubectl create namespace envoy-gateway-system --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  # baseline: the Envoy proxy pods the controller creates don't all meet "restricted".
+  kubectl label namespace envoy-gateway-system --overwrite pod-security.kubernetes.io/enforce=baseline >/dev/null
+  helm upgrade --install eg "$GATEWAY_CHART@$GATEWAY_DIGEST" --version "$GATEWAY_VERSION" \
+    --namespace envoy-gateway-system --values "$ROOT/deploy/kind/envoy-gateway-values.yaml" \
+    --wait --timeout 5m >/dev/null
+  kubectl apply -f "$ROOT/deploy/kind/gateway.yaml" >/dev/null
+  kubectl -n gateway wait gateway/shortly --for=condition=Programmed --timeout=180s >/dev/null
+  kubectl -n envoy-gateway-system wait deploy --all --for=condition=Available --timeout=180s >/dev/null
+  echo "gateway ready: Envoy Gateway $GATEWAY_VERSION, Gateway gateway/shortly (svc envoy-gateway-system/shortly-gateway)"
+}
+
+install_rollouts() {
+  local arch sha
+  kubectl create namespace argo-rollouts --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  kubectl label namespace argo-rollouts --overwrite pod-security.kubernetes.io/enforce=restricted >/dev/null
+  arch=$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.architecture}')
+  case "$arch" in
+    amd64) sha=$GATEWAYAPI_PLUGIN_SHA256_amd64 ;;
+    arm64) sha=$GATEWAYAPI_PLUGIN_SHA256_arm64 ;;
+    *) echo "no Gateway API plugin checksum for node architecture $arch" >&2; exit 1 ;;
+  esac
+  helm upgrade --install argo-rollouts "$ROLLOUTS_CHART@$ROLLOUTS_DIGEST" --version "$ROLLOUTS_VERSION" \
+    --namespace argo-rollouts --values "$ROOT/deploy/kind/argo-rollouts-values.yaml" \
+    --set "controller.trafficRouterPlugins[0].name=argoproj-labs/gatewayAPI" \
+    --set "controller.trafficRouterPlugins[0].location=https://github.com/argoproj-labs/rollouts-plugin-trafficrouter-gatewayapi/releases/download/$GATEWAYAPI_PLUGIN_VERSION/gatewayapi-plugin-linux-$arch" \
+    --set "controller.trafficRouterPlugins[0].sha256=$sha" \
+    --wait --timeout 5m >/dev/null
+  echo "rollouts ready: Argo Rollouts (chart $ROLLOUTS_VERSION), Gateway API plugin $GATEWAYAPI_PLUGIN_VERSION ($arch)"
 }
 
 install_backups() {

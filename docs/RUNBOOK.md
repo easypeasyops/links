@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-22 for v0.6.0 / chart 0.7.0. Mirrored at
+> Last updated 2026-10-22 for v0.6.0 plus the Gateway API front door on main / chart 0.8.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -17,6 +17,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
 | Database | `postgres` StatefulSet per namespace; URL in Secret `shortly-db` key `url` |
+| Front door | Gateway `gateway/shortly` (Envoy Gateway); prod = `sho.rt.localhost`, staging = `staging.sho.rt.localhost`. Locally: `kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80`, then `http://sho.rt.localhost:8080/<code>` |
 | Endpoints | `/healthz` liveness · `/readyz` readiness on port 8000 · `/metrics` on port **9100** (Prometheus only, by NetworkPolicy) |
 | Backups | CronJob `postgres-backup` per namespace, hourly at :41 UTC → S3 bucket `shortly-backups/<ns>/` (SeaweedFS, namespace `backups`), 7 days. RPO up to 1 h; restore: `scripts/restore-drill.sh` and "Restore Postgres from a backup" |
 | Cleanup | CronJob `shortly-cleanup`, hourly at :17 UTC: deletes links expired more than 7 days ago (`cleanup:` in the chart values) |
@@ -40,7 +41,8 @@ kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=100
 kubectl -n prod rollout status deploy/shortly
 kubectl -n prod get events --sort-by=.lastTimestamp | tail -20
 kubectl -n prod get hpa shortly                            # current CPU % vs target, replicas
-kubectl -n prod port-forward svc/shortly 8080:80          # then curl localhost:8080/readyz
+kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80   # the user path:
+curl -s http://sho.rt.localhost:8080/readyz              # staging: staging.sho.rt.localhost
 ```
 
 ## Health checks and key queries
@@ -139,9 +141,9 @@ Deploy the verified digest to staging, check it, then promote the identical dige
 
    ```bash
    kubectl -n staging exec postgres-0 -- wget -q -O- http://shortly/readyz
-   kubectl -n staging port-forward svc/shortly 8080:80 &
-   curl -s -X POST localhost:8080/links -H 'content-type: application/json' -d '{"url":"https://example.com"}'
-   curl -si localhost:8080/<code from the response> | head -3   # expect 307 + Location
+   kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80 &   # through the Gateway, as users
+   curl -s -X POST http://staging.sho.rt.localhost:8080/links -H 'content-type: application/json' -d '{"url":"https://example.com"}'
+   curl -si http://staging.sho.rt.localhost:8080/<code from the response> | head -3   # expect 307 + Location
    ```
 4. Promote the same digest to prod:
 
@@ -350,6 +352,25 @@ helm -n $NS history shortly
 | Pods crash-looping | Bad release or config | CrashLoopBackOff playbook; roll back |
 | Pods Pending | No room on the nodes | Deploy stuck or failed playbook (`Insufficient cpu/memory`) |
 | Pods Running but not Ready | Database unreachable | Pods not Ready playbook |
+
+### Users can't reach the app, but pods are Ready
+
+The Gateway is the user path; probes and Prometheus go around it. So a broken front door looks like **traffic dropping**, not errors: no alert fires on the pods.
+
+```bash
+kubectl -n gateway get gateway shortly                         # PROGRAMMED must be True
+kubectl -n prod get httproute shortly -o jsonpath='{.status.parents[0].conditions}'   # Accepted, ResolvedRefs
+kubectl -n envoy-gateway-system get pods                       # envoy-gateway (controller) and the proxy
+kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50
+kubectl -n prod exec postgres-0 -- wget -q -O- --header 'Host: sho.rt.localhost' http://shortly-gateway.envoy-gateway-system.svc/readyz
+```
+
+| What you see | Cause | Fix |
+| --- | --- | --- |
+| Gateway not `Programmed` | The controller is down, or the EnvoyProxy/GatewayClass is invalid | Controller logs; `kubectl get gatewayclass envoy -o yaml` |
+| Route not `Accepted` | Its namespace isn't allowed on the listener, or `hostnames` conflict with another route | Compare with `allowedRoutes` in `deploy/kind/gateway.yaml`; one hostname per environment |
+| `ResolvedRefs: False` | The route points at a Service or port that doesn't exist (a renamed release) | `kubectl -n prod get svc`; the route's `backendRefs` |
+| Direct `wget http://shortly/readyz` works, through the Gateway it doesn't | The proxy can't reach the pods: a NetworkPolicy change narrowed `httpFrom` | Allow the proxy's namespace (`envoy-gateway-system`) on port 8000 |
 
 ### Pods not Ready, `/readyz` returns 503
 
@@ -592,7 +613,7 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the k
 | image → Smoke test | The container misbehaves | `docker build -t shortly:dev . && scripts/smoke.sh`; on failure it prints container logs |
 | k8s → digest-mode render | API server rejects a manifest (e.g. an invalid label) | `helm template … --set image.digest=sha256:<64 hex> \| kubectl apply --dry-run=server -f -` against kind |
 | k8s → monitoring checks | `scrapes 0 healthy prod pods` (ServiceMonitor or labels), `rule groups loaded` (PrometheusRule missing: is `monitoring.clusterWide` on for prod?), `rules not evaluating cleanly` (a PromQL error), or `a dashboard query is invalid` | `ALERT_DRILL=0 scripts/monitoring-check.sh` against kind |
-| k8s → alert drill | `alert drill (scripts/alert-drill.sh)` with its output indented above it: the staging alert never reached Alertmanager, or went to the wrong receiver. It ran in the background from step 2, so it's reported at step 7 | `scripts/alert-drill.sh` against kind; check Prometheus → Alerts, then Alertmanager → Status → Config |
+| k8s → alert drill | `alert drill (scripts/alert-drill.sh)` with its output indented above it: the staging alert never reached Alertmanager, or went to the wrong receiver. It ran in the background from step 3a, so it's reported at step 7 | `scripts/alert-drill.sh` against kind; check Prometheus → Alerts, then Alertmanager → Status → Config |
 | test → `test_alertmanager_config_is_valid` / `test_alerts_route_to_the_right_receiver` | The Alertmanager config in `deploy/kind/monitoring-values.yaml` is invalid, or a route changed | `amtool config routes test --config.file=… namespace=prod severity=page` (the test prints the receiver it got) |
 | test → `test_every_dashboard_query_matches_something_the_app_exports` | A dashboard query selects a metric or label the app doesn't export | Fix the query in `deploy/helm/shortly/dashboards/slo.json` |
 | test → `test_documented_release_verifies` | The Quick reference digest is wrong, or the registry or Sigstore is unreachable from CI | `scripts/verify-image.sh <that digest>`; fix the digest in the Quick reference, or re-run if it was a network blip |
@@ -604,6 +625,7 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the k
 | k8s → Lint and schema-validate | A chart manifest or a policy in `deploy/policies/` fails its schema | Run the step's `kubeconform` command locally; the error names the field |
 | k8s → backup and restore | `backup: the Job did not complete` (its logs print above: database, bucket, credentials), `a pod that isn't a backup pod reached the backup bucket` (the `seaweedfs` NetworkPolicy), `the scratch database never became ready` (the download failed: the `fetch` log prints above), `restored schema at revision …` or `restored N links, expected M` (the dump is incomplete or stale), `canary link … is not in the restored database` | `SOURCE=prod KEEP=1 scripts/restore-drill.sh` against kind; see Backup job not running |
 | k8s → expired-link cleanup | `index … missing or invalid` (the concurrent index build failed: see the migrate Job's logs), `the Job did not complete` (its logs print above: DB access, provenance, Pod Security), `left …, want e2efut1,e2enew1` (the cutoff or grace period changed) | `kubectl -n staging logs job/cleanup-e2e`; `uv run pytest tests/test_cleanup.py -v` |
+| k8s → gateway | `prod /readyz via sho.rt.localhost` or `staging …` (the route isn't attached or the proxy isn't ready), `create through sho.rt.localhost failed`, `a prod link resolved through staging's hostname` (two routes claim one hostname), `an unknown hostname was routed somewhere` (a route without `hostnames`) | `kubectl -n gateway get gateway shortly`; `kubectl -n prod get httproute shortly -o yaml` (status: `Accepted`, `ResolvedRefs`); `kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50` |
 | k8s → network policies | `a non-Prometheus pod scraped prod's metrics port` or `a pod that isn't shortly reached Postgres` (a policy missing, or the CNI not enforcing NetworkPolicy), or a `control:` line (the allowed path broke: check labels and `networkPolicy` values) | `kubectl -n prod get networkpolicy`; the step's commands in `scripts/k8s-e2e.sh` |
 | k8s → admission checks | `was ADMITTED, expected refused` (the policy isn't enforcing), `was refused, expected admitted` (the release no longer verifies in-cluster: often no network to Sigstore), `not by the provenance policy` (Pod Security or a manifest error), or no allowlist reports | `scripts/admission-check.sh` against kind; `kubectl -n kyverno logs deploy/kyverno-admission-controller` |
 | k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready); `load too light` (CPU never got 10% past the target: raise the drill's `RATE`); or no scale-up despite high CPU (a real HPA problem) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
@@ -631,6 +653,8 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 scripts/cluster.sh up` |
 | Create without Kyverno and the admission policies | `POLICIES=0 scripts/cluster.sh up` |
 | Create without the backup bucket and backup CronJobs | `BACKUPS=0 scripts/cluster.sh up` |
+| Open the app through the Gateway | `kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80`, then http://sho.rt.localhost:8080 (prod) or http://staging.sho.rt.localhost:8080 |
+| Is the Gateway routing? | `kubectl -n gateway get gateway shortly` (`PROGRAMMED True`); `kubectl get httproute -A` |
 | Admission checks only | `scripts/admission-check.sh` (server-side dry runs; creates nothing) |
 | Admission policies and their state | `kubectl get imagevalidatingpolicy,validatingpolicy`; reports: `kubectl get policyreport -A` |
 | Prometheus UI (targets, rules, alerts) | `kubectl -n monitoring port-forward svc/kps-prometheus 9090` → http://localhost:9090 |
@@ -648,7 +672,7 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Which image is running | `kubectl -n prod get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}'` |
 | Uninstall the app only | `helm -n prod uninstall shortly` (data stays in the PVC) |
 
-`cluster.sh up` installs, side by side, metrics-server (pinned, checksum-verified, `--kubelet-insecure-tls` for kind only), kube-prometheus-stack (pinned by version and digest, values in `deploy/kind/monitoring-values.yaml`, namespace `monitoring` at the `baseline` Pod Security level), and Kyverno (pinned by version and digest, values in `deploy/kind/kyverno-values.yaml`, namespace `kyverno` at `restricted`) with the policies in `deploy/policies/`, and the backup bucket (SeaweedFS S3, pinned by digest, `deploy/kind/backups.yaml`, namespace `backups` at `restricted`, with a generated S3 identity in Secret `seaweedfs-s3`). It then creates the `staging` and `prod` namespaces enforcing the restricted Pod Security Standard, generates a random password per namespace into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`, the network policies, and the backup CronJob (`deploy/kind/postgres-backup.yaml`, with the bucket credentials copied into Secret `backup-s3`). It never overwrites existing Secrets.
+`cluster.sh up` installs, side by side, Envoy Gateway (pinned by version and digest, values in `deploy/kind/envoy-gateway-values.yaml`, namespace `envoy-gateway-system` at `baseline`) with the Gateway in `deploy/kind/gateway.yaml`, Argo Rollouts (pinned by version and digest, values in `deploy/kind/argo-rollouts-values.yaml`, namespace `argo-rollouts` at `restricted`, with the Gateway API plugin pinned by checksum for the node's architecture), metrics-server (pinned, checksum-verified, `--kubelet-insecure-tls` for kind only), kube-prometheus-stack (pinned by version and digest, values in `deploy/kind/monitoring-values.yaml`, namespace `monitoring` at the `baseline` Pod Security level), and Kyverno (pinned by version and digest, values in `deploy/kind/kyverno-values.yaml`, namespace `kyverno` at `restricted`) with the policies in `deploy/policies/`, and the backup bucket (SeaweedFS S3, pinned by digest, `deploy/kind/backups.yaml`, namespace `backups` at `restricted`, with a generated S3 identity in Secret `seaweedfs-s3`). It then creates the `staging` and `prod` namespaces enforcing the restricted Pod Security Standard, generates a random password per namespace into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`, the network policies, and the backup CronJob (`deploy/kind/postgres-backup.yaml`, with the bucket credentials copied into Secret `backup-s3`). It never overwrites existing Secrets.
 
 Without a cluster, the fastest full-stack check is Docker Compose: `docker compose --profile app up -d --build --wait && scripts/smoke.sh`.
 
