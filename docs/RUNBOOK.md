@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-22 for v0.6.0 plus the Gateway API front door on main / chart 0.8.0. Mirrored at
+> Last updated 2026-10-22 for v0.6.0 plus the Gateway API front door, fault injection and prod canary releases on main / chart 0.9.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -13,10 +13,11 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Repo | [github.com/statsguy/shortly](https://github.com/statsguy/shortly) |
 | Image | `ghcr.io/statsguy/shortly` — deploy by digest, never by tag |
 | Current release | v0.6.0, `sha256:737d173f98fdbfc4c39c5248a7f46d25d9b6d9ef3678c6dee9689f97207335df` (previous: v0.5.0, `sha256:4b855e2fb8875ee3622d5f5a5054d1d8105e715eacc6a9c6a1be0a023556bad6`) |
-| Environments | kind cluster `shortly`; namespaces `staging` (1 replica), `prod` (HPA, 2–4 replicas) |
+| Environments | kind cluster `shortly`; namespaces `staging` (Deployment, 1 replica), `prod` (Argo Rollout, canary releases, HPA 2–4 replicas) |
 | Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
 | Database | `postgres` StatefulSet per namespace; URL in Secret `shortly-db` key `url` |
+| Canary (prod) | New versions get 10%, then 50% of the Gateway's traffic, each step judged by Prometheus (traffic, 5xx ≤ 1%, redirect p99 ≤ 250 ms), then 100%: about 7 min. A failed step aborts and `deploy.sh` rolls back. Rollbacks to the last 3 revisions are immediate. See Deploy |
 | Front door | Gateway `gateway/shortly` (Envoy Gateway); prod = `sho.rt.localhost`, staging = `staging.sho.rt.localhost`. Locally: `kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80`, then `http://sho.rt.localhost:8080/<code>` |
 | Endpoints | `/healthz` liveness · `/readyz` readiness on port 8000 · `/metrics` on port **9100** (Prometheus only, by NetworkPolicy) |
 | Backups | CronJob `postgres-backup` per namespace, hourly at :41 UTC → S3 bucket `shortly-backups/<ns>/` (SeaweedFS, namespace `backups`), 7 days. RPO up to 1 h; restore: `scripts/restore-drill.sh` and "Restore Postgres from a backup" |
@@ -38,7 +39,8 @@ helm -n prod history shortly                               # revisions you can r
 helm -n prod rollback shortly <REV> --wait                 # manual rollback
 kubectl -n prod get pods -l app.kubernetes.io/name=shortly # pod status
 kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=100
-kubectl -n prod rollout status deploy/shortly
+kubectl -n prod get rollout shortly                        # prod: PHASE Healthy, or the canary's step
+kubectl -n staging rollout status deploy/shortly
 kubectl -n prod get events --sort-by=.lastTimestamp | tail -20
 kubectl -n prod get hpa shortly                            # current CPU % vs target, replicas
 kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80   # the user path:
@@ -51,7 +53,7 @@ shortly is healthy when every desired pod is Ready, `/readyz` returns 200 throug
 
 ```bash
 NS=prod
-kubectl -n $NS get deploy shortly                          # READY must equal desired
+kubectl -n $NS get rollout,deploy shortly 2>/dev/null     # READY must equal desired (prod: a Rollout, Healthy)
 kubectl -n $NS get hpa shortly                             # TARGETS like "12%/70%", never "<unknown>"
 kubectl -n $NS get pods -l app.kubernetes.io/name=shortly -o wide   # restarts, node placement
 kubectl -n $NS exec postgres-0 -- wget -q -O- http://shortly/readyz # through the Service, in-cluster
@@ -149,13 +151,45 @@ Deploy the verified digest to staging, check it, then promote the identical dige
 
    ```bash
    scripts/deploy.sh prod ghcr.io/statsguy/shortly@$D
-   kubectl -n prod get deploy shortly    # READY = desired (at least 2)
+   kubectl -n prod get rollout shortly   # PHASE Healthy, READY = desired (at least 2)
    ```
-5. Watch for 15 minutes: 5xx ratio, p99 latency, restarts. If anything regresses, roll back (next section).
+
+   Prod is a **canary**: `deploy.sh` prints each step (`step 1/4, canary weight 10%`, …) and returns after about 7 minutes, when the new version has all traffic, or with exit 1 when it was aborted and rolled back. See "Canary releases" below.
+5. Watch for 15 minutes: 5xx ratio, p99 latency, restarts. The canary checks the first few minutes on a share of traffic; it doesn't replace this. If anything regresses, roll back (next section).
+
+### Canary releases
+
+What `deploy.sh prod` does after `helm upgrade` (docs/DESIGN.md, Canary releases):
+
+| Step | Traffic on the new version | Judged by |
+| --- | --- | --- |
+| 1–2 | 10% (1 pod) | analysis: 60 s delay, then 4 checks 30 s apart |
+| 3–4 | 50% | the same |
+| done | 100%; old pods removed 30 s later | — |
+
+Each check, on the new version's pods only: at least 0.5 req/s of traffic, a 5xx ratio of at most 1%, and a redirect p99 of at most 250 ms. While it runs, `deploy.sh` sends 20 req/s of synthetic traffic through the Gateway (Job `canary-traffic`, links to `example.com`); with real users, run `CANARY_TRAFFIC=0 scripts/deploy.sh prod …`.
+
+```bash
+kubectl -n prod get rollout shortly -w                                   # PHASE, step, weights
+kubectl -n prod get httproute shortly -o jsonpath='{range .spec.rules[0].backendRefs[*]}{.name}={.weight}{" "}{end}{"\n"}'
+kubectl -n prod get analysisrun                                          # one per analysis step
+kubectl -n prod get analysisrun <name> -o jsonpath='{range .status.metricResults[*]}{.name}: {.phase} {.measurements[-1:].value}{"\n"}{end}'
+```
+
+Stop a canary by hand (traffic goes back to stable at once; then roll helm back so its history matches):
+
+```bash
+kubectl -n prod patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}'
+helm -n prod rollback shortly --wait=legacy
+```
+
+Knobs: `CANARY_TIMEOUT` (default 15m; `deploy.sh` aborts the canary when it runs out), `CANARY_TRAFFIC_RATE` (20), `DEPLOY_TIMEOUT` (helm's own wait, 3m). Steps and thresholds are chart values (`canary:` in `values.yaml`).
+
+**First upgrade onto chart 0.9.0** (prod becomes a Rollout): `deploy.sh` keeps the old Deployment serving (it annotates it `helm.sh/resource-policy: keep`), waits for the Rollout to be Healthy, then deletes the Deployment, and prints `migrated`. The first Rollout version starts at 100% (there is no stable version yet), so this one deploy has no canary. If it fails, the rollback brings the Deployment back under Helm; check `kubectl -n prod get deploy,rollout`.
 
 **First upgrade onto chart 0.2.0** (the HPA arrives): the chart stops setting `replicas`, so Kubernetes may briefly set an existing prod Deployment to 1 replica until the HPA restores its minimum of 2, typically within 15 s. Do this upgrade at a quiet time, then check `kubectl -n prod get hpa,deploy shortly`. Fresh installs are not affected.
 
-**What `deploy.sh` does:** for a digest, it first verifies the image's provenance (`scripts/verify-image.sh`) and stops if that fails; a tag is accepted only on a `kind-*` context. Then it runs `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the environment's values file. Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
+**What `deploy.sh` does:** for a digest, it first verifies the image's provenance (`scripts/verify-image.sh`) and stops if that fails; a tag is accepted only on a `kind-*` context. Then it runs `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the environment's values file (prod: `--wait=legacy`, then it follows the canary). Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
 
 **If `deploy.sh` says REFUSED**, nothing was deployed:
 
@@ -168,7 +202,7 @@ Deploy the verified digest to staging, check it, then promote the identical dige
 
 **Break glass**, only when verification itself is broken (for example Sigstore is down) and a deploy can't wait: `INSECURE_SKIP_VERIFY=1 scripts/deploy.sh prod ghcr.io/statsguy/shortly@$D`. It prints a warning. Say so in the incident channel, and run `scripts/verify-image.sh` on that digest as soon as verification works again. This skips `deploy.sh`'s check only: the cluster's admission policy still applies (see [Admission policy refuses pods](#admission-policy-refuses-pods)).
 
-**If the deploy fails**, Helm has already rolled back (a fresh install is uninstalled). Prod keeps serving. Find out why before retrying:
+**If the deploy fails**, Helm has already rolled back (a fresh install is uninstalled); in prod, a failed canary was aborted first, so users only ever saw it on its share of traffic. Prod keeps serving. Find out why before retrying (prod canary: see [Canary aborted](#canary-aborted)):
 
 ```bash
 helm -n prod history shortly
@@ -182,7 +216,7 @@ kubectl -n prod logs -l app.kubernetes.io/name=shortly --previous --tail=50
 
 Roll back first, investigate second: when a release is bad, restore the last good revision, then debug from logs and the failed revision.
 
-**Automatic.** A deploy whose pods never become ready, or whose migration Job fails, is rolled back by `--rollback-on-failure` within the timeout (3 min). Nothing to do except find the cause.
+**Automatic.** A deploy whose pods never become ready, or whose migration Job fails, is rolled back by `--rollback-on-failure` within the timeout (3 min). In prod, so is a canary that fails analysis or isn't ready within 180 s: `deploy.sh` aborts it and runs `helm rollback`. Nothing to do except find the cause.
 
 **Manual** (the release deployed fine but misbehaves):
 
@@ -196,14 +230,15 @@ Roll back first, investigate second: when a release is bad, restore the last goo
 2. Roll back and wait:
 
    ```bash
-   helm -n prod rollback shortly <REV> --wait --timeout 3m
-   kubectl -n prod rollout status deploy/shortly
+   helm -n prod rollback shortly <REV> --wait=legacy --timeout 3m
+   kubectl -n prod get rollout shortly    # Healthy within seconds: no canary steps for the last 3 revisions
+   # staging: helm -n staging rollback shortly <REV> --wait; kubectl -n staging rollout status deploy/shortly
    ```
 3. Verify through the Service:
 
    ```bash
    kubectl -n prod exec postgres-0 -- wget -q -O- http://shortly/readyz
-   kubectl -n prod get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+   kubectl -n prod get rollout shortly -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
    ```
 
    The image must be the previous digest.
@@ -218,12 +253,13 @@ If a migration itself broke something and the old code cannot run on the new sch
 2. Downgrade one revision from a pod still running the new image:
 
    ```bash
-   kubectl -n prod exec deploy/shortly -- alembic downgrade -1
-   kubectl -n prod exec deploy/shortly -- alembic current
+   POD=$(kubectl -n prod get pods -l app.kubernetes.io/name=shortly,rollouts-pod-template-hash=$(kubectl -n prod get rollout shortly -o jsonpath='{.status.currentPodHash}') -o name | head -1)
+   kubectl -n prod exec $POD -- alembic downgrade -1
+   kubectl -n prod exec $POD -- alembic current
    ```
 3. Then `helm rollback` as above.
 
-**Rehearsal.** `scripts/k8s-e2e.sh` performs both an automatic and a manual rollback on every PR. If those steps start failing in CI, treat it as a broken rollback path, not a flaky test.
+**Rehearsal.** `scripts/k8s-e2e.sh` performs both an automatic and a manual rollback on every PR, plus a healthy and a faulty canary. If those steps start failing in CI, treat it as a broken rollback path, not a flaky test.
 
 ## Restore Postgres from a backup
 
@@ -244,7 +280,7 @@ Take the newest dump from **before** the problem. After a bad migration or a mas
 
 ```bash
 NS=prod
-kubectl -n $NS scale deploy/shortly --replicas=0          # the HPA leaves a Deployment at 0 alone
+kubectl -n $NS scale rollout/shortly --replicas=0         # staging: deploy/shortly; the HPA leaves 0 alone
 kubectl -n $NS patch cronjob shortly-cleanup -p '{"spec":{"suspend":true}}'
 kubectl -n $NS patch cronjob postgres-backup -p '{"spec":{"suspend":true}}'   # keep the good dumps
 kubectl -n restore-drill cp -c postgres restore:/work/shortly.dump ./shortly.dump
@@ -252,7 +288,7 @@ kubectl -n $NS cp ./shortly.dump postgres-0:/tmp/shortly.dump
 kubectl -n $NS exec postgres-0 -- pg_restore -U shortly -d shortly --clean --if-exists \
   --no-owner --no-privileges --exit-on-error /tmp/shortly.dump
 kubectl -n $NS exec postgres-0 -- psql -U shortly shortly -c "select count(*) from links" -c "select * from alembic_version"
-kubectl -n $NS scale deploy/shortly --replicas=2
+kubectl -n $NS scale rollout/shortly --replicas=2         # staging: deploy/shortly
 kubectl -n $NS patch cronjob shortly-cleanup -p '{"spec":{"suspend":false}}'
 kubectl -n $NS patch cronjob postgres-backup -p '{"spec":{"suspend":false}}'
 kubectl delete namespace restore-drill
@@ -337,18 +373,18 @@ kubectl -n prod exec postgres-0 -- wget -q -O- http://shortly/readyz   # does th
 
 ### ShortlyNoAvailablePods
 
-One environment's Deployment has zero available pods, so every request to it fails. The alert carries the `namespace`; the burn-rate and readiness alerts for that namespace are inhibited, because they are symptoms of the same thing.
+One environment's Deployment (staging) or Rollout (prod) has zero ready pods, so every request to it fails. The alert carries the `namespace`; the burn-rate and readiness alerts for that namespace are inhibited, because they are symptoms of the same thing.
 
 ```bash
 NS=prod
-kubectl -n $NS get deploy,rs,pods -l app.kubernetes.io/name=shortly
+kubectl -n $NS get deploy,rollout,rs,pods -l app.kubernetes.io/name=shortly
 kubectl -n $NS get events --sort-by=.lastTimestamp | tail -20
 helm -n $NS history shortly
 ```
 
 | You see | Cause | Fix |
 | --- | --- | --- |
-| `READY 0/0`, desired 0 | Someone (or something) scaled it to zero | `helm -n $NS rollback shortly <last good rev>`, or `kubectl -n $NS scale deploy/shortly --replicas=2` |
+| `READY 0/0`, desired 0 | Someone (or something) scaled it to zero | `helm -n $NS rollback shortly <last good rev>`, or `kubectl -n $NS scale deploy/shortly --replicas=2` (prod: `rollout/shortly`) |
 | Pods crash-looping | Bad release or config | CrashLoopBackOff playbook; roll back |
 | Pods Pending | No room on the nodes | Deploy stuck or failed playbook (`Insufficient cpu/memory`) |
 | Pods Running but not Ready | Database unreachable | Pods not Ready playbook |
@@ -416,6 +452,28 @@ kubectl -n prod get events --sort-by=.lastTimestamp | tail -30
 | `admission webhook … denied the request: … shortly-require-release-provenance` | The image isn't a release digest with valid provenance | See [Admission policy refuses pods](#admission-policy-refuses-pods) |
 | `failed calling webhook … kyverno-svc` | Kyverno is down; no Pod can be created in `staging` or `prod` | See [Admission policy refuses pods](#admission-policy-refuses-pods) |
 | `Pending`, `Insufficient cpu/memory` | Node is full (the HPA may have asked for more pods than fit) | Add nodes, or lower `autoscaling.maxReplicas`; don't lower the CPU request without re-measuring |
+
+### Canary aborted
+
+`deploy.sh prod` printed `FAILED: canary aborted` (or `timeout`) and rolled back. Users only saw the new version on its share of traffic, at most 50% and usually 10%, for a few minutes. Prod is back on the previous version; check that first, then find out why:
+
+```bash
+kubectl -n prod get rollout shortly                     # PHASE Healthy, on the old pod hash
+kubectl -n prod get analysisrun --sort-by=.metadata.creationTimestamp | tail -3
+kubectl -n prod get analysisrun <newest> -o jsonpath='{range .status.metricResults[*]}{.name}: {.phase} {.message} {.measurements[-1:].value}{"\n"}{end}'
+kubectl -n prod get events --sort-by=.lastTimestamp | grep -i -E 'rollout|analysis' | tail -10
+```
+
+| Failed metric or message | Meaning | Next |
+| --- | --- | --- |
+| `error-ratio: Failed` | The new version answered 5xx on more than 1% of its requests | Its logs: `kubectl -n prod logs -l rollouts-pod-template-hash=<hash> --tail=200` (the canary's pods are kept 30 s after the abort; staging still runs the same digest). A real bug: fix it in a new release |
+| `redirect-p99: Failed` | Redirects on the new version were slower than 250 ms at p99, twice | A slow query or a CPU regression: compare with `scripts/loadtest.sh` on staging |
+| `traffic: Failed` | Too little traffic to judge, not a bad release | Did the `canary-traffic` Job run (`kubectl -n prod get jobs`, k6 image pull)? With `CANARY_TRAFFIC=0`, real traffic was below 0.5 req/s at 10%: deploy at a busier time, or use the synthetic traffic |
+| metrics in `Error` | Analysis couldn't query Prometheus | `kubectl -n monitoring get pods`; the Rollout aborts after 4 errors in a row. Fix Prometheus, then deploy again |
+| `ProgressDeadlineExceeded` | A canary pod wasn't ready within 180 s | Same as a crash loop or Pending pod: CrashLoopBackOff and Deploy stuck playbooks |
+| `out of time` | The canary didn't finish in `CANARY_TIMEOUT` (15 min) | Was the Argo Rollouts controller running (`kubectl -n argo-rollouts get pods`)? |
+
+Don't retry the same digest hoping for a different result: the analysis is deterministic enough that a second run will fail the same way, at the same cost.
 
 ### Admission policy refuses pods
 
@@ -548,7 +606,7 @@ kubectl -n prod exec postgres-0 -- psql -U shortly shortly -c \
 `ShortlyFaultInjectionOn` (ticket) means `faults_injected_total` has been rising for 15 minutes: requests are failing **on purpose**. Fault injection is for canary drills, which last minutes, so either a drill was abandoned or `config.faultErrorRatio` leaked into a release.
 
 ```bash
-kubectl -n prod get deploy,rollout -o yaml 2>/dev/null | grep -A1 SHORTLY_FAULT_ERROR_RATIO   # which release has it
+kubectl -n prod get deploy,rollout -o yaml 2>/dev/null | grep -A1 SHORTLY_FAULT_ERROR_RATIO   # which release has it (prod: a canary drill that wasn't rolled back?)
 kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=500 | grep 'FAULT INJECTION IS ON'
 helm -n prod get values shortly | grep -i fault
 ```
@@ -681,7 +739,7 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Alert drill only | `scripts/alert-drill.sh` (scales staging to 0 for about 90 s, then restores it) |
 | Open psql | `kubectl -n prod exec -it postgres-0 -- psql -U shortly shortly` |
 | Show the generated DB URL | `kubectl -n prod get secret shortly-db -o jsonpath='{.data.url}' \| base64 -d` |
-| Which image is running | `kubectl -n prod get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}'` |
+| Which image is running | `kubectl -n prod get rollout shortly -o jsonpath='{.spec.template.spec.containers[0].image}'` (staging: `deploy`) |
 | Uninstall the app only | `helm -n prod uninstall shortly` (data stays in the PVC) |
 
 `cluster.sh up` installs, side by side, Envoy Gateway (pinned by version and digest, values in `deploy/kind/envoy-gateway-values.yaml`, namespace `envoy-gateway-system` at `baseline`) with the Gateway in `deploy/kind/gateway.yaml`, Argo Rollouts (pinned by version and digest, values in `deploy/kind/argo-rollouts-values.yaml`, namespace `argo-rollouts` at `restricted`, with the Gateway API plugin pinned by checksum for the node's architecture), metrics-server (pinned, checksum-verified, `--kubelet-insecure-tls` for kind only), kube-prometheus-stack (pinned by version and digest, values in `deploy/kind/monitoring-values.yaml`, namespace `monitoring` at the `baseline` Pod Security level), and Kyverno (pinned by version and digest, values in `deploy/kind/kyverno-values.yaml`, namespace `kyverno` at `restricted`) with the policies in `deploy/policies/`, and the backup bucket (SeaweedFS S3, pinned by digest, `deploy/kind/backups.yaml`, namespace `backups` at `restricted`, with a generated S3 identity in Secret `seaweedfs-s3`). It then creates the `staging` and `prod` namespaces enforcing the restricted Pod Security Standard, generates a random password per namespace into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`, the network policies, and the backup CronJob (`deploy/kind/postgres-backup.yaml`, with the bucket credentials copied into Secret `backup-s3`). It never overwrites existing Secrets.

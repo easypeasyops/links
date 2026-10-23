@@ -39,7 +39,7 @@ EXTERNAL = {
     "up",
     "kube_horizontalpodautoscaler_status_current_replicas",
     "kube_horizontalpodautoscaler_spec_max_replicas",
-    "kube_deployment_status_replicas_available",
+    "kube_replicaset_status_ready_replicas",
     "kube_cronjob_status_last_successful_time",
     "kube_cronjob_created",
     "ALERTS",

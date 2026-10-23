@@ -179,6 +179,14 @@ done
 stop_traffic
 
 if [[ "$result" == ok ]]; then
+  # A new Rollout starts at 1 replica until the HPA raises it to its floor (the chart leaves
+  # `replicas` to the HPA). Don't call it done, or remove the old Deployment, before then.
+  min=$(kubectl -n "$ENV" get hpa shortly -o jsonpath='{.spec.minReplicas}' 2>/dev/null || true)
+  for _ in $(seq 1 60); do
+    r=$(ro '{.status.readyReplicas}')
+    ((${r:-0} >= ${min:-1})) && break
+    sleep 2
+  done
   if ((migrating)); then
     kubectl -n "$ENV" delete deploy shortly --wait=false >/dev/null
     echo "     migrated: the Rollout is Healthy; the old Deployment is deleted"
