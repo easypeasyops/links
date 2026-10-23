@@ -214,9 +214,13 @@ install_rollouts() {
 install_argocd() {
   kubectl create namespace argocd --dry-run=client -o yaml | kubectl apply -f - >/dev/null
   kubectl label namespace argocd --overwrite pod-security.kubernetes.io/enforce=restricted >/dev/null
-  helm upgrade --install argocd "$ARGOCD_CHART@$ARGOCD_DIGEST" --version "$ARGOCD_VERSION" \
+  if ! helm upgrade --install argocd "$ARGOCD_CHART@$ARGOCD_DIGEST" --version "$ARGOCD_VERSION" \
     --namespace argocd --values "$ROOT/deploy/kind/argocd-values.yaml" \
-    --wait --timeout 5m >/dev/null
+    --wait --timeout 5m >/dev/null; then
+    kubectl -n argocd get pods -o wide >&2 || true
+    kubectl -n argocd get events --sort-by=.lastTimestamp 2>/dev/null | grep -iE 'fail|error|back-off' | tail -10 >&2 || true
+    return 1
+  fi
   echo "argocd ready: Argo CD (chart $ARGOCD_VERSION) in namespace argocd"
 }
 
