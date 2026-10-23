@@ -629,7 +629,7 @@ Chart lint + kubeconform run *before* kind starts, so a template typo fails in s
 
 Together these cut the job from 9m24s to **5m07s** (PR #27): cluster setup 117 s → 62 s, the e2e 364 s → 166 s. The alert drill took 101 s and finished entirely behind the prod drills, and the HPA drill stopped at +58 s instead of running its full 100 s. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
 
-The canary drills (PR #40) brought it back to **8–10 minutes** (8m19s and 9m59s in the first green runs; the second also had the HPA drill doing a real scale-up again): the healthy canary takes 106–134 s and the faulty one 74–86 s, even with short analyses. They are the price of testing the one release type nothing else catches. If the job's time matters more later, the healthy-canary drill is the one to move to a nightly run: the faulty one is the guard.
+The canary drills (PR #40) brought it back to **8–10 minutes** (8m19s and 9m59s in the first green runs; the second also had the HPA drill doing a real scale-up again): the healthy canary takes 106–134 s and the faulty one 74–86 s, even with short analyses. They are the price of testing the one release type nothing else catches. If the job's time matters more later, the healthy-canary drill is the one to move to a nightly run: the faulty one is the guard. The GitOps drill (step 12, PR #46) adds about 4 minutes more (taking prod over 13 s, self-heal 2 s, a full canary through Argo CD 215 s), bringing the job to about 15 minutes; its timeout is 25. The next step, if it matters, is two kind jobs in parallel: the drills that only touch prod don't need staging's.
 
 
 ### Release workflow — “Publish one immutable, attributable artifact”
@@ -850,7 +850,7 @@ flowchart LR
 
 **`deploy.sh` stays for two jobs:** CI's e2e, which deploys a local build to a cluster without Applications, and break glass. It refuses an environment whose Application exists (`ARGOCD_OVERRIDE=1` overrides, after auto-sync is turned off: RUNBOOK).
 
-**Proven on every PR** (e2e step 12): Argo CD takes prod over from the PR's own commit (the local build instead of the digest), reverts a hand edit of the PodDisruptionBudget, then runs a full canary started by a change to the Application, with analysis and synthetic traffic, while staying in sync.
+**Proven on every PR** (e2e step 12; first green run: takeover 13 s, a hand edit reverted in 2 s, the canary 215 s): Argo CD takes prod over from the PR's own commit (the local build instead of the digest), reverts a hand edit of the PodDisruptionBudget, then runs a full canary started by a change to the Application, with analysis and synthetic traffic, while staying in sync.
 
 | Choice | Why |
 | --- | --- |

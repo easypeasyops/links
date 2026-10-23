@@ -54,7 +54,9 @@ spec:
     {{- if not (and (regexMatch "^[0-9]+s$" (toString $a.initialDelay)) (regexMatch "^[0-9]+s$" (toString $a.interval))) }}
     {{- fail "canary.analysis.initialDelay and .interval must be in seconds (\"60s\") when syntheticTraffic is enabled" }}
     {{- end }}
-    {{- $seconds := add (atoi $delay) (mul (atoi $interval) (int $a.count)) 15 }}
+    {{- /* Until the step's last measurement (initialDelay + (count-1) x interval), plus 10 s:
+           the step ends when every metric has, this one included. */}}
+    {{- $seconds := add (atoi $delay) (mul (atoi $interval) (sub (int $a.count) 1)) 10 }}
     - name: synthetic-traffic
       provider:
         job:
