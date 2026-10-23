@@ -30,12 +30,23 @@
 #  12. GitOps: Argo CD takes prod over from this commit, reverts a hand edit, and runs a
 #      canary it started itself without fighting Argo Rollouts over the route's weights
 #      (needs GITOPS_REVISION, a commit Argo CD can fetch; CI sets it)
+#
+# E2E_SUITE splits the run for CI's two parallel kind jobs. Both run steps 0-3a, then:
+#   platform: 3b, 6-11 (rate limit, autoscaling, monitoring and the alert drill, admission,
+#             network policies, cleanup, backups)
+#   delivery: 4, 5, 5b, 12 (automatic and manual rollback, both canaries, GitOps)
+#   all:      everything in one cluster (the default; what a laptop runs)
+# Every deploy also gets deploy/kind/e2e-values.yaml: faster scrapes and canary analysis.
 set -euo pipefail
 
 IMAGE="${IMAGE:?set IMAGE, e.g. IMAGE=shortly:e2e}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PF_PIDS=()
 ALERT_PID="" ALERT_LOG=$(mktemp)
+SUITE="${E2E_SUITE:-all}"
+case "$SUITE" in all | platform | delivery) ;; *) echo "E2E_SUITE must be all, platform or delivery" >&2; exit 2 ;; esac
+suite() { [[ "$SUITE" == all || "$SUITE" == "$1" ]]; }
+export DEPLOY_EXTRA_VALUES="${DEPLOY_EXTRA_VALUES-$ROOT/deploy/kind/e2e-values.yaml}"
 
 pass() { echo "ok   $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -158,18 +169,19 @@ pass "gateway: sho.rt.localhost → prod, staging.sho.rt.localhost → staging (
 
 # ---------------------------------------------------------------- 7a. alert drill, in the background
 # It scales staging to zero and waits about 90 s for ShortlyNoAvailablePods to reach
-# Alertmanager. Steps 3b-6 (canary drills included) only touch prod, so it runs alongside them instead of after them.
+# Alertmanager. Steps 3b and 6 only touch prod, so it runs alongside them instead of after them.
 # It starts after 3a, which needs staging up (the gateway checks reach both environments).
 # Collected in step 7, before anything uses staging again.
 monitoring=0
 kubectl get crd prometheusrules.monitoring.coreos.com >/dev/null 2>&1 && monitoring=1
-if ((monitoring)); then
+if ((monitoring)) && suite platform; then
   "$ROOT/scripts/alert-drill.sh" >"$ALERT_LOG" 2>&1 &
   ALERT_PID=$!
   echo "     alert drill started in the background (staging scaled to 0)"
 fi
 
 # ---------------------------------------------------------------- 3b. rate limit
+if suite platform; then
 # One client, through the Service, so kube-proxy spreads the requests over both pods: the
 # limit must still be one burst (plus what refills meanwhile), because its state is in
 # Postgres. Per-pod counters would let all burst + 5 through.
@@ -200,9 +212,21 @@ max=$(python3 -c "import math,sys; print($burst + math.ceil(($(date +%s.%N) - $t
 [[ "$(create_as "198.51.100.$((RANDOM % 250 + 1))")" == 201 ]] || fail "rate limit: another client was refused too"
 pass "rate limit: one client got $created creates (burst $burst, at most $max with refill), then 429s, across $(kubectl -n prod get rollout shortly -o jsonpath='{.status.readyReplicas}') pods; other clients unaffected"
 
+fi # 3b
+
 good_rev=$(revision prod)
 good_image=$(deployed_image prod)
 
+# Canary analysis needs Prometheus; its CI timings come from deploy/kind/e2e-values.yaml
+# (every deploy gets it). Without monitoring, steps are short plain pauses instead.
+canary_fast=(--set canary.pauseWithoutAnalysis=5s)
+# Every measurement of every AnalysisRun for one pod hash: "name=Phase ..." per run.
+analysis_runs() {
+  kubectl -n prod get analysisrun -l "rollouts-pod-template-hash=$1" --sort-by=.metadata.creationTimestamp \
+    -o jsonpath='{range .items[*]}{.status.phase}{" "}{end}'
+}
+
+if suite delivery; then
 # ---------------------------------------------------------------- 4. automatic rollback
 # A bad config value makes the new pods fail at boot (Settings validation). They never
 # become ready, so the canary never gets traffic and can't progress; the stable pods keep
@@ -239,22 +263,6 @@ status=$(helm -n prod status shortly -o json | python3 -c 'import json,sys; prin
 [[ "$status" == deployed ]] || fail "release status is $status"
 [[ "$errors" == 0 ]] || fail "$errors failed requests during the bad rollout"
 pass "broken release auto-rolled back (now revision $(revision prod)); 0 failed requests during it"
-
-# Canary analysis needs Prometheus. Fast settings for CI: each step is judged on 2
-# measurements 15 s apart, after 45 s for Prometheus to find and scrape the new pod
-# (default 60 s, 4 x 30 s: values.yaml). 30 s was too short: discovery plus two 15 s
-# scrapes sometimes isn't done yet, and the canary read as having no traffic. Without
-# monitoring, steps are short plain pauses.
-if ((monitoring)); then
-  canary_fast=(--set canary.analysis.initialDelay=45s --set canary.analysis.interval=15s --set canary.analysis.count=2)
-else
-  canary_fast=(--set canary.pauseWithoutAnalysis=5s)
-fi
-# Every measurement of every AnalysisRun for one pod hash: "name=Phase ..." per run.
-analysis_runs() {
-  kubectl -n prod get analysisrun -l "rollouts-pod-template-hash=$1" --sort-by=.metadata.creationTimestamp \
-    -o jsonpath='{range .items[*]}{.status.phase}{" "}{end}'
-}
 
 # ---------------------------------------------------------------- 5. good canary, manual rollback
 # A healthy new version (only the log level differs) goes 10% → 50% → 100%, passing analysis
@@ -337,6 +345,9 @@ else
   echo "skip bad-canary drill: no Prometheus, so no analysis (MONITORING=0?)"
 fi
 
+fi # 4-5b
+
+if suite platform; then
 # ---------------------------------------------------------------- 6. autoscaling
 if [[ "${HPA_DRILL:-1}" != 0 ]]; then
   NS=prod "$ROOT/scripts/hpa-drill.sh"
@@ -446,11 +457,13 @@ else
   echo "skip backup checks: no postgres-backup CronJob (BACKUPS=0?)"
 fi
 
+fi # 6-11
+
 # ---------------------------------------------------------------- 12. GitOps (Argo CD)
 # Prod's Application from deploy/argocd/applications.yaml, pointed at this commit instead of
 # main, and at the local build instead of the release digest (helm parameters). Everything
 # else is as on a real cluster: auto-sync, self-heal, the canary's ignored weights.
-if [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applications.argoproj.io >/dev/null 2>&1; then
+if suite delivery && [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applications.argoproj.io >/dev/null 2>&1; then
   app() { kubectl -n argocd get application shortly-prod -o jsonpath="$1" 2>/dev/null; }
   synced_healthy() { [[ "$(app '{.status.sync.status}/{.status.health.status}')" == Synced/Healthy ]]; }
   wait_app() { # seconds what -> waits until Synced and Healthy on the newest spec
@@ -470,14 +483,13 @@ app = json.load(sys.stdin)
 assert app["metadata"]["name"] == "shortly-prod", app["metadata"]["name"]
 source = app["spec"]["source"]
 source["targetRevision"], source["repoURL"] = revision, repo
-source["helm"]["valuesObject"] = {  # applied after prod.yaml, like --set
+source["helm"]["valueFiles"].append("../../kind/e2e-values.yaml")  # CI clocks, as deploy.sh
+source["helm"]["valuesObject"] = {  # applied after the value files, like --set
     "image": {"repository": repository, "tag": tag, "digest": ""},
     # The HPA drill (step 6) left prod at 4 pods, and the HPA keeps them for 5 minutes. A
     # canary needs room for one more pod, which the CI node then lacks; a lower ceiling
     # takes effect at once and doesn't touch the pod template.
     "autoscaling": {"maxReplicas": 2},
-    # CI-length canary analysis, as in step 5.
-    "canary": {"analysis": {"initialDelay": "45s", "interval": "15s", "count": 2}},
 }
 print(json.dumps(app))
 PY

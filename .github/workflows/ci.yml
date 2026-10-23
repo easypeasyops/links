@@ -87,10 +87,21 @@ jobs:
         env:
           SHORTLY_IMAGE: shortly:ci
   
+  # Two kind clusters in parallel, each running half of the e2e drills (E2E_SUITE in
+  # scripts/k8s-e2e.sh): the platform checks, and the delivery drills (rollbacks, canaries,
+  # GitOps). One cluster ran them in about 14 minutes; two take about 7.
   k8s:
-    name: deploy to kind, rollback drill
+    name: kind e2e (${{ matrix.suite }})
     runs-on: ubuntu-latest
-    timeout-minutes: 25 # usually about 14 (canary and GitOps drills); a hung drill shouldn't hold a runner
+    timeout-minutes: 15 # usually about 7; a hung drill shouldn't hold a runner
+    strategy:
+      fail-fast: false # a failure in one half shouldn't hide the other half's result
+      matrix:
+        include:
+          # Platform: everything but Argo CD (unused there).
+          - { suite: platform, argocd: "0", policies: "1", backups: "1" }
+          # Delivery: no admission policies or backups (unused there), so it starts sooner.
+          - { suite: delivery, argocd: "1", policies: "0", backups: "0" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -165,13 +176,33 @@ jobs:
         if: steps.scope.outputs.e2e == 'true'
         run: scripts/cluster.sh up
         env:
-          ARGOCD_APPS: "0" # Argo CD installed, not yet managing the app: e2e step 12 does that
+          ARGOCD: ${{ matrix.argocd }}
+          ARGOCD_APPS: "0" # where installed, Argo CD doesn't manage the app yet: e2e step 12 does that
+          POLICIES: ${{ matrix.policies }}
+          BACKUPS: ${{ matrix.backups }}
 
       - name: Deploy, promote, rollback drill
         if: steps.scope.outputs.e2e == 'true'
         run: scripts/k8s-e2e.sh
         env:
           IMAGE: shortly:e2e
+          E2E_SUITE: ${{ matrix.suite }}
           # Step 12 has Argo CD deploy prod from this exact commit (the PR's head, which
           # GitHub serves; the merge commit CI checks out is not fetchable by Argo CD).
           GITOPS_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  # The required status check (ruleset main-rules) has this name: one result for both kind
+  # jobs, so splitting or reshaping them never needs a ruleset change.
+  k8s-result:
+    name: deploy to kind, rollback drill
+    if: always()
+    needs: k8s
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Both kind jobs passed (or were skipped as docs-only)
+        env:
+          RESULT: ${{ needs.k8s.result }}
+        run: |
+          echo "kind e2e: $RESULT"
+          [[ "$RESULT" == success ]]
