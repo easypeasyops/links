@@ -460,13 +460,14 @@ if [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applications.argoproj.io >
   }
   repo=${GITOPS_REPO:-https://github.com/statsguy/shortly.git}
   kubectl apply -f "$ROOT/deploy/argocd/project.yaml" >/dev/null
-  # (YAML to JSON by kubectl, which knows the CRD: the runner's python has no YAML module.)
-  kubectl create --dry-run=client -o json -f "$ROOT/deploy/argocd/applications.yaml" \
+  # The prod document, as JSON (kubectl converts; the runner's python has no YAML module).
+  awk 'BEGIN{RS="\n---\n"} /name: shortly-prod/' "$ROOT/deploy/argocd/applications.yaml" \
+    | kubectl create --dry-run=client -o json -f - \
     | python3 -c "$(cat <<'PY'
 import json, sys
 revision, repo, repository, tag = sys.argv[1:]
-items = json.load(sys.stdin)["items"]
-app = next(a for a in items if a["metadata"]["name"] == "shortly-prod")
+app = json.load(sys.stdin)
+assert app["metadata"]["name"] == "shortly-prod", app["metadata"]["name"]
 source = app["spec"]["source"]
 source["targetRevision"], source["repoURL"] = revision, repo
 source["helm"]["valuesObject"] = {  # applied after prod.yaml, like --set
