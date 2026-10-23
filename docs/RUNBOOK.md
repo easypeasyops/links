@@ -18,8 +18,8 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
 | Database | `postgres` StatefulSet per namespace; URL in Secret `shortly-db` key `url` |
 | Canary (prod) | New versions get 10%, then 50% of the Gateway's traffic, each step judged by Prometheus (traffic, 5xx ≤ 1%, redirect p99 ≤ 250 ms), then 100%: about 7 min. A failed step aborts and `deploy.sh` rolls back. Rollbacks to the last 3 revisions are immediate. See Deploy |
-| Deploys | GitOps: Argo CD (namespace `argocd`) syncs each environment from `deploy/envs/<env>.yaml` on `main` within 60 s. Promote with `scripts/promote.sh`; roll back by reverting the promotion PR. UI: `kubectl -n argocd port-forward svc/argocd-server 8090:80` |
-| Front door | Gateway `gateway/shortly` (Envoy Gateway); prod = `sho.rt.localhost`, staging = `staging.sho.rt.localhost`. Locally: `kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80`, then `http://sho.rt.localhost:8080/<code>` |
+| Deploys | GitOps: Argo CD (namespace `argocd`) syncs each environment from `deploy/envs/<env>.yaml` on `main` within 60 s. Promote with `scripts/promote.sh`; roll back by reverting the promotion PR. UI: http://argocd.localhost:8090 (front door) |
+| Front door | Gateway `gateway/shortly` (Envoy Gateway); prod = `sho.rt.localhost`, staging = `staging.sho.rt.localhost`. Locally, always on: `http://sho.rt.localhost:8080/<code>`; the dev tools at `http://{argocd,grafana,prometheus,alertmanager}.localhost:8090` (the front door, Local cluster operations) |
 | Endpoints | `/healthz` liveness · `/readyz` readiness on port 8000 · `/metrics` on port **9100** (Prometheus only, by NetworkPolicy) |
 | Backups | CronJob `postgres-backup` per namespace, hourly at :41 UTC → S3 bucket `shortly-backups/<ns>/` (SeaweedFS, namespace `backups`), 7 days. RPO up to 1 h; restore: `scripts/restore-drill.sh` and "Restore Postgres from a backup" |
 | Cleanup | CronJob `shortly-cleanup`, hourly at :17 UTC: deletes links expired more than 7 days ago (`cleanup:` in the chart values) |
@@ -44,8 +44,7 @@ kubectl -n prod get rollout shortly                        # prod: PHASE Healthy
 kubectl -n staging rollout status deploy/shortly
 kubectl -n prod get events --sort-by=.lastTimestamp | tail -20
 kubectl -n prod get hpa shortly                            # current CPU % vs target, replicas
-kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80   # the user path:
-curl -s http://sho.rt.localhost:8080/readyz              # staging: staging.sho.rt.localhost
+curl -s http://sho.rt.localhost:8080/readyz              # the user path; staging: staging.sho.rt.localhost
 ```
 
 ## Health checks and key queries
@@ -145,7 +144,7 @@ Staging and prod are deployed by **Argo CD from git** (docs/DESIGN.md, GitOps wi
 
    ```bash
    kubectl -n staging exec postgres-0 -- wget -q -O- http://shortly/readyz
-   kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80 &   # through the Gateway, as users
+   # through the Gateway, as users (the front door)
    curl -s -X POST http://staging.sho.rt.localhost:8080/links -H 'content-type: application/json' -d '{"url":"https://example.com"}'
    curl -si http://staging.sho.rt.localhost:8080/<code from the response> | head -3   # expect 307 + Location
    ```
@@ -164,7 +163,7 @@ Staging and prod are deployed by **Argo CD from git** (docs/DESIGN.md, GitOps wi
    ```
 5. Watch for 15 minutes: 5xx ratio, p99 latency, restarts. The canary checks the first few minutes on a share of traffic; it doesn't replace this. If anything regresses, roll back (next section).
 
-The Argo CD UI shows the same, with diffs and history: `kubectl -n argocd port-forward svc/argocd-server 8090:80`, then `http://localhost:8090`, user `admin`, password from `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`.
+The Argo CD UI shows the same, with diffs and history: http://argocd.localhost:8090, user `admin`, password from `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`.
 
 ### Canary releases
 
@@ -705,7 +704,7 @@ Check whether the running digest is affected (the SBOM is attached to the image)
 
 Every CI step can be reproduced locally with the same command; reproduce before you guess.
 
-The kind e2e runs as two jobs in parallel, `kind e2e (platform)` and `kind e2e (delivery)`; the required check `deploy to kind, rollback drill` fails if either does, so open the failing one. Platform covers steps 3b and 6–12 (rate limit, HPA, monitoring, admission, network policies, cleanup, backups, GitOps); delivery covers 4, 5 and 5b (rollbacks and canaries). To rerun just one half locally: `E2E_SUITE=delivery IMAGE=shortly:e2e scripts/k8s-e2e.sh`.
+The kind e2e runs as two jobs in parallel, `kind e2e (platform)` and `kind e2e (delivery)`; the required check `deploy to kind, rollback drill` fails if either does, so open the failing one. Platform covers steps 3b, 3c and 6–12 (rate limit, front door, HPA, monitoring, admission, network policies, cleanup, backups, GitOps); delivery covers 4, 5 and 5b (rollbacks and canaries). To rerun just one half locally: `E2E_SUITE=delivery IMAGE=shortly:e2e scripts/k8s-e2e.sh`.
 
 A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the work in every CI job (`scripts/ci-scope.sh`): all four checks pass in under a minute with the notice "Docs-only change". If a PR you expected to be tested shows that notice, check its file list. A RUNBOOK change always runs everything, because the tests and the e2e read the current release digest from it.
 
@@ -766,13 +765,16 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 scripts/cluster.sh up` |
 | Create without Kyverno and the admission policies | `POLICIES=0 scripts/cluster.sh up` |
 | Create without the backup bucket and backup CronJobs | `BACKUPS=0 scripts/cluster.sh up` |
-| Open the app through the Gateway | `kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80`, then http://sho.rt.localhost:8080 (prod) or http://staging.sho.rt.localhost:8080 |
+| Create without the front door (ports 8080 and 8090 left free) | `FRONT_DOOR=0 scripts/cluster.sh up`; then port-forward by hand, e.g. `kubectl -n monitoring port-forward svc/grafana 3000:80` |
+| Open the app through the Gateway | http://sho.rt.localhost:8080 (prod) or http://staging.sho.rt.localhost:8080, always on (the front door, below) |
+| Front door down? (a UI or the app doesn't answer on 8080 / 8090) | `docker ps --filter name=shortly-front-door` (two, `Up`); `scripts/cluster.sh up` recreates them. A port taken by an old `kubectl port-forward` is the usual cause: it says so; stop that one |
 | Is the Gateway routing? | `kubectl -n gateway get gateway shortly` (`PROGRAMMED True`); `kubectl get httproute -A` |
 | Admission checks only | `scripts/admission-check.sh` (server-side dry runs; creates nothing) |
 | Admission policies and their state | `kubectl get imagevalidatingpolicy,validatingpolicy`; reports: `kubectl get policyreport -A` |
-| Prometheus UI (targets, rules, alerts) | `kubectl -n monitoring port-forward svc/kps-prometheus 9090` → http://localhost:9090 |
-| Alertmanager UI (routing, silences) | `kubectl -n monitoring port-forward svc/kps-alertmanager 9093` → http://localhost:9093 |
-| Grafana (dashboard "shortly / SLOs") | `kubectl -n monitoring port-forward svc/grafana 3000:80` → http://localhost:3000, user `admin` |
+| Prometheus UI (targets, rules, alerts) | http://prometheus.localhost:8090 |
+| Alertmanager UI (routing, silences) | http://alertmanager.localhost:8090 |
+| Grafana (dashboard "shortly / SLOs") | http://grafana.localhost:8090, user `admin` |
+| Argo CD UI | http://argocd.localhost:8090, user `admin`; password: `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' \| base64 -d` |
 | Grafana password | `kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' \| base64 -d` |
 | Back up a database now | `kubectl -n prod create job backup-manual-$(date +%s) --from=cronjob/postgres-backup` |
 | List backups / prove the newest restores | `LIST=1 SOURCE=prod scripts/restore-drill.sh` / `SOURCE=prod scripts/restore-drill.sh` (`KEEP=1` keeps the scratch DB) |

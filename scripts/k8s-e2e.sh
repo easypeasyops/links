@@ -13,6 +13,8 @@
 #   3. the SAME image promotes to prod: autoscaled (HPA, min 2) + a PodDisruptionBudget,
 #      and the per-client rate limit holds exactly across its replicas
 #  3a. users reach each environment through the Gateway, by hostname, and only their own
+#  3c. the front door: the app on the laptop's :8080 and the dev UIs on :8090, no port-forward,
+#      and neither listener serves the other's hostnames (skipped if FRONT_DOOR=0)
 #   4. a broken release (never ready) is rolled back automatically, ZERO failed requests
 #   5. prod's canary: a healthy release goes 10% → 50% → 100% on passing analysis; a
 #      manual `helm rollback` restores the previous one at once (rollbackWindow)
@@ -32,7 +34,7 @@
 #      (needs GITOPS_REVISION, a commit Argo CD can fetch; CI sets it)
 #
 # E2E_SUITE splits the run for CI's two parallel kind jobs. Both run steps 0-3a, then:
-#   platform: 3b, 6-12 (rate limit, autoscaling, monitoring and the alert drill, admission,
+#   platform: 3b, 3c, 6-12 (rate limit, front door, autoscaling, monitoring and the alert drill, admission,
 #             network policies, cleanup, backups, GitOps)
 #   delivery: 4, 5, 5b (automatic and manual rollback, both canaries)
 # (GitOps runs with the platform half: that half was about 4 minutes shorter without it.)
@@ -214,6 +216,35 @@ max=$(python3 -c "import math,sys; print($burst + math.ceil(($(date +%s.%N) - $t
 pass "rate limit: one client got $created creates (burst $burst, at most $max with refill), then 429s, across $(kubectl -n prod get rollout shortly -o jsonpath='{.status.readyReplicas}') pods; other clients unaffected"
 
 fi # 3b
+
+# ---------------------------------------------------------------- 3c. front door
+# The laptop's 8080 (users) and 8090 (dev tools) reach the Gateway through the front-door
+# containers (scripts/cluster.sh), with no port-forward. And the listeners stay apart: a
+# tool's hostname gets nothing on the users' port, and the app's nothing on the tools' port.
+if suite platform && [[ "${FRONT_DOOR:-1}" != 0 ]]; then
+front() { # port host path -> HTTP status
+  curl -s -o /dev/null -w '%{http_code}' -m 5 -H "Host: $2" "http://127.0.0.1:$1$3" || true
+}
+expect_front() { # port host path status
+  local got=""
+  for _ in $(seq 1 30); do
+    got=$(front "$1" "$2" "$3")
+    [[ "$got" == "$4" ]] && return 0
+    sleep 2
+  done
+  fail "front door: http://$2:$1$3 answered $got, expected $4"
+}
+expect_front 8080 sho.rt.localhost /healthz 200
+expect_front 8080 staging.sho.rt.localhost /healthz 200
+tools=(grafana.localhost/api/health prometheus.localhost/-/ready alertmanager.localhost/-/ready)
+if kubectl get ns argocd >/dev/null 2>&1; then tools+=(argocd.localhost/healthz); fi
+for t in "${tools[@]}"; do
+  expect_front 8090 "${t%%/*}" "/${t#*/}" 200
+  expect_front 8080 "${t%%/*}" "/${t#*/}" 404
+done
+expect_front 8090 sho.rt.localhost /healthz 404
+pass "front door: the app on :8080, ${#tools[@]} dev tools on :8090, and neither listener serves the other's hostnames"
+fi # 3c
 
 good_rev=$(revision prod)
 good_image=$(deployed_image prod)

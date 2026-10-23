@@ -1,13 +1,14 @@
 # Argo CD for the kind cluster (scripts/cluster.sh): GitOps for the app's two environments
 # (deploy/argocd/). One replica of everything, no SSO, no notifications: a laptop, not a
-# team. Reach the UI with a port-forward (RUNBOOK, Local cluster operations).
+# team. The UI is at http://argocd.localhost:8090, through the Gateway's tools listener
+# (deploy/kind/tools/argocd.yaml).
 global:
-  domain: localhost:8090
+  domain: argocd.localhost:8090
 
 configs:
   params:
-    # The UI is reached through `kubectl port-forward` only, so no TLS between the browser
-    # and the server. Never on a cluster where the server is exposed.
+    # No TLS between the browser and the server: the front door listens on 127.0.0.1 only
+    # (scripts/cluster.sh). Never on a cluster where the server is exposed.
     server.insecure: true
   cm:
     # Check the repository for changes every 60 s instead of 180 s: a merged promotion PR

@@ -33,6 +33,8 @@ prometheus:
     scrapeInterval: 15s
     evaluationInterval: 15s
     retention: 2d
+    # Where it's reached (deploy/kind/tools/monitoring.yaml): alert links ("Source") use it.
+    externalUrl: http://prometheus.localhost:8090
     # Select ServiceMonitors and PrometheusRules from every release in every namespace,
     # not only those labelled for this Helm release: shortly's chart ships its own.
     serviceMonitorSelectorNilUsesHelmValues: false
@@ -43,6 +45,7 @@ prometheus:
 
 alertmanager:
   alertmanagerSpec:
+    externalUrl: http://alertmanager.localhost:8090 # links in notifications point here
     resources:
       requests: { cpu: 10m, memory: 32Mi }
   # Routing for shortly's alerts. Receivers are named placeholders with no integration, so
@@ -85,6 +88,11 @@ grafana:
   fullnameOverride: grafana
   admin:
     existingSecret: grafana-admin # random password, created once by scripts/cluster.sh
+  # Reached at this address (deploy/kind/tools/monitoring.yaml); Grafana builds its links
+  # and login redirects from it.
+  grafana.ini:
+    server:
+      root_url: http://grafana.localhost:8090
   # Dashboards come from ConfigMaps labelled grafana_dashboard=1 in any namespace (the
   # chart's defaults); shortly's prod release ships the SLO dashboard that way.
   resources:

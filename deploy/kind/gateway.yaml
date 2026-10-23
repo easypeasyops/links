@@ -1,17 +1,27 @@
 # The cluster's front door: one Gateway (Gateway API, served by Envoy Gateway) that routes
-# by hostname to each environment. Applied by scripts/cluster.sh after Envoy Gateway is up.
+# by hostname. Applied by scripts/cluster.sh after Envoy Gateway is up.
 #
-#   prod     sho.rt.localhost          staging  staging.sho.rt.localhost
+#   listener http  (users)   http://sho.rt.localhost:8080          prod
+#                            http://staging.sho.rt.localhost:8080  staging
+#   listener tools (you)     http://argocd.localhost:8090          Argo CD
+#                            http://grafana.localhost:8090         Grafana
+#                            http://prometheus.localhost:8090      Prometheus
+#                            http://alertmanager.localhost:8090    Alertmanager
 #
-# `.localhost` names resolve to 127.0.0.1 on any machine, so after
-#   kubectl -n envoy-gateway-system port-forward svc/shortly-gateway 8080:80
-# http://sho.rt.localhost:8080/<code> works in a browser, through the same route users take.
+# `.localhost` names resolve to 127.0.0.1 on any machine. Ports 8080 and 8090 on the laptop
+# are always there: scripts/cluster.sh runs a small forwarder container next to the kind
+# node (the "front door", RUNBOOK), so no `kubectl port-forward` to start or restart.
+#
+# Two listeners, so the app's routes and the tools' routes can't mix: only staging and
+# prod may attach to `http`, only argocd and monitoring to `tools` (deploy/kind/tools/).
+# On a real cluster the tools would sit behind a separate, internal load balancer with SSO.
 #
 # The chart's HTTPRoute (deploy/helm/shortly/templates/httproute.yaml) attaches each release
 # to this Gateway. In prod, Argo Rollouts shifts that route's weights during a canary.
 ---
-# How Envoy Gateway runs the proxy for this class: a ClusterIP Service with a fixed name.
-# kind has no load balancer, and a fixed name is something scripts and docs can rely on.
+# How Envoy Gateway runs the proxy for this class: a NodePort Service with a fixed name and
+# fixed node ports. kind has no load balancer; the front-door containers forward the
+# laptop's 8080 and 8090 to these node ports (scripts/cluster.sh, FRONT_DOOR_PORTS).
 apiVersion: gateway.envoyproxy.io/v1alpha1
 kind: EnvoyProxy
 metadata:
@@ -23,7 +33,15 @@ spec:
     kubernetes:
       envoyService:
         name: shortly-gateway
-        type: ClusterIP
+        type: NodePort
+        # Envoy Gateway picks random node ports; pin them (merged by port number).
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              ports:
+                - { port: 80, nodePort: 30080 }
+                - { port: 8081, nodePort: 30081 }
       envoyDeployment:
         replicas: 1
         container:
@@ -68,3 +86,14 @@ spec:
           selector:
             matchExpressions:
               - { key: kubernetes.io/metadata.name, operator: In, values: [staging, prod] }
+    # The dev tools (Argo CD, Grafana, Prometheus, Alertmanager). Its own port, so nothing on
+    # the users' listener can reach them, and its own namespace allowlist.
+    - name: tools
+      protocol: HTTP
+      port: 8081
+      allowedRoutes:
+        namespaces:
+          from: Selector
+          selector:
+            matchExpressions:
+              - { key: kubernetes.io/metadata.name, operator: In, values: [argocd, monitoring] }
