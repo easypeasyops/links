@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-22 for v0.6.0 / chart 0.7.0.
+> Last updated 2026-10-22 for v0.6.0 plus the Gateway API front door on main / chart 0.8.0.
 > Expanded request data-flow and CI/CD "why each piece" sections. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
@@ -25,7 +25,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.6.0 and chart 0.7.0: the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, overload protection (a concurrency limit and database timeouts), and Postgres backups with a restore drill. Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.6.0 plus main (chart 0.8.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, overload protection (a concurrency limit and database timeouts), Postgres backups with a restore drill, and the Gateway API front door (not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
@@ -678,6 +678,27 @@ One Helm chart (`deploy/helm/shortly`, Helm 4) deploys the same image digest to 
 | Log level | DEBUG | INFO |
 | Requests / memory limit | 25m CPU, 96Mi / 192Mi | 500m CPU, 128Mi / 256Mi |
 
+**Front door: a Gateway API Gateway.** Users reach the app through one Gateway (`deploy/kind/gateway.yaml`), served by Envoy Gateway and routed by hostname. Each release attaches an HTTPRoute (`templates/httproute.yaml`, `gateway.enabled`).
+
+```mermaid
+flowchart LR
+  U[client] -->|Host: sho.rt.localhost| E[Envoy proxy<br/>envoy-gateway-system/shortly-gateway]
+  U -->|Host: staging.sho.rt.localhost| E
+  E -->|HTTPRoute prod| P[prod: Service shortly]
+  E -->|HTTPRoute staging| S[staging: Service shortly]
+```
+
+| Choice | Why |
+| --- | --- |
+| Gateway API, not Ingress | The Kubernetes successor to Ingress: typed routes, weights and header matching in the spec instead of controller-specific annotations. Weighted backends are what prod's canary uses next |
+| Envoy Gateway | A maintained, conformant Gateway API implementation, from the Envoy project. It ships the Gateway API CRDs itself (v1.6.1), so the two can't drift. ingress-nginx, the usual default, was retired in March 2026 and gets no security fixes |
+| One Gateway, routes per namespace | The platform owns the Gateway (namespace `gateway`); each environment owns its route. Only `staging` and `prod` may attach routes, so nothing else can capture a hostname |
+| `*.localhost` hostnames | They resolve to 127.0.0.1 everywhere, so a port-forward to the proxy gives real URLs in a browser (`http://sho.rt.localhost:8080/<code>`) |
+
+The `shortly` Service still exists and still serves in-cluster callers (probes, the e2e's direct checks, Prometheus scrapes). The Gateway is the user path. e2e step 3a proves that each hostname reaches its own environment, that a prod link doesn't resolve through staging's hostname, and that unknown hostnames get 404.
+
+**Argo Rollouts** is installed alongside (chart 2.43.6, Argo Rollouts v1.10.0) with its Gateway API traffic-router plugin (v0.17.0). The controller downloads the plugin when it starts and refuses it unless the checksum matches. The project publishes no checksums, so the pinned values were computed from the release binaries. That protects against a later swap, not against a bad original. It is unused until prod becomes a Rollout (canary releases, next).
+
 **Build once, deploy many.** `scripts/deploy.sh <env> <image-ref>` takes a digest reference (`repo@sha256:…`) for released images; the bits tested in staging are the bits promoted to prod. A tag reference is accepted only on a `kind-*` context, for local images, which are loaded into kind first. The chart refuses to render with neither digest nor tag.
 
 **Provenance gate.** Before deploying a digest, `deploy.sh` runs `scripts/verify-image.sh`, which checks the image's signed SLSA provenance with `gh attestation verify`. The deploy is refused unless:
@@ -716,7 +737,7 @@ The probes, and `/metrics`, never wait in the request threadpool. FastAPI runs s
 
 | From | To | Port | Why |
 | --- | --- | --- | --- |
-| Anyone (`networkPolicy.httpFrom`; on a real cluster, the ingress) | shortly | 8000 | The public API |
+| Anyone (`networkPolicy.httpFrom`): the Gateway's Envoy proxy, and in-cluster callers | shortly | 8000 | The public API. On a real cluster, narrow this to the proxy's namespace |
 | Prometheus pods in `monitoring` | shortly | 9100 | Scrapes; nobody else sees internal metrics |
 | shortly (app, migration and cleanup Jobs) | kube-dns | 53 UDP/TCP | Name resolution |
 | shortly (pods labelled `app.kubernetes.io/part-of: shortly`) | postgres | 5432 | The only dependency, in both directions |
@@ -764,6 +785,8 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | Backup bucket down or full | Backup Jobs fail at upload (the dump itself is fine); existing backups unaffected unless the bucket's volume is lost | `ShortlyBackupNotRunning`; upload errors in the Job's `upload` log |
 | Database lost (volume deleted, corrupted) | Every request fails; restore from the newest dump loses up to 1 hour of writes | `ShortlyDown` / `ShortlyNotReady`; RUNBOOK, Restore Postgres from a backup |
 | Index build fails halfway (lock timeout, disk) | The migration Job fails and the release is aborted; an invalid index is left, which the next run drops and rebuilds | Failed `shortly-migrate-<rev>` Job; `indisvalid = false` in `pg_index` |
+| Gateway proxy down (Envoy pod lost, bad config) | Users can't reach any environment; in-cluster callers and probes are unaffected, so pods stay Ready and the SLO metrics show a drop in traffic, not errors | `ShortlyDown` doesn't fire (pods are fine): watch request rate; `kubectl -n gateway get gateway shortly` (`Programmed`) |
+| HTTPRoute not accepted (hostname or parent misconfigured) | That environment is unreachable through the Gateway; the others are fine | `kubectl -n <ns> get httproute` shows the parent's `Accepted`/`ResolvedRefs` conditions |
 | Tracing backend down | Spans dropped by the batch exporter; requests unaffected | Exporter warnings in logs |
 | Vulnerable dependency published | CI image scan fails; release workflow refuses to publish | Red `build, scan` job |
 
@@ -860,6 +883,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Compromised dependency or base image | Lockfile with hashes, digest-pinned bases, Trivy gate on every PR and before publish, weekly Dependabot |
 | Tampered or substituted image | Deploy by digest; `deploy.sh` refuses any digest whose signed SLSA provenance isn't from this repo's `release.yml` at a release tag; the Kyverno admission policy refuses the same at the API server, so hand-run `helm` or `kubectl` can't bypass it |
 | Arbitrary image in the app namespaces | Kyverno image allowlist: Audit in kind, Deny in a real cluster |
+| Tampered controller plugin | The Gateway API plugin for Argo Rollouts is pinned by version and SHA-256, and refused on mismatch. The checksums were computed at pin time (none published upstream) |
+| Hostname capture by another namespace | The Gateway admits routes from `staging` and `prod` only |
 | Compromised CI action | Actions pinned by SHA; workflow `permissions` least-privilege; `persist-credentials: false` |
 | Container escape / lateral movement | Non-root, read-only root FS, no capabilities, seccomp, no SA token, restricted PSS enforced |
 | App rewriting its own code | Code and venv owned by root, read-only to UID 10001 |
@@ -877,6 +902,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Collision handling | Insert-and-catch on PK | Check-then-insert | Atomic; no race under concurrency |
 | Storage access | SQLAlchemy Core, sync, psycopg 3 | ORM; async driver | One table; sync in threadpool is simple. The load test shows a CPU ceiling, which an async driver would not raise |
 | Transactions | Autocommit for the app; transactions for migrations | Implicit transaction per request | Every app query is one atomic statement; saves 2 round trips per request (about +25% capacity) |
+| Front door | Gateway API with Envoy Gateway; one Gateway, an HTTPRoute per environment | Ingress with ingress-nginx; Traefik; no front door (Service only) | Gateway API is the Ingress successor and carries traffic weights in the spec, which the canary needs. ingress-nginx was retired in March 2026. Traefik is supported natively by Argo Rollouts (no plugin), but uses its own CRDs; Gateway API keeps the router swappable, at the cost of Argo's plugin being alpha |
 | Pool | Fixed size 5, no overflow, 1 s timeout → 503 | SQLAlchemy defaults (overflow 10, 30 s wait) | Known Postgres connection budget; overload fails fast instead of piling up |
 | Overload | A per-pod in-flight limit (16) that answers 503 at once; statement (2 s) and lock (1 s) timeouts in Postgres | Unbounded queueing; a request timeout that abandons the response but not the work; an adaptive limit (TCP Vegas, gradient); limiting only at the ingress | Measured: latency of what succeeds stays near 100 ms instead of seconds. A request timeout frees the client but leaves the thread and connection busy. Adaptive limits fit better when capacity varies; ours is measured and stable, so a fixed limit is simpler to reason about and test |
 | Backups | Hourly `pg_dump` (custom format) to S3 in another namespace; a restore drill on every PR | Volume snapshots; WAL archiving with point-in-time recovery (pgBackRest, WAL-G); an operator (CloudNativePG) | A dump is portable across versions and hosts and easy to verify by restoring it, which is the property that matters most. PITR is the production answer for the recovery point, and comes with a managed database; snapshots of a local volume share its failure domain |
@@ -940,7 +966,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - Capacity was measured on a small, in-memory dataset; Postgres cost per request will rise with table size.
 - Alert receivers are placeholders: alerts are routed but not delivered to a person (no PagerDuty or Slack integration).
 - Prometheus keeps 2 days of data in kind and has no persistent volume, so 30-day error budgets reset when its pod restarts.
-- The SLIs are measured in the app. Requests that never reach it (ingress or network failures) are invisible except through `ShortlyDown` and `ShortlyNotReady`; a load-balancer SLI would be more complete.
+- The SLIs are measured in the app. Requests that never reach it (ingress or network failures) are invisible except through `ShortlyDown` and `ShortlyNotReady`; a load-balancer SLI would be more complete. Now that a Gateway sits in front, Envoy's own request metrics could supply that SLI; they aren't scraped yet.
 - At very low traffic one error is a large ratio, so burn-rate alerts can be noisy; a minimum-request-rate guard is not implemented.
 - Local kind only; no production cluster.
 - Backups are hourly dumps: up to an hour of writes can be lost (no point-in-time recovery), and a restore of a large database is slow (every index is rebuilt).
