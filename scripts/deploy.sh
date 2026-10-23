@@ -160,7 +160,7 @@ trap stop_traffic EXIT
 
 # Only for a real canary: a first install (no stable version yet) or a rollback inside
 # rollbackWindow skips the steps, so there is nothing to judge.
-stable=$(ro '{.status.stableRS}')
+stable=$(ro '{.status.stableRS}') first_stable=$stable
 if [[ -n "$stable" && "$(ro '{.status.currentPodHash}')" != "$stable" && "${CANARY_TRAFFIC:-1}" != 0 ]]; then
   start_traffic
 fi
@@ -184,7 +184,12 @@ while :; do
     kubectl -n "$ENV" patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}' >/dev/null
     result=timeout; break
   fi
-  line="step $(ro '{.status.currentStepIndex}')/$(ro '{.spec.strategy.canary.steps}' | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))'), canary weight $(ro '{.status.canary.weights.canary.weight}')%, $phase $(ro '{.status.message}')"
+  if [[ -z "$first_stable" ]]; then # first install or migration: no steps, every pod is new
+    line="first version, no canary: $phase $(ro '{.status.message}')"
+  else
+    weight=$(ro '{.status.canary.weights.canary.weight}')
+    line="step $(ro '{.status.currentStepIndex}')/$(ro '{.spec.strategy.canary.steps}' | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))'), canary weight ${weight:-0}%, $phase $(ro '{.status.message}')"
+  fi
   [[ "$line" != "$last" ]] && echo "     $line" && last=$line
   sleep 5
 done
