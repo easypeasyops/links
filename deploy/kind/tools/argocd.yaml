@@ -1,0 +1,17 @@
+# Argo CD's UI and API through the Gateway's `tools` listener: http://argocd.localhost:8090
+# (deploy/kind/gateway.yaml). Applied by scripts/cluster.sh once Argo CD is installed.
+# Plain HTTP is fine only because the front door listens on 127.0.0.1 (server.insecure in
+# deploy/kind/argocd-values.yaml). The argocd CLI works too: `argocd login argocd.localhost:8090
+# --plaintext --grpc-web`.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: argocd
+  namespace: argocd
+spec:
+  parentRefs:
+    - { name: shortly, namespace: gateway, sectionName: tools }
+  hostnames: [argocd.localhost]
+  rules:
+    - backendRefs:
+        - { name: argocd-server, port: 80 }

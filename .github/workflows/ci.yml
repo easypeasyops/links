@@ -160,6 +160,9 @@ jobs:
           # The Argo CD project and Applications (step 12 applies them for real).
           docker run --rm -v "$PWD/deploy/argocd:/a:ro" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
             -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" /a
+          # The dev tools' routes (deploy/kind/tools; step 3c uses them).
+          docker run --rm -v "$PWD/deploy/kind/tools:/t:ro" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
+            -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" /t
 
       - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         if: steps.scope.outputs.full == 'true'

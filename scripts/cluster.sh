@@ -9,6 +9,7 @@
 #   ARGOCD=0 scripts/cluster.sh up      # skip Argo CD altogether (CI's delivery e2e job)
 #   ARGOCD_APPS=0 scripts/cluster.sh up # install Argo CD, but don't let it manage the app
 #                                       # (CI: the e2e deploys with deploy.sh instead)
+#   FRONT_DOOR=0 scripts/cluster.sh up  # no forwarders on the laptop's ports 8080 and 8090
 #
 # Always installed: Envoy Gateway (the Gateway API implementation that is the cluster's
 # front door), Argo Rollouts (prod's canary releases) and Argo CD (GitOps: it deploys the
@@ -51,6 +52,13 @@ GATEWAYAPI_PLUGIN_SHA256_arm64=5221279f7bf2c9b2c0ff6ed7ff12718ecce1d4892f1ff5e52
 ARGOCD_CHART=oci://ghcr.io/argoproj/argo-helm/argo-cd
 ARGOCD_VERSION=10.11.1 # Argo CD v3.5.6
 ARGOCD_DIGEST=sha256:2ac5224a5c201789f96aa9e085673d80732591d1b3e815a8a825a4db6d1d7c88
+# The front door: one tiny socat container per port, beside the kind node, forwarding the
+# laptop's 127.0.0.1:<host> to the Gateway's fixed node port (deploy/kind/gateway.yaml).
+# A port-forward dies with its terminal, the laptop's sleep or the pod it pinned; these
+# restart with Docker and outlive every release. Containers rather than kind's
+# extraPortMappings, which only take effect when the cluster is created.
+FRONT_DOOR_IMAGE=docker.io/alpine/socat:1.8.1.3@sha256:22d77becaeeea8ef56b8c4bb2312323acafe85354be6a85714ff5050e3537842
+FRONT_DOOR_PORTS=("8080:30080" "8090:30081") # host:nodePort, users (http) and dev tools (tools)
 
 up() {
   if ! kind get clusters 2>/dev/null | grep -qx "$CLUSTER"; then
@@ -72,6 +80,10 @@ up() {
   if [[ "${BACKUPS:-1}" != 0 ]]; then install_backups & pids+=($!); fi
   for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
   ((failed == 0)) || { echo "an add-on failed to install (its error is above)" >&2; exit 1; }
+  # The dev tools' routes, once both the Gateway API CRDs and the tools' namespaces exist.
+  if [[ "${ARGOCD:-1}" != 0 ]]; then kubectl apply -f "$ROOT/deploy/kind/tools/argocd.yaml" >/dev/null; fi
+  if [[ "${MONITORING:-1}" != 0 ]]; then kubectl apply -f "$ROOT/deploy/kind/tools/monitoring.yaml" >/dev/null; fi
+  if [[ "${FRONT_DOOR:-1}" != 0 ]]; then front_door; fi
 
   for ns in "${ENVS[@]}"; do
     kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -203,6 +215,27 @@ install_gateway() {
   echo "gateway ready: Envoy Gateway $GATEWAY_VERSION, Gateway gateway/shortly (svc envoy-gateway-system/shortly-gateway)"
 }
 
+# Start (or replace) the front-door forwarders. Not fatal: the cluster works without them,
+# through kubectl port-forward (RUNBOOK, Local cluster operations).
+front_door() {
+  local node="$CLUSTER-control-plane" mapping host node_port name
+  for mapping in "${FRONT_DOOR_PORTS[@]}"; do
+    host=${mapping%%:*} node_port=${mapping##*:} name="$CLUSTER-front-door-$host"
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    # 127.0.0.1 only: the tools listener has no login of its own (Prometheus, Alertmanager).
+    if ! docker run -d --name "$name" --restart unless-stopped --network kind \
+      -p "127.0.0.1:$host:$host" "$FRONT_DOOR_IMAGE" \
+      "tcp-listen:$host,fork,reuseaddr" "tcp-connect:$node:$node_port" >/dev/null; then
+      docker rm -f "$name" >/dev/null 2>&1 || true
+      echo "WARNING: front door: port $host is taken on this machine (an old kubectl port-forward?):" >&2
+      lsof -nP -iTCP:"$host" -sTCP:LISTEN >&2 2>/dev/null || true
+      echo "  stop it and rerun scripts/cluster.sh up" >&2
+    fi
+  done
+  echo "front door: http://sho.rt.localhost:8080 (prod), http://staging.sho.rt.localhost:8080,"
+  echo "  http://{argocd,grafana,prometheus,alertmanager}.localhost:8090"
+}
+
 install_rollouts() {
   local arch sha
   kubectl create namespace argo-rollouts --dry-run=client -o yaml | kubectl apply -f - >/dev/null
@@ -254,6 +287,10 @@ install_backups() {
 }
 
 down() {
+  local mapping
+  for mapping in "${FRONT_DOOR_PORTS[@]}"; do
+    docker rm -f "$CLUSTER-front-door-${mapping%%:*}" >/dev/null 2>&1 || true
+  done
   kind delete cluster --name "$CLUSTER"
 }
 
