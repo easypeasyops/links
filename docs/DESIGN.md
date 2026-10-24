@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-23 for v0.7.0 plus GitOps with Argo CD on main / chart 0.10.0. Mirrored at
+> Last updated 2026-10-23 for v0.7.1 / chart 0.10.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -8,7 +8,7 @@
 
 shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /{code}` redirects to the target with a 307. It is built as a production-shaped reference service, so the operational machinery around it (CI, supply chain, observability, deploys, rollback) matters as much as the feature.
 
-**Status:** v0.7.0 released 2026-10-22 as `ghcr.io/statsguy/shortly@sha256:9df4c29bd25d…` (amd64 + arm64), with signed SLSA provenance (previous: v0.6.0, 2026-10-22). It deploys to local Kubernetes (kind) in `staging` and `prod` namespaces.
+**Status:** v0.7.1 released 2026-10-23 as `ghcr.io/statsguy/shortly@sha256:f8e4982b3a41…` (amd64 + arm64), with signed SLSA provenance (previous: v0.7.0, 2026-10-22). It deploys to local Kubernetes (kind) in `staging` and `prod` namespaces.
 
 **Goals**
 
@@ -24,7 +24,7 @@ shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /
 - Multi-region or a managed cloud deployment (the chart is portable; the infrastructure is not built yet).
 - Abuse prevention (rate limiting, malicious-URL screening).
 
-**Scope of this doc:** the system as of v0.7.0 plus main (chart 0.10.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, overload protection (a concurrency limit and database timeouts), Postgres backups with a restore drill, the Gateway API front door, drill-only fault injection, canary releases for prod with Argo Rollouts, and GitOps with Argo CD (the last one not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
+**Scope of this doc:** the system as of v0.7.1 (chart 0.10.0): the capacity work (autocommit, load shedding, HPA), SLOs with burn-rate alerts delivered through kube-prometheus-stack, the provenance gate and admission policy, per-client rate limiting, the metrics port with network policies, expired-link cleanup, overload protection (a concurrency limit and database timeouts), Postgres backups with a restore drill, the Gateway API front door, drill-only fault injection, canary releases for prod with Argo Rollouts, and GitOps with Argo CD (the last one not yet in a release). Operational procedures live in [RUNBOOK.md](RUNBOOK.md).
 
 ## Architecture
 
