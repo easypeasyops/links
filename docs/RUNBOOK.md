@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-23 for v0.7.0 plus GitOps with Argo CD on main / chart 0.10.0. Mirrored at
+> Last updated 2026-10-23 for v0.7.1 / chart 0.10.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -12,7 +12,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | --- | --- |
 | Repo | [github.com/statsguy/shortly](https://github.com/statsguy/shortly) |
 | Image | `ghcr.io/statsguy/shortly` — deploy by digest, never by tag |
-| Current release | v0.7.0, `sha256:9df4c29bd25d9f69b0ce2f7776a0affeab4d2bca18c859668927e398f4a21670` (previous: v0.6.0, `sha256:737d173f98fdbfc4c39c5248a7f46d25d9b6d9ef3678c6dee9689f97207335df`) |
+| Current release | v0.7.1, `sha256:f8e4982b3a4197e0d68b83ef7bd06f0213bd54afffd65f4a088c21fd0852e046` (previous: v0.7.0, `sha256:9df4c29bd25d9f69b0ce2f7776a0affeab4d2bca18c859668927e398f4a21670`) |
 | Environments | kind cluster `shortly`; namespaces `staging` (Deployment, 1 replica), `prod` (Argo Rollout, canary releases, HPA 2–4 replicas) |
 | Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
@@ -33,7 +33,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 
 ```bash
 # Most-used commands
-D=sha256:9df4c29bd25d9f69b0ce2f7776a0affeab4d2bca18c859668927e398f4a21670
+D=sha256:f8e4982b3a4197e0d68b83ef7bd06f0213bd54afffd65f4a088c21fd0852e046
 scripts/promote.sh staging $D --pr                         # deploy = merge this PR (Argo CD syncs)
 scripts/promote.sh prod $D --pr                            # after staging ran it
 kubectl -n argocd get applications                         # SYNC STATUS / HEALTH per environment
