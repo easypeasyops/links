@@ -519,9 +519,18 @@ kubectl -n argocd logs deploy/argocd-repo-server --tail=50
 | OutOfSync, auto-sync not running | Someone turned auto-sync off (break glass) and didn't turn it back on | `kubectl apply -f deploy/argocd/applications.yaml` after checking git says what should run |
 | OutOfSync on the HTTPRoute or the `shortly-stable`/`shortly-canary` Services only | The Application lost its `ignoreDifferences` for what Argo Rollouts owns (an edited Application) | `kubectl apply -f deploy/argocd/applications.yaml` |
 
-### A platform Application won't sync
+### Argo CD alerts
 
-`kubectl -n argocd get applications -l app.kubernetes.io/part-of=platform` lists them. One that won't sync is usually one of:
+Four tickets and no pages. A stuck Argo CD never breaks what already runs; it stops new changes from landing. The prod SLO alerts cover users. Rules: `deploy/argocd/platform/files/argocd-rules.yaml`.
+
+| Alert | Means | First look |
+| --- | --- | --- |
+| `ArgoCDAppOutOfSync` | An Application has differed from git for 15 minutes (auto-sync normally takes about a minute) | `kubectl -n argocd get applications`, then "A merged change didn't deploy (Argo CD)" above |
+| `ArgoCDAppUnhealthy` | Degraded, Missing or Unknown for 10 minutes (a canary between steps is Suspended or Progressing, never this) | `kubectl -n argocd get application <name> -o jsonpath='{range .status.resources[?(@.health.status!="Healthy")]}{.kind}/{.namespace}/{.name}: {.health.message}{"\n"}{end}'`; for `shortly-prod`, "Canary aborted" |
+| `ArgoCDSyncFailed` | A sync was refused in the last 15 minutes (admission policy, invalid manifest, failed migration hook), even if a retry worked | `kubectl -n argocd get application <name> -o jsonpath='{.status.operationState.message}'` |
+| `ArgoCDDown` | No application controller scraped for 10 minutes: nothing syncs, nothing self-heals, and the three above are blind | `kubectl -n argocd get pods`; `kubectl -n argocd logs statefulset/argocd-application-controller --tail=50` |
+
+A **platform** Application (`kubectl -n argocd get applications -l app.kubernetes.io/part-of=platform`) that won't sync is usually one of:
 
 | What you see | Cause | Fix |
 | --- | --- | --- |
@@ -810,7 +819,7 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 
 `cluster.sh up` bootstraps Argo CD with Helm (pinned by version and digest, values in `deploy/kind/argocd-values.yaml`) and creates the two secrets the platform needs, which git never holds (`grafana-admin` in `monitoring`, the S3 identity `seaweedfs-s3` in `backups`). It then applies the platform's root Application (`deploy/argocd/platform-root.yaml`, with the node's architecture and `PLATFORM_REVISION`, default `main`) and waits until every platform Application is Synced and Healthy. Argo CD installs the rest from `deploy/argocd/platform/`, in two sync waves:
 - **Wave 0:** metrics-server, Envoy Gateway with the Gateway and the tool routes, Argo Rollouts with the Gateway API plugin for that architecture, kube-prometheus-stack, Kyverno, and the backup bucket.
-- **Wave 1:** the Kyverno policies.
+- **Wave 1:** the Kyverno policies, and the alerts on Argo CD.
 
 `cluster.sh up` then creates the `staging` and `prod` namespaces, which enforce the restricted Pod Security Standard. In each it generates a random password into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`, the network policies and the backup CronJob (`deploy/kind/postgres-backup.yaml`, with the bucket credentials copied into Secret `backup-s3`). It never overwrites existing Secrets.
 

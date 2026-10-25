@@ -165,7 +165,9 @@ def test_runbook_links_point_at_real_sections() -> None:
 
     runbook = (ROOT / "docs/RUNBOOK.md").read_text()
     anchors = {slug(h) for h in re.findall(r"^#{2,4} (.+)$", runbook, re.MULTILINE)}
-    links = {r["annotations"]["runbook_url"] for r in _rules() if "alert" in r}
+    argocd = yaml.safe_load((ROOT / "deploy/argocd/platform/files/argocd-rules.yaml").read_text())
+    platform = [rule for group in argocd["groups"] for rule in group["rules"]]
+    links = {r["annotations"]["runbook_url"] for r in _rules() + platform if "alert" in r}
     for link in links:
         assert link.startswith("https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#")
         assert link.split("#", 1)[1] in anchors, f"no RUNBOOK section for {link}"

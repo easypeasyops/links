@@ -44,6 +44,11 @@ applicationSet:
 
 controller:
   replicas: 1
+  # The metrics Service; the ServiceMonitor and the alerts on Argo CD come with the
+  # platform (deploy/argocd/platform/templates/monitoring.yaml), once the monitoring
+  # CRDs exist. Argo CD is installed before them, so it can't ship its own.
+  metrics:
+    enabled: true
   # It caches every resource it manages. 768Mi was enough for the app; with the platform
   # (kube-prometheus-stack, Kyverno, Envoy Gateway and their large CRDs) it crash-looped in
   # CI, and nothing synced while it was down.
