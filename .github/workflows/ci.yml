@@ -160,6 +160,8 @@ jobs:
           # The Argo CD project and Applications (step 12 applies them for real).
           docker run --rm -v "$PWD/deploy/argocd:/a:ro" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
             -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" /a
+          # The vendored metrics-server manifest with its kind patch (Argo CD will run kustomize).
+          kubectl kustomize deploy/platform/metrics-server | docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary -kubernetes-version 1.37.0 -
           # The dev tools' routes (deploy/kind/tools; step 3c uses them).
           docker run --rm -v "$PWD/deploy/kind/tools:/t:ro" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
             -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" /t
