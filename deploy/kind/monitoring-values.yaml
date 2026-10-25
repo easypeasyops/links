@@ -1,4 +1,4 @@
-# kube-prometheus-stack for the local kind cluster, installed by scripts/cluster.sh: enough
+# kube-prometheus-stack for the local kind cluster, deployed by Argo CD (deploy/argocd/platform/): enough
 # to scrape shortly, evaluate its rules, route its alerts and show the SLO dashboard.
 # Components that can't work in kind (or that shortly doesn't need) are off.
 

@@ -1,5 +1,6 @@
-# Argo CD for the kind cluster (scripts/cluster.sh): GitOps for the app's two environments
-# (deploy/argocd/). One replica of everything, no SSO, no notifications: a laptop, not a
+# Argo CD for the kind cluster, bootstrapped by scripts/cluster.sh (the one component not
+# deployed from git): GitOps for the app's two environments and for the platform under
+# them (deploy/argocd/). One replica of everything, no SSO, no notifications: a laptop, not a
 # team. The UI is at http://argocd.localhost:8090, through the Gateway's tools listener
 # (deploy/kind/tools/argocd.yaml).
 global:

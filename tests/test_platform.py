@@ -60,6 +60,7 @@ def test_children_are_pinned_and_stay_in_the_platform_project(sets: tuple[str, .
     allowed_ns = {d["namespace"] for d in PROJECT["destinations"]}
     for app in _render(*sets):
         name = app["metadata"]["name"]
+        assert app["kind"] == "Application"
         assert app["metadata"]["namespace"] == "argocd"
         assert app["spec"]["project"] == "platform", name
         assert app["spec"]["destination"]["namespace"] in allowed_ns, name
@@ -78,7 +79,7 @@ def test_children_are_pinned_and_stay_in_the_platform_project(sets: tuple[str, .
                 assert (ROOT / values_file.removeprefix("$values/")).is_file(), values_file
 
 
-def test_only_what_needs_a_running_webhook_waits_for_wave_1() -> None:
+def test_waves_put_crd_users_after_the_charts_that_install_the_crds() -> None:
     waves = {
         a["metadata"]["name"]: a["metadata"]["annotations"]["argocd.argoproj.io/sync-wave"]
         for a in _render()
@@ -102,6 +103,20 @@ def test_rollouts_plugin_matches_the_node_architecture(arch: str) -> None:
     ]
     assert plugin["location"].endswith(f"-linux-{arch}")
     assert plugin["sha256"] == VALUES["gatewayAPIPlugin"]["sha256"][arch]
+
+
+def test_helm_releases_handed_over_are_the_ones_argo_cd_renders() -> None:
+    """cluster.sh deletes these Helm records once Argo CD owns the resources: names must match."""
+    script = (ROOT / "scripts/cluster.sh").read_text()
+    match = re.search(r"^HELM_RELEASES=\(([^)]*)\)", script, re.M)
+    assert match
+    handed_over = set(match[1].split())
+    rendered = {
+        f"{a['spec']['destination']['namespace']}/{a['spec']['sources'][0]['helm']['releaseName']}"
+        for a in _render()
+        if "sources" in a["spec"]
+    }
+    assert handed_over == rendered
 
 
 def test_root_application_points_at_the_chart() -> None:

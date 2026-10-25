@@ -1,4 +1,4 @@
-# The platform under Argo CD (DESIGN, GitOps with Argo CD). scripts/cluster.sh will set the
+# The platform under Argo CD (DESIGN, GitOps with Argo CD). scripts/cluster.sh sets the
 # first block through the root Application's Helm parameters; the rest is the pin list.
 
 # Where the git-backed children (manifests, policies, values files) come from. `main` on a

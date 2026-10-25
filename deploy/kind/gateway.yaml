@@ -1,5 +1,6 @@
 # The cluster's front door: one Gateway (Gateway API, served by Envoy Gateway) that routes
-# by hostname. Applied by scripts/cluster.sh after Envoy Gateway is up.
+# by hostname. Deployed by Argo CD (the platform's `gateway` Application, wave 1: after
+# Envoy Gateway and its CRDs).
 #
 #   listener http  (users)   http://sho.rt.localhost:8080          prod
 #                            http://staging.sho.rt.localhost:8080  staging

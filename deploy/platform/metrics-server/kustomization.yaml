@@ -1,5 +1,4 @@
-# metrics-server for the kind cluster, to be deployed by Argo CD (the platform under
-# Argo CD; scripts/cluster.sh still applies the release manifest until then).
+# metrics-server for the kind cluster, deployed by Argo CD (deploy/argocd/platform/).
 # components.yaml is the upstream v0.9.0 release manifest, vendored byte for byte and
 # checked against SHA256SUMS (recorded when it was first pinned) by tests/test_platform.py:
 # a manifest fetched at deploy time would be code you run with cluster-admin, unreviewed.

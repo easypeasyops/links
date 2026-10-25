@@ -1,5 +1,5 @@
 # LOCAL ONLY: S3-compatible object storage for Postgres backups, in its own namespace.
-# Applied by scripts/cluster.sh. In a real cloud this is a bucket (S3, GCS) in another
+# Deployed by Argo CD (the platform's `backups` Application). In a real cloud this is a bucket (S3, GCS) in another
 # account or region, with versioning and object lock, and the database is a managed one
 # whose provider also takes continuous (point-in-time) backups.
 #

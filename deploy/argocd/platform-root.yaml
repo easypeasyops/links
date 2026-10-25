@@ -1,5 +1,5 @@
 # The root of the platform (app-of-apps): renders deploy/argocd/platform/, one child
-# Application per component. scripts/cluster.sh will apply this file with its Helm
+# Application per component. scripts/cluster.sh applies this file with its Helm
 # parameters set (the node's architecture, the git revision, the components to install);
 # Argo CD itself stays bootstrapped by cluster.sh, not by git.
 apiVersion: argoproj.io/v1alpha1
