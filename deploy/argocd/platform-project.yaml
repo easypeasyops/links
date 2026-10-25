@@ -2,7 +2,7 @@
 # underneath the app. Broad on purpose, and kept apart from the app's project
 # (project.yaml), which may not touch anything cluster-scoped: these charts install CRDs,
 # ClusterRoles and admission webhooks, so this project may too. The sources are pinned:
-# this repository (the chart registries join with the charts).
+# this repository and the four chart registries, nothing else.
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:
@@ -12,6 +12,10 @@ spec:
   description: The kind cluster's platform, deployed from git (app-of-apps)
   sourceRepos:
     - https://github.com/statsguy/shortly.git
+    - oci://registry-1.docker.io/envoyproxy/gateway-helm
+    - oci://ghcr.io/argoproj/argo-helm/argo-rollouts
+    - oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
+    - oci://ghcr.io/kyverno/charts/kyverno
   destinations:
     # Platform namespaces only: staging and prod belong to the app's project.
     - { server: https://kubernetes.default.svc, namespace: argocd } # the child Applications, tool routes

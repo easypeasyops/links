@@ -1,6 +1,6 @@
 # The root of the platform (app-of-apps): renders deploy/argocd/platform/, one child
 # Application per component. scripts/cluster.sh will apply this file with its Helm
-# parameters set (the git revision, the components to install);
+# parameters set (the node's architecture, the git revision, the components to install);
 # Argo CD itself stays bootstrapped by cluster.sh, not by git.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
@@ -14,7 +14,7 @@ spec:
     targetRevision: main # cluster.sh: PLATFORM_REVISION
     path: deploy/argocd/platform
     helm:
-      parameters: [] # cluster.sh: revision, components.*
+      parameters: [] # cluster.sh: arch, revision, components.*
   destination: { server: https://kubernetes.default.svc, namespace: argocd }
   syncPolicy:
     automated: { prune: true, selfHeal: true }
