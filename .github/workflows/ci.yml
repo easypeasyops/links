@@ -38,6 +38,11 @@ jobs:
         with:
           enable-cache: true # Python version comes from .python-version
 
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        if: steps.scope.outputs.full == 'true'
+        with:
+          version: v4.3.1 # tests/test_platform.py renders the platform chart
+
       - name: Install (fails if uv.lock is stale)
         if: steps.scope.outputs.full == 'true'
         run: uv sync --locked
@@ -157,9 +162,17 @@ jobs:
           # The Kyverno admission policies (their verdicts are tested by pytest and step 8).
           docker run --rm -v "$PWD/deploy/policies:/p:ro" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
             -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" /p
-          # The Argo CD project and Applications (step 12 applies them for real).
-          docker run --rm -v "$PWD/deploy/argocd:/a:ro" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
-            -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" /a
+          # The Argo CD projects and Applications: the app's (step 12 applies them for real),
+          # the platform's root, and the child Applications the platform chart renders, with
+          # every component on and with every one off.
+          lint_argocd() { docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
+            -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" -; }
+          awk 'FNR == 1 { print "---" } 1' deploy/argocd/*.yaml | lint_argocd # one document stream
+          helm lint deploy/argocd/platform
+          for args in "" "--set components.monitoring=false --set components.policies=false --set components.backups=false"; do
+            # shellcheck disable=SC2086 # word splitting intended
+            helm template platform deploy/argocd/platform $args | lint_argocd
+          done
           # The vendored metrics-server manifest with its kind patch (Argo CD will run kustomize).
           kubectl kustomize deploy/platform/metrics-server | docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary -kubernetes-version 1.37.0 -
           # The dev tools' routes (deploy/kind/tools; step 3c uses them).

@@ -1,0 +1,14 @@
+# The platform under Argo CD (DESIGN, GitOps with Argo CD). scripts/cluster.sh will set
+# these through the root Application's Helm parameters.
+
+# Where the git-backed children (manifests, policies, values files) come from. `main` on a
+# laptop: a merged platform change reaches the cluster within a minute, like an app
+# promotion. CI sets the PR's commit.
+repoURL: https://github.com/statsguy/shortly.git
+revision: main
+# What to install (cluster.sh's MONITORING, POLICIES, BACKUPS knobs; CI's delivery job
+# skips the last two).
+components:
+  monitoring: true
+  policies: true
+  backups: true
