@@ -168,7 +168,7 @@ jobs:
           # both CPU architectures and with every component switched off once.
           lint_argocd() { docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
             -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" -; }
-          cat deploy/argocd/*.yaml | lint_argocd
+          awk 'FNR == 1 { print "---" } 1' deploy/argocd/*.yaml | lint_argocd # one document stream
           helm lint deploy/argocd/platform --set arch=amd64
           for args in "--set arch=amd64" "--set arch=arm64" \
             "--set arch=amd64 --set components.monitoring=false --set components.policies=false --set components.backups=false"; do
