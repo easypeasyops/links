@@ -140,6 +140,16 @@ def test_argo_cd_alerts_ship_only_with_monitoring() -> None:
 
     _render()  # skips without helm
     assert {"ServiceMonitor", "PrometheusRule"} <= set(kinds())
+    # Their CRDs arrive in wave 0: Argo CD's dry run must not fail the root's whole sync.
+    out = subprocess.run(
+        ["helm", "template", "platform", str(CHART), "--set", "arch=amd64"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    for doc in (d for d in yaml.safe_load_all(out) if d and d["kind"] != "Application"):
+        options = doc["metadata"]["annotations"]["argocd.argoproj.io/sync-options"]
+        assert "SkipDryRunOnMissingResource=true" in options, doc["kind"]
     assert not {"ServiceMonitor", "PrometheusRule"} & set(kinds("components.monitoring=false"))
 
 

@@ -10,6 +10,10 @@ metadata:
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-wave: "1"
+    # Its CRD comes with kube-prometheus-stack in wave 0. Argo CD dry-runs every resource
+    # before the first wave, and the dry run of a kind that doesn't exist yet fails the
+    # whole sync (seen in CI): skip it for this one.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   selector:
     matchLabels:
@@ -28,6 +32,10 @@ metadata:
   namespace: argocd
   annotations:
     argocd.argoproj.io/sync-wave: "1"
+    # Its CRD comes with kube-prometheus-stack in wave 0. Argo CD dry-runs every resource
+    # before the first wave, and the dry run of a kind that doesn't exist yet fails the
+    # whole sync (seen in CI): skip it for this one.
+    argocd.argoproj.io/sync-options: SkipDryRunOnMissingResource=true
 spec:
   {{- .Files.Get "files/argocd-rules.yaml" | fromYaml | toYaml | nindent 2 }}
 {{- end }}
