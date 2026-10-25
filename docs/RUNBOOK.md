@@ -592,6 +592,7 @@ Check p99 by route, then `kubectl -n prod get hpa shortly`.
 
 - **CPU above target and replicas rising:** the HPA is catching up with a spike. Latency should recover within about a minute.
 - **Pinned at `maxReplicas`:** out of capacity; see Saturation.
+- **Slow on every pod at once, old and new versions alike, with little traffic:** something else on the node is taking the CPU. `kubectl top pods -A --sort-by=cpu`, or in Prometheus `topk(5, sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{container!=""}[1m])))`. On kind this was Kyverno's reports controller (DESIGN, issues found while building): background work belongs under a CPU limit.
 - **Neither:** open a slow request's trace in Jaeger. A long `SELECT` or `INSERT` span points at the database; a gap before it points at the pool (`db_pool_in_use`).
 
 ### Saturation: load shed or HPA at max

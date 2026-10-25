@@ -16,3 +16,9 @@ cleanupController:
   enabled: false
 reportsController:
   enabled: true
+  # Background work, so a CPU limit is right here (unlike the app, which has none: a
+  # limit throttles a latency-sensitive process even on an idle node). Without one, its
+  # scans took up to 9 of the node's cores and slowed every request (DESIGN, issues).
+  resources:
+    requests: { cpu: 50m, memory: 64Mi }
+    limits: { cpu: 500m, memory: 256Mi }

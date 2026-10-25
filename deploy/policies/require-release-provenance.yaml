@@ -21,6 +21,14 @@ metadata:
       provenance signed by statsguy/shortly's release workflow at a release tag.
 spec:
   validationActions: [Deny]
+  # Admission only. In the background the reports controller re-verified every running
+  # shortly image against the registry and Rekor, over and over: about 1.1 cores on
+  # average and bursts of 9 on the kind node, which slowed every request in the cluster
+  # (2026-10-24: 49% of creates over 100 ms in one burst). A pod's image can't change
+  # after admission, so a background re-check adds no safety for this rule.
+  evaluation:
+    background:
+      enabled: false
   failurePolicy: Fail # if verification can't run (Kyverno down, registry or Rekor unreachable): refuse
   webhookConfiguration:
     timeoutSeconds: 30 # registry + Rekor round trips; the API server's maximum
