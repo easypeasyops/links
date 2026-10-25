@@ -1,4 +1,4 @@
-# Argo Rollouts for the kind cluster (scripts/cluster.sh). It runs prod's canary releases:
+# Argo Rollouts for the kind cluster (Argo CD, deploy/argocd/platform/). It runs prod's canary releases:
 # a Rollout shifts traffic on the HTTPRoute step by step and checks Prometheus before each.
 controller:
   replicas: 1 # a real cluster runs 2 (leader election); here one is enough
@@ -6,8 +6,8 @@ controller:
     requests: { cpu: 50m, memory: 64Mi }
     limits: { memory: 256Mi }
   # The Gateway API traffic router is a plugin the controller downloads at start, pinned by
-  # version and checksum. scripts/cluster.sh sets `trafficRouterPlugins` for the node's
-  # architecture (amd64 in CI, arm64 on Apple silicon).
+  # version and checksum. The platform chart sets `trafficRouterPlugins` for the node's
+  # architecture (amd64 in CI, arm64 on Apple silicon; deploy/argocd/platform/values.yaml).
 dashboard:
   enabled: false
 # Least privilege: RBAC for the Gateway API router only, not for every mesh it supports.

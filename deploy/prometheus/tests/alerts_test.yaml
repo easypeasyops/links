@@ -6,6 +6,7 @@
 rule_files:
   - ../../helm/shortly/rules/slo.yaml
   - ../../helm/shortly/rules/shortly.yaml
+  - ../../argocd/platform/files/argocd-rules.yaml
 
 evaluation_interval: 1m
 
@@ -485,3 +486,89 @@ tests:
       - eval_time: 35m
         alertname: ShortlyFaultInjectionOn
         exp_alerts: []
+
+  # ------------------------------------------------------------------ Argo CD
+  # A promotion merged but never applied: OutOfSync for 15 minutes opens a ticket. Another
+  # app that synced within minutes stays quiet.
+  - name: an application stuck out of sync opens a ticket
+    interval: 1m
+    input_series:
+      - series: 'argocd_app_info{name="shortly-prod",project="shortly",sync_status="OutOfSync",health_status="Healthy"}'
+        values: '1x30'
+      - series: 'argocd_app_info{name="shortly-staging",project="shortly",sync_status="OutOfSync",health_status="Healthy"}'
+        values: '1 1 1 _x27' # a normal sync: out of sync for 3 minutes, then the series moves
+      - series: 'argocd_app_info{name="shortly-staging",project="shortly",sync_status="Synced",health_status="Healthy"}'
+        values: '_ _ _ 1x27'
+      - series: 'up{job="argocd-application-controller-metrics"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: ArgoCDAppOutOfSync
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: ArgoCDAppOutOfSync
+        exp_alerts:
+          - exp_labels: {name: shortly-prod, project: shortly, severity: ticket}
+            exp_annotations:
+              summary: shortly-prod has differed from git for 15 minutes
+              description: What runs is not what git says. A merged promotion or platform change hasn't landed, or someone changed the cluster by hand and self-heal can't undo it.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#argo-cd-alerts
+      - eval_time: 20m
+        alertname: ArgoCDDown
+        exp_alerts: []
+
+  # Degraded for 10 minutes is a ticket; a canary between steps (Suspended, Progressing)
+  # is not, however long it takes.
+  - name: a degraded application opens a ticket, a canary in progress doesn't
+    interval: 1m
+    input_series:
+      - series: 'argocd_app_info{name="monitoring",project="platform",sync_status="Synced",health_status="Degraded"}'
+        values: '1x20'
+      - series: 'argocd_app_info{name="shortly-prod",project="shortly",sync_status="Synced",health_status="Suspended"}'
+        values: '1x20'
+      - series: 'argocd_app_info{name="shortly-staging",project="shortly",sync_status="Synced",health_status="Progressing"}'
+        values: '1x20'
+    alert_rule_test:
+      - eval_time: 15m
+        alertname: ArgoCDAppUnhealthy
+        exp_alerts:
+          - exp_labels: {name: monitoring, project: platform, severity: ticket}
+            exp_annotations:
+              summary: monitoring has been unhealthy for 10 minutes
+              description: Argo CD reports the application's resources as not working. For shortly-prod the SLO alerts say whether users notice; this one says the release itself needs attention.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#argo-cd-alerts
+
+  - name: a failed sync opens a ticket at once
+    interval: 1m
+    input_series:
+      - series: 'argocd_app_sync_total{name="kyverno-policies",project="platform",phase="Failed"}'
+        values: '0 0 0 1 1 1 1 1'
+      - series: 'argocd_app_sync_total{name="shortly-prod",project="shortly",phase="Succeeded"}'
+        values: '0 1 2 3 4 5 6 7'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ArgoCDSyncFailed
+        exp_alerts:
+          - exp_labels: {name: kyverno-policies, project: platform, severity: ticket}
+            exp_annotations:
+              summary: Syncing kyverno-policies failed in the last 15 minutes
+              description: Argo CD tried to apply git and the cluster refused (an admission policy, a bad manifest, a failed migration hook).
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#argo-cd-alerts
+
+  - name: no Argo CD controller scraped for 10 minutes opens a ticket
+    interval: 1m
+    input_series:
+      - series: 'up{job="argocd-application-controller-metrics"}'
+        values: '1 1 0x15'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: ArgoCDDown
+        exp_alerts: []
+      - eval_time: 14m
+        alertname: ArgoCDDown
+        exp_alerts:
+          - exp_labels: {severity: ticket}
+            exp_annotations:
+              summary: Argo CD's application controller isn't running (or isn't scraped)
+              description: Nothing in git reaches the cluster while it is down, and drift goes uncorrected. Running workloads are unaffected.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#argo-cd-alerts

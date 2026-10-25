@@ -119,15 +119,16 @@ jobs:
   k8s:
     name: kind e2e (${{ matrix.suite }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15 # usually about 8; a hung drill shouldn't hold a runner
+    timeout-minutes: 20 # a hung drill shouldn't hold a runner
     strategy:
       fail-fast: false # a failure in one half shouldn't hide the other half's result
       matrix:
         include:
           # Platform: everything.
-          - { suite: platform, argocd: "1", policies: "1", backups: "1" }
-          # Delivery: no Argo CD, admission policies or backups (unused there).
-          - { suite: delivery, argocd: "0", policies: "0", backups: "0" }
+          - { suite: platform, policies: "1", backups: "1" }
+          # Delivery: no admission policies or backups (unused there). Both install the
+          # platform through Argo CD, from this commit: what CI tests is what a laptop runs.
+          - { suite: delivery, policies: "0", backups: "0" }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -163,17 +164,18 @@ jobs:
           docker run --rm -v "$PWD/deploy/policies:/p:ro" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
             -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" /p
           # The Argo CD projects and Applications: the app's (step 12 applies them for real),
-          # the platform's root, and the child Applications the platform chart renders, with
-          # every component on and with every one off.
+          # the platform's root, and the child Applications the platform chart renders, for
+          # both CPU architectures and with every component switched off once.
           lint_argocd() { docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
             -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" -; }
           awk 'FNR == 1 { print "---" } 1' deploy/argocd/*.yaml | lint_argocd # one document stream
-          helm lint deploy/argocd/platform
-          for args in "" "--set components.monitoring=false --set components.policies=false --set components.backups=false"; do
+          helm lint deploy/argocd/platform --set arch=amd64
+          for args in "--set arch=amd64" "--set arch=arm64" \
+            "--set arch=amd64 --set components.monitoring=false --set components.policies=false --set components.backups=false"; do
             # shellcheck disable=SC2086 # word splitting intended
             helm template platform deploy/argocd/platform $args | lint_argocd
           done
-          # The vendored metrics-server manifest with its kind patch (Argo CD will run kustomize).
+          # The vendored metrics-server manifest with its kind patch (Argo CD runs kustomize).
           kubectl kustomize deploy/platform/metrics-server | docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary -kubernetes-version 1.37.0 -
           # The dev tools' routes (deploy/kind/tools; step 3c uses them).
           docker run --rm -v "$PWD/deploy/kind/tools:/t:ro" ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
@@ -197,14 +199,28 @@ jobs:
           tags: shortly:e2e
           cache-from: type=gha
 
-      - name: Namespaces, Postgres, secrets
+      - name: Platform through Argo CD; namespaces, Postgres, secrets
         if: steps.scope.outputs.full == 'true'
         run: scripts/cluster.sh up
         env:
-          ARGOCD: ${{ matrix.argocd }}
-          ARGOCD_APPS: "0" # where installed, Argo CD doesn't manage the app yet: e2e step 12 does that
+          # Argo CD syncs the platform from this commit (the PR's head: a merge commit only
+          # exists on GitHub's side under a ref Argo CD doesn't fetch).
+          PLATFORM_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+          ARGOCD_APPS: "0" # Argo CD doesn't manage the app yet: e2e step 12 does that
           POLICIES: ${{ matrix.policies }}
           BACKUPS: ${{ matrix.backups }}
+
+      # When a sync never finishes, the job's timeout kills the wait before it can explain.
+      - name: Argo CD state (on failure)
+        if: (failure() || cancelled()) && steps.scope.outputs.full == 'true'
+        run: |
+          kubectl -n argocd get applications -o wide || true
+          kubectl -n argocd get applications -o jsonpath='{range .items[*]}{"== "}{.metadata.name}{" "}{.status.sync.status}/{.status.health.status}{"\n"}{range .status.conditions[*]}  {.type}: {.message}{"\n"}{end}{range .status.resources[?(@.health.status!="Healthy")]}  {.health.status}: {.kind}/{.namespace}/{.name} {.health.message}{"\n"}{end}{.status.operationState.phase}: {.status.operationState.message}{"\n"}{end}' || true
+          kubectl get pods -A | grep -vE "Running|Completed" || true
+          # Why each restarted container last stopped (OOMKilled, Error...).
+          kubectl get pods -A -o jsonpath='{range .items[*]}{range .status.containerStatuses[?(@.restartCount>0)]}{.name}: {.restartCount} restarts, last {.lastState.terminated.reason} (exit {.lastState.terminated.exitCode}){"\n"}{end}{end}' || true
+          kubectl -n argocd logs statefulset/argocd-application-controller --previous --tail=30 || true
+          kubectl -n argocd logs deploy/argocd-repo-server --tail=40 || true
 
       - name: Deploy, promote, rollback drill
         if: steps.scope.outputs.full == 'true'

@@ -1,5 +1,5 @@
 # The monitoring UIs through the Gateway's `tools` listener (deploy/kind/gateway.yaml).
-# Applied by scripts/cluster.sh once kube-prometheus-stack is installed.
+# Deployed by Argo CD (the platform's `tool-routes` Application) when monitoring is on.
 #   http://grafana.localhost:8090  http://prometheus.localhost:8090  http://alertmanager.localhost:8090
 # Each one's externalUrl / root_url (deploy/kind/monitoring-values.yaml) is the same address,
 # so links in alerts and dashboards open here.

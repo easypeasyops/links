@@ -1,5 +1,6 @@
-# Argo CD for the kind cluster (scripts/cluster.sh): GitOps for the app's two environments
-# (deploy/argocd/). One replica of everything, no SSO, no notifications: a laptop, not a
+# Argo CD for the kind cluster, bootstrapped by scripts/cluster.sh (the one component not
+# deployed from git): GitOps for the app's two environments and for the platform under
+# them (deploy/argocd/). One replica of everything, no SSO, no notifications: a laptop, not a
 # team. The UI is at http://argocd.localhost:8090, through the Gateway's tools listener
 # (deploy/kind/tools/argocd.yaml).
 global:
@@ -43,9 +44,17 @@ applicationSet:
 
 controller:
   replicas: 1
+  # The metrics Service; the ServiceMonitor and the alerts on Argo CD come with the
+  # platform (deploy/argocd/platform/templates/monitoring.yaml), once the monitoring
+  # CRDs exist. Argo CD is installed before them, so it can't ship its own.
+  metrics:
+    enabled: true
+  # It caches every resource it manages. 768Mi was enough for the app; with the platform
+  # (kube-prometheus-stack, Kyverno, Envoy Gateway and their large CRDs) it crash-looped in
+  # CI, and nothing synced while it was down.
   resources:
-    requests: { cpu: 100m, memory: 256Mi }
-    limits: { memory: 768Mi }
+    requests: { cpu: 100m, memory: 512Mi }
+    limits: { memory: 2Gi }
 server:
   replicas: 1
   resources:

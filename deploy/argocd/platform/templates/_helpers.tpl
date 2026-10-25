@@ -4,7 +4,8 @@ applies a wave, waits until its Applications are Healthy (argocd-cm's Applicatio
 check, deploy/kind/argocd-values.yaml), then starts the next.
   wave 0: the charts and the CRDs they ship; also what needs only a fast chart's CRDs
           (the Gateway, the tool routes: the sync retry covers the few seconds' race)
-  wave 1: what needs a slow chart running (the Kyverno policies: Kyverno's webhook)
+  wave 1: what needs a slow chart running (the Kyverno policies: Kyverno's webhook; the
+          alerts on Argo CD: kube-prometheus-stack's CRDs)
 */}}
 {{- define "platform.meta" -}}
 apiVersion: argoproj.io/v1alpha1
@@ -47,4 +48,23 @@ syncPolicy:
   retry:
     limit: 10
     backoff: { duration: 10s, factor: 2, maxDuration: 2m }
+{{- end }}
+
+{{/* A chart from an OCI registry, pinned by digest, with its values file from git. */}}
+{{- define "platform.chartSources" -}}
+sources:
+  - repoURL: {{ .chart.repo }}
+    targetRevision: {{ .chart.digest }} # {{ .chart.version }}
+    path: .
+    helm:
+      releaseName: {{ .release }} # the name scripts/cluster.sh's helm install used
+      valueFiles:
+        - $values/{{ .values }}
+      {{- with .valuesObject }}
+      valuesObject:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  - repoURL: {{ .root.Values.repoURL }}
+    targetRevision: {{ .root.Values.revision }}
+    ref: values
 {{- end }}

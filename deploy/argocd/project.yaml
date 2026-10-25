@@ -1,7 +1,7 @@
 # The Argo CD project for shortly: what its Applications may deploy, and where.
 # Least privilege, like the rest of the cluster: one repository, two namespaces, and no
-# cluster-scoped resources at all (the chart has none; the platform is installed by
-# scripts/cluster.sh, not by Argo CD).
+# cluster-scoped resources at all (the chart has none). The platform under the app has a
+# project of its own, which may (platform-project.yaml).
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
 metadata:

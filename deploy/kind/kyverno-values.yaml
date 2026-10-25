@@ -1,4 +1,4 @@
-# Kyverno for the kind cluster (scripts/cluster.sh), sized for one laptop node.
+# Kyverno for the kind cluster (Argo CD, deploy/argocd/platform/), sized for one laptop node.
 # The policies themselves live in deploy/policies/.
 admissionController:
   # One replica is enough here. In a real cluster run 3: the provenance policy fails closed,
