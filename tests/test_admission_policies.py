@@ -127,6 +127,19 @@ def test_provenance_policy_matches_the_deploy_gate() -> None:
     }  # fmt: skip
 
 
+def test_expensive_checks_stay_out_of_the_background() -> None:
+    """Provenance is verified at admission only; background work can't take the node.
+
+    Background re-verification of every running image (registry and Rekor round trips)
+    cost about 1.1 cores on average and bursts of 9 on the kind node, and slowed every
+    request in the cluster (DESIGN, issues found while building).
+    """
+    spec = _load("require-release-provenance.yaml")["spec"]
+    assert spec["evaluation"]["background"]["enabled"] is False
+    values = yaml.safe_load((ROOT / "deploy/kind/kyverno-values.yaml").read_text())
+    assert "cpu" in values["reportsController"]["resources"]["limits"]
+
+
 def test_policies_cover_the_app_namespaces_only() -> None:
     for name in ("require-release-provenance.yaml", "allowed-images.yaml"):
         selector = _load(name)["spec"]["matchConstraints"]["namespaceSelector"]
