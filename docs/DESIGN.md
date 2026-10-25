@@ -478,7 +478,7 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 5. Every query on the SLO dashboard must select something the app exports or a recorded series.
 6. amtool validates the Alertmanager config and checks where each kind of alert is routed.
 
-**Delivery in Kubernetes.** `scripts/cluster.sh` installs kube-prometheus-stack 91.9.0 (pinned by version and digest) into a `monitoring` namespace: Prometheus Operator, Prometheus, Alertmanager, kube-state-metrics and Grafana. Pieces that can't work in kind are disabled: control-plane scraping, and node-exporter, which needs host namespaces that the namespace's `baseline` Pod Security level forbids. The shortly chart then ships its own monitoring:
+**Delivery in Kubernetes.** Argo CD installs kube-prometheus-stack 91.9.0 (pinned by digest; "The platform under Argo CD" below) into a `monitoring` namespace: Prometheus Operator, Prometheus, Alertmanager, kube-state-metrics and Grafana. Pieces that can't work in kind are disabled: control-plane scraping, and node-exporter, which needs host namespaces that the namespace's `baseline` Pod Security level forbids. The shortly chart then ships its own monitoring:
 
 | Object | Rendered in | Why |
 | --- | --- | --- |
@@ -628,7 +628,7 @@ Chart lint + kubeconform run *before* kind starts, so a template typo fails in s
 - The broken release's canary timeout is 45 s. Its pod crashes within seconds, so a longer wait proves nothing more.
 - Every e2e deploy adds `deploy/kind/e2e-values.yaml`: Prometheus scrapes every 5 s, and canary analysis waits 20 s, then checks twice 10 s apart (production: 15 s scrapes, 60 s, 4 × 30 s). Same logic, shorter clocks.
 - The staging alert drill runs alongside the prod drills.
-- `cluster.sh up` installs its add-ons side by side, and each kind job installs only what its half uses (the delivery cluster skips Argo CD, Kyverno and backups).
+- Argo CD installs the platform's charts side by side (one sync wave), and each kind job installs only what its half uses (the delivery cluster skips Kyverno and backups).
 - The two halves run on two runners at once.
 - A PR that changes only Markdown skips the work in **all three jobs**, not just the cluster: `scripts/ci-scope.sh` runs first in each and the other steps run only if it says so, so a docs PR is mergeable in under a minute instead of eight (PR #50; a pure-docs PR was blocked by `check` and `image` for about 75 s and by the kind jobs before that). The jobs still report success, because they are required checks. A workflow-level paths filter would leave those checks pending forever and block the merge. `docs/RUNBOOK.md` doesn't count as Markdown-only, because the tests, the admission checks and the e2e read the release digest from it, so a record-digest PR runs everything. Pushes to main always run everything. `tests/test_ci_scope.py` pins which changes skip.
 
@@ -724,7 +724,7 @@ The `shortly` Service still exists and still serves in-cluster callers (probes, 
 
 The attestation bundle is read from the registry (`--bundle-from-oci`), so the check doesn't depend on GitHub's API. It fails closed: no `gh`, no network or no attestation means no deploy. The break-glass flag `INSECURE_SKIP_VERIFY=1` skips the check with a loud warning, for when the registry or Sigstore is down mid-incident. `tests/test_deploy_gate.py` runs `deploy.sh` against stub tools and asserts that helm is never called for a refused image. It also verifies the release digest the runbook documents, against the real registry.
 
-**Admission policy.** `deploy.sh` protects the normal path; the cluster protects every other one. `scripts/cluster.sh` installs Kyverno 1.19.1 (chart 3.9.1, pinned by version and digest) and applies `deploy/policies/`:
+**Admission policy.** `deploy.sh` protects the normal path; the cluster protects every other one. Argo CD installs Kyverno 1.19.1 (chart 3.9.1, pinned by digest) and then `deploy/policies/`, one sync wave later:
 
 | Policy | Kind | Rule | In kind |
 | --- | --- | --- | --- |
@@ -829,7 +829,7 @@ The thresholds are absolute ("good enough"), not relative ("no worse than stable
 
 ### GitOps with Argo CD
 
-Since chart 0.10.0, nobody runs `helm upgrade` against staging or prod. **Argo CD** (chart 10.11.1, Argo CD v3.5.6, installed by `scripts/cluster.sh`) deploys both from git, and git is the only way in:
+Since chart 0.10.0, nobody runs `helm upgrade` against staging or prod. **Argo CD** (chart 10.11.1, Argo CD v3.5.6, bootstrapped by `scripts/cluster.sh`) deploys both from git, and the platform under them too (below), and git is the only way in:
 
 ```mermaid
 flowchart LR
@@ -867,7 +867,53 @@ flowchart LR
 | Pull (Argo CD polls git), not push (CI runs `helm upgrade`) | The cluster needs no credentials in CI, and drift is corrected, not just avoided. Push would need a kubeconfig in GitHub, which a laptop cluster can't offer anyway |
 | Same repository, `deploy/envs/` | The chart and its values are reviewed together. A separate config repository separates permissions and history, which a team of one doesn't need yet |
 | Auto-sync for both, promotion by PR | One approval per environment, in git, with CI in front of it. Manual sync would add a second approval outside git |
-| App only; the platform stays in `cluster.sh` | Smaller first step. Moving Envoy Gateway, Argo Rollouts, monitoring, Kyverno and backups under Argo CD (app-of-apps) is the follow-up |
+| App first, then the platform (app-of-apps) | The app moved first (PR #46), the platform after (PR #60). Argo CD itself stays bootstrapped by `cluster.sh`: a bad change to it from git could take down the thing that would fix it |
+
+
+### The platform under Argo CD
+
+Since PR #60 everything under the app comes from git too. Only Argo CD itself and the secrets are still put there by `scripts/cluster.sh`. A merged change to a platform chart's values, a policy or the Gateway reaches the cluster within a minute, as a promotion does, and a hand edit is reverted.
+
+```mermaid
+flowchart TB
+  CS["scripts/cluster.sh up<br/>Helm: Argo CD (bootstrap)<br/>secrets: grafana-admin, seaweedfs-s3"] --> Root
+  Root["Application platform (root)<br/>deploy/argocd/platform, a Helm chart<br/>parameters: arch, revision, components"]
+  Root --> W0
+  Root --> W1
+  subgraph W0["wave 0: charts and their CRDs"]
+    direction LR
+    MS[metrics-server<br/>vendored manifest]
+    EG[envoy-gateway]
+    AR[argo-rollouts<br/>+ plugin for arch]
+    KPS[monitoring<br/>kube-prometheus-stack]
+    KY[kyverno]
+    BK[backups<br/>SeaweedFS]
+  end
+  subgraph W1["wave 1: what uses those CRDs"]
+    direction LR
+    GW[gateway<br/>Gateway, listeners]
+    TR[tool-routes]
+    KP[kyverno-policies]
+    AM[Argo CD alerts<br/>ServiceMonitor, rules]
+  end
+  W0 -->|"all Healthy"| W1
+```
+
+| Choice | Why |
+| --- | --- |
+| The root is a Helm chart that renders the children | Git can't know a cluster's CPU architecture (the Argo Rollouts plugin is a per-architecture binary) or which commit CI is testing. The root takes them as Helm parameters, which `cluster.sh` sets from the node and from `PLATFORM_REVISION` (`main` on a laptop, the PR's commit in CI) |
+| Charts pulled by digest, natively from OCI | `targetRevision` is the chart's digest, the version a comment beside it. `tests/test_platform.py` (integration) checks each version still resolves to its digest, so a re-pushed tag is caught before anyone trusts it |
+| Values files stay in git, beside the chart's source | Each chart Application is multi-source: the chart from its registry, `$values` from this repository at the root's revision |
+| metrics-server vendored, not fetched | The release manifest is checked into `deploy/platform/metrics-server/` with its SHA-256; a kustomize patch adds the kind-only flag |
+| Sync waves, with Application health on | Policies need Kyverno's webhook, the Gateway needs Envoy Gateway's CRDs. Argo CD only waits for a wave's Applications to be Healthy if it reports Application health, which `argocd-cm` turns back on (`deploy/kind/argocd-values.yaml`) |
+| A separate `platform` AppProject | The platform must create CRDs, ClusterRoles and webhooks. The app's project still may create nothing cluster-scoped, and neither project may deploy into the other's namespaces |
+| No resources-finalizer on the children | Deleting a child Application, or the root, orphans its resources instead of deleting the monitoring stack or the admission webhook along with it |
+| Server-side apply and server-side diff | The kube-prometheus-stack, Kyverno and Envoy Gateway CRDs are too big for client-side apply, and fields that other controllers write (webhook CA bundles) are not drift |
+| Release names kept | Each chart keeps the release name `cluster.sh` used, so on an existing cluster Argo CD adopts the running resources instead of recreating them, and `cluster.sh` deletes the old Helm records once it has |
+
+**CI installs the platform the same way.** Both kind jobs run `cluster.sh up` with the PR's commit as `PLATFORM_REVISION`, so what CI tests is what a laptop runs; there is no Helm-only shortcut that could pass while the Argo CD path is broken.
+
+**Alerts on Argo CD itself.** With GitOps, a sync that silently stops is a deploy that silently never happens. Four tickets, none paging (`deploy/argocd/platform/files/argocd-rules.yaml`, promtool-tested): an Application out of sync for 15 minutes, unhealthy (Degraded, Missing, Unknown) for 10, a failed sync, and the controller not scraped for 10 minutes. Playbook: RUNBOOK, Argo CD alerts.
 
 ## Reliability and failure modes
 
@@ -1104,7 +1150,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - **Cause found, to be confirmed: a latency tail on the laptop cluster.** During the v0.7.1 canary (2026-10-24) 7% of creates took over 100 ms and 3.4% of redirects over 50 ms, on old and new pods alike. Slow requests came in bursts: 49% of creates were slow in one minute and 0% two minutes earlier, on every pod at once. The bursts matched Kyverno's reports controller, which took 3–9 cores re-verifying images in the background (1.1 cores on average, 85% of the cluster's CPU), not Postgres (its disk writes were flat) or the app (0.01 cores). Fixed in PR #59 (admission-only verification, a CPU limit on the controller). Still to measure: the tail during the next canary on the laptop.
 - Local kind only; no production cluster.
 - GitOps: Argo CD polls GitHub every 60 s (no webhook: a laptop isn't reachable from GitHub), so a merge takes up to a minute to land. One replica of each Argo CD component, admin login with a generated password, no SSO: fine for a laptop, not for a team.
-- Argo CD manages the app only. The platform (Envoy Gateway, Argo Rollouts, monitoring, Kyverno, backups, Argo CD itself) is still installed imperatively by `scripts/cluster.sh`.
+- Argo CD manages the app and the platform, but not itself: `scripts/cluster.sh` bootstraps it with Helm, and a change to `deploy/kind/argocd-values.yaml` needs `cluster.sh up`. Secrets, the per-environment Postgres, network policies and backup CronJobs are also still applied by `cluster.sh`, until secrets come from a secret manager.
 - Canary analysis judges on synthetic traffic in kind (20 req/s, two routes). Thresholds are absolute and coarse; a slow leak or a rare route can pass. A canary also can't protect against a migration: it runs before the first canary pod.
 - Argo's Gateway API plugin is alpha (v0.17). Two writers share objects: Helm applies the stable/canary Services and the HTTPRoute, and Argo Rollouts edits their selectors and weights. Helm 4's server-side apply reports that as a conflict, so prod upgrades and rollbacks use `--force-conflicts` (found by the first CI run of this change: the upgrade failed, and so did its automatic rollback). Forcing resets the weights to 100/0, which is safe because an upgrade happens only when no canary runs (`deploy.sh` waits for each one to finish).
 - Backups are hourly dumps: up to an hour of writes can be lost (no point-in-time recovery), and a restore of a large database is slow (every index is rebuilt).

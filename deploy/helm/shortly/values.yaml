@@ -101,7 +101,7 @@ gateway:
   hostnames: []
 
 # Canary releases with Argo Rollouts (docs/DESIGN.md, Canary releases). Needs the Argo
-# Rollouts controller with its Gateway API plugin (scripts/cluster.sh) and gateway.enabled.
+# Rollouts controller with its Gateway API plugin (the platform) and gateway.enabled.
 # On: a Rollout replaces the Deployment; a new release first gets each `weights` share of
 # the Gateway's traffic in turn, and moves on only if analysis passes; else it is aborted
 # and all traffic stays on the old version. A first install, or a rollback to one of the
@@ -153,7 +153,7 @@ podDisruptionBudget:
   enabled: true
   minAvailable: 1
 
-# Prometheus Operator integration (kube-prometheus-stack; scripts/cluster.sh installs it in
+# Prometheus Operator integration (kube-prometheus-stack; the platform installs it in
 # kind). Off by default because the ServiceMonitor and PrometheusRule kinds need its CRDs.
 monitoring:
   enabled: false # a ServiceMonitor: Prometheus scrapes /metrics on every pod

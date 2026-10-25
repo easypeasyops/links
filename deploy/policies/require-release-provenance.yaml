@@ -8,7 +8,7 @@
 #   - signer = this repo's release.yml, running at a vX.Y.Z tag
 #   - the build was a GitHub Actions workflow build
 #   - by digest only: tags are refused, not resolved (mutateDigest: false)
-# Installed by scripts/cluster.sh, proven by tests/test_admission_policies.py (offline cases
+# Deployed by Argo CD (the platform's `kyverno-policies` Application), proven by tests/test_admission_policies.py (offline cases
 # and the real registry) and in the cluster by scripts/admission-check.sh.
 apiVersion: policies.kyverno.io/v1
 kind: ImageValidatingPolicy

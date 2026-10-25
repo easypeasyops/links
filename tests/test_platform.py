@@ -42,7 +42,7 @@ def _render(*sets: str) -> list[dict[str, Any]]:
         text=True,
         check=True,
     ).stdout
-    return [d for d in yaml.safe_load_all(out) if d]
+    return [d for d in yaml.safe_load_all(out) if d and d["kind"] == "Application"]
 
 
 ALL_ON = ()
@@ -125,6 +125,22 @@ def test_root_application_points_at_the_chart() -> None:
     assert root["spec"]["source"]["repoURL"] == REPO
     assert root["spec"]["source"]["path"] == "deploy/argocd/platform"
     assert REPO in PROJECT["sourceRepos"]
+
+
+def test_argo_cd_alerts_ship_only_with_monitoring() -> None:
+    def kinds(*sets: str) -> list[str]:
+        args = [a for x in ("arch=amd64", *sets) for a in ("--set", x)]
+        out = subprocess.run(
+            ["helm", "template", "platform", str(CHART), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        return [d["kind"] for d in yaml.safe_load_all(out) if d]
+
+    _render()  # skips without helm
+    assert {"ServiceMonitor", "PrometheusRule"} <= set(kinds())
+    assert not {"ServiceMonitor", "PrometheusRule"} & set(kinds("components.monitoring=false"))
 
 
 def test_vendored_metrics_server_is_the_pinned_release() -> None:

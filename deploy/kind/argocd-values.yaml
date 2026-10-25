@@ -44,6 +44,11 @@ applicationSet:
 
 controller:
   replicas: 1
+  # The metrics Service; the ServiceMonitor and the alerts on Argo CD come with the
+  # platform (deploy/argocd/platform/templates/monitoring.yaml), once the monitoring
+  # CRDs exist. Argo CD is installed before them, so it can't ship its own.
+  metrics:
+    enabled: true
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits: { memory: 768Mi }

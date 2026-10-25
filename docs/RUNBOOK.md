@@ -519,6 +519,26 @@ kubectl -n argocd logs deploy/argocd-repo-server --tail=50
 | OutOfSync, auto-sync not running | Someone turned auto-sync off (break glass) and didn't turn it back on | `kubectl apply -f deploy/argocd/applications.yaml` after checking git says what should run |
 | OutOfSync on the HTTPRoute or the `shortly-stable`/`shortly-canary` Services only | The Application lost its `ignoreDifferences` for what Argo Rollouts owns (an edited Application) | `kubectl apply -f deploy/argocd/applications.yaml` |
 
+### Argo CD alerts
+
+Four tickets and no pages. A stuck Argo CD never breaks what already runs; it stops new changes from landing. The prod SLO alerts cover users. Rules: `deploy/argocd/platform/files/argocd-rules.yaml`.
+
+| Alert | Means | First look |
+| --- | --- | --- |
+| `ArgoCDAppOutOfSync` | An Application has differed from git for 15 minutes (auto-sync normally takes about a minute) | `kubectl -n argocd get applications`, then "A merged change didn't deploy (Argo CD)" above |
+| `ArgoCDAppUnhealthy` | Degraded, Missing or Unknown for 10 minutes (a canary between steps is Suspended or Progressing, never this) | `kubectl -n argocd get application <name> -o jsonpath='{range .status.resources[?(@.health.status!="Healthy")]}{.kind}/{.namespace}/{.name}: {.health.message}{"\n"}{end}'`; for `shortly-prod`, "Canary aborted" |
+| `ArgoCDSyncFailed` | A sync was refused in the last 15 minutes (admission policy, invalid manifest, failed migration hook), even if a retry worked | `kubectl -n argocd get application <name> -o jsonpath='{.status.operationState.message}'` |
+| `ArgoCDDown` | No application controller scraped for 10 minutes: nothing syncs, nothing self-heals, and the three above are blind | `kubectl -n argocd get pods`; `kubectl -n argocd logs statefulset/argocd-application-controller --tail=50` |
+
+A **platform** Application (`kubectl -n argocd get applications -l app.kubernetes.io/part-of=platform`) that won't sync is usually one of:
+
+| What you see | Cause | Fix |
+| --- | --- | --- |
+| `kyverno-policies` fails with a webhook error | Kyverno's admission webhook isn't serving yet | It retries for about 5 minutes; if it still fails, `kubectl -n kyverno get pods` |
+| A wave-1 Application (`gateway`, `tool-routes`, `kyverno-policies`) never appears | A wave-0 Application isn't Healthy, so the root waits | Fix that one first: `kubectl -n argocd get application platform -o jsonpath='{.status.operationState.message}'` |
+| OutOfSync on a webhook's `caBundle` or an aggregated ClusterRole | A field another controller writes, missing from the child's `ignoreDifferences` | Add it in `deploy/argocd/platform/templates/applications.yaml` (a PR) |
+| `ComparisonError` on a chart | The registry is unreachable, or a digest in `deploy/argocd/platform/values.yaml` doesn't exist | `kubectl -n argocd logs deploy/argocd-repo-server --tail=50`; `uv run pytest -m integration tests/test_platform.py` checks every pin against its registry |
+
 ### Admission policy refuses pods
 
 Kyverno checks every Pod in `staging` and `prod` before it is created (`deploy/policies/`). Pods that are already running are never touched, so a refusal blocks deploys and scale-ups, not traffic. Find which case it is:
@@ -769,7 +789,9 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step; `E2E_SUITE=platform` or `delivery` runs one CI half) |
 | Autoscaling drill only | `scripts/hpa-drill.sh` (stops once the HPA adds a ready pod; `RATE=1500 DURATION=240s FULL=1` for a longer push to the end, with k6's summary) |
 | Watch autoscaling | `kubectl -n prod get hpa shortly -w` |
-| Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 scripts/cluster.sh up` |
+| Platform state | `kubectl -n argocd get applications -l app.kubernetes.io/part-of=platform`, or the Argo CD UI |
+| Try a platform change before merging it | Push the branch, then `PLATFORM_REVISION=$(git rev-parse HEAD) scripts/cluster.sh up`; `scripts/cluster.sh up` (back to `main`) when done |
+| Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 scripts/cluster.sh up` (on a fresh cluster: switching it off later removes the Application but leaves its resources running, by design) |
 | Create without Kyverno and the admission policies | `POLICIES=0 scripts/cluster.sh up` |
 | Create without the backup bucket and backup CronJobs | `BACKUPS=0 scripts/cluster.sh up` |
 | After the laptop slept (backup or cleanup alerts, gaps in Grafana) | `scripts/cluster.sh wake`. To stop it happening while plugged in: `caffeinate -s` in a spare terminal, or System Settings → Battery → prevent sleep on power adapter |
@@ -795,7 +817,13 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Which image is running | `kubectl -n prod get rollout shortly -o jsonpath='{.spec.template.spec.containers[0].image}'` (staging: `deploy`) |
 | Uninstall the app only | `helm -n prod uninstall shortly` (data stays in the PVC) |
 
-`cluster.sh up` installs, side by side, Envoy Gateway (pinned by version and digest, values in `deploy/kind/envoy-gateway-values.yaml`, namespace `envoy-gateway-system` at `baseline`) with the Gateway in `deploy/kind/gateway.yaml`, Argo Rollouts (pinned by version and digest, values in `deploy/kind/argo-rollouts-values.yaml`, namespace `argo-rollouts` at `restricted`, with the Gateway API plugin pinned by checksum for the node's architecture), metrics-server (pinned, checksum-verified, `--kubelet-insecure-tls` for kind only), kube-prometheus-stack (pinned by version and digest, values in `deploy/kind/monitoring-values.yaml`, namespace `monitoring` at the `baseline` Pod Security level), and Kyverno (pinned by version and digest, values in `deploy/kind/kyverno-values.yaml`, namespace `kyverno` at `restricted`) with the policies in `deploy/policies/`, and the backup bucket (SeaweedFS S3, pinned by digest, `deploy/kind/backups.yaml`, namespace `backups` at `restricted`, with a generated S3 identity in Secret `seaweedfs-s3`). It then creates the `staging` and `prod` namespaces enforcing the restricted Pod Security Standard, generates a random password per namespace into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`, the network policies, and the backup CronJob (`deploy/kind/postgres-backup.yaml`, with the bucket credentials copied into Secret `backup-s3`). It never overwrites existing Secrets.
+`cluster.sh up` bootstraps Argo CD with Helm (pinned by version and digest, values in `deploy/kind/argocd-values.yaml`) and creates the two secrets the platform needs, which git never holds (`grafana-admin` in `monitoring`, the S3 identity `seaweedfs-s3` in `backups`). It then applies the platform's root Application (`deploy/argocd/platform-root.yaml`, with the node's architecture and `PLATFORM_REVISION`, default `main`) and waits until every platform Application is Synced and Healthy. Argo CD installs the rest from `deploy/argocd/platform/`, in two sync waves:
+- **Wave 0:** metrics-server, Envoy Gateway, Argo Rollouts with the Gateway API plugin for that architecture, kube-prometheus-stack, Kyverno, and the backup bucket.
+- **Wave 1:** the Gateway, the tool routes, the Kyverno policies, and the alerts on Argo CD.
+
+`cluster.sh up` then creates the `staging` and `prod` namespaces, which enforce the restricted Pod Security Standard. In each it generates a random password into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`, the network policies and the backup CronJob (`deploy/kind/postgres-backup.yaml`, with the bucket credentials copied into Secret `backup-s3`). It never overwrites existing Secrets.
+
+**On a cluster built before the platform moved under Argo CD** (PR #60), run `cluster.sh up` once. Argo CD adopts the running resources: each chart keeps its old Helm release name, so nothing is recreated. Once it has, `cluster.sh` deletes the old Helm records (`helm list -A` then shows no platform releases). Expect a minute or two of syncing, and `monitoring` restarting its pods once.
 
 Without a cluster, the fastest full-stack check is Docker Compose: `docker compose --profile app up -d --build --wait && scripts/smoke.sh`.
 
