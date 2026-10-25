@@ -2,8 +2,10 @@
 Everything a platform child Application shares. `wave` orders the root's sync: Argo CD
 applies a wave, waits until its Applications are Healthy (argocd-cm's Application health
 check, deploy/kind/argocd-values.yaml), then starts the next.
-  wave 0: the charts and the CRDs they ship
-  wave 1: what uses those CRDs (the Gateway, the Kyverno policies, the tool routes)
+  wave 0: the charts and the CRDs they ship; also what needs only a fast chart's CRDs
+          (the Gateway, the tool routes: the sync retry covers the few seconds' race)
+  wave 1: what needs a slow chart running (the Kyverno policies: Kyverno's webhook; the
+          alerts on Argo CD: kube-prometheus-stack's CRDs)
 */}}
 {{- define "platform.meta" -}}
 apiVersion: argoproj.io/v1alpha1

@@ -27,7 +27,7 @@ CHART = ROOT / "deploy/argocd/platform"
 VALUES = yaml.safe_load((CHART / "values.yaml").read_text())
 PROJECT = yaml.safe_load((ROOT / "deploy/argocd/platform-project.yaml").read_text())["spec"]
 REPO = "https://github.com/statsguy/shortly.git"
-WAVE_1 = {"gateway", "tool-routes", "kyverno-policies"}  # they use CRDs wave 0 installs
+WAVE_1 = {"kyverno-policies"}  # needs Kyverno's webhook serving, not just its CRDs
 
 
 def _render(*sets: str) -> list[dict[str, Any]]:

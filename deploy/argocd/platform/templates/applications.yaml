@@ -79,10 +79,13 @@ spec:
   {{- include "platform.syncPolicy" (dict "labels" (dict "pod-security.kubernetes.io/enforce" "restricted")) | nindent 2 }}
 {{- end }}
 
-# --------------------------------------------------- wave 1: what uses those CRDs
+# The Gateway and the tool routes need only Envoy Gateway's CRDs, which arrive within
+# seconds of wave 0 starting: until then their first sync fails and the retry (10 s, then
+# 20 s...) catches up. In wave 1 they would wait for the slowest chart instead, and the
+# Envoy proxy's start (about 2 minutes) would no longer overlap with it (seen in CI).
 ---
 # The Gateway itself: its two listeners, and the NodePort Service the front door reaches.
-{{ include "platform.meta" (dict "name" "gateway" "wave" 1) }}
+{{ include "platform.meta" (dict "name" "gateway" "wave" 0) }}
 spec:
   project: platform
   source:
@@ -95,7 +98,7 @@ spec:
 ---
 # The dev tools' routes on the Gateway's `tools` listener (Argo CD always; the monitoring
 # UIs when the stack is installed).
-{{ include "platform.meta" (dict "name" "tool-routes" "wave" 1) }}
+{{ include "platform.meta" (dict "name" "tool-routes" "wave" 0) }}
 spec:
   project: platform
   source:
@@ -105,6 +108,8 @@ spec:
     directory: { include: {{ ternary "'{argocd.yaml,monitoring.yaml}'" "argocd.yaml" $v.components.monitoring }} }
   destination: { server: {{ $dest }}, namespace: argocd }
   {{- include "platform.syncPolicy" (dict) | nindent 2 }}
+
+# --------------------------------------------- wave 1: what needs a slow chart running
 {{- if $v.components.policies }}
 ---
 # The admission policies. Kyverno's webhook validates them, so they wait for wave 0.

@@ -880,21 +880,21 @@ flowchart TB
   Root["Application platform (root)<br/>deploy/argocd/platform, a Helm chart<br/>parameters: arch, revision, components"]
   Root --> W0
   Root --> W1
-  subgraph W0["wave 0: charts and their CRDs"]
+  subgraph W0["wave 0: charts and their CRDs, and what needs only fast CRDs"]
     direction LR
     MS[metrics-server<br/>vendored manifest]
     EG[envoy-gateway]
+    GW[gateway<br/>Gateway, listeners]
+    TR[tool-routes]
     AR[argo-rollouts<br/>+ plugin for arch]
     KPS[monitoring<br/>kube-prometheus-stack]
     KY[kyverno]
     BK[backups<br/>SeaweedFS]
   end
-  subgraph W1["wave 1: what uses those CRDs"]
+  subgraph W1["wave 1: what needs a slow chart running"]
     direction LR
-    GW[gateway<br/>Gateway, listeners]
-    TR[tool-routes]
-    KP[kyverno-policies]
-    AM[Argo CD alerts<br/>ServiceMonitor, rules]
+    KP[kyverno-policies<br/>Kyverno's webhook]
+    AM[Argo CD alerts<br/>monitoring CRDs]
   end
   W0 -->|"all Healthy"| W1
 ```
@@ -905,7 +905,7 @@ flowchart TB
 | Charts pulled by digest, natively from OCI | `targetRevision` is the chart's digest, the version a comment beside it. `tests/test_platform.py` (integration) checks each version still resolves to its digest, so a re-pushed tag is caught before anyone trusts it |
 | Values files stay in git, beside the chart's source | Each chart Application is multi-source: the chart from its registry, `$values` from this repository at the root's revision |
 | metrics-server vendored, not fetched | The release manifest is checked into `deploy/platform/metrics-server/` with its SHA-256; a kustomize patch adds the kind-only flag |
-| Sync waves, with Application health on | Policies need Kyverno's webhook, the Gateway needs Envoy Gateway's CRDs. Argo CD only waits for a wave's Applications to be Healthy if it reports Application health, which `argocd-cm` turns back on (`deploy/kind/argocd-values.yaml`) |
+| Two sync waves, with Application health on | The policies need Kyverno's webhook serving, and the alerts on Argo CD need kube-prometheus-stack's CRDs: both come from slow charts, so they wait in wave 1. The Gateway and the tool routes need only Envoy Gateway's CRDs, which arrive within seconds, so they stay in wave 0 and the sync retry covers the race. In wave 1 they waited for the slowest chart, and the Envoy proxy's 2-minute start stopped overlapping with it: the platform job's install went from about 2.5 to 7.5 minutes (CI, PR #60). Argo CD only waits for a wave's Applications to be Healthy if it reports Application health, which `argocd-cm` turns back on (`deploy/kind/argocd-values.yaml`) |
 | A separate `platform` AppProject | The platform must create CRDs, ClusterRoles and webhooks. The app's project still may create nothing cluster-scoped, and neither project may deploy into the other's namespaces |
 | No resources-finalizer on the children | Deleting a child Application, or the root, orphans its resources instead of deleting the monitoring stack or the admission webhook along with it |
 | Server-side apply and server-side diff | The kube-prometheus-stack, Kyverno and Envoy Gateway CRDs are too big for client-side apply, and fields that other controllers write (webhook CA bundles) are not drift |

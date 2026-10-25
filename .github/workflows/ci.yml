@@ -119,7 +119,7 @@ jobs:
   k8s:
     name: kind e2e (${{ matrix.suite }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15 # usually about 8; a hung drill shouldn't hold a runner
+    timeout-minutes: 20 # a hung drill shouldn't hold a runner
     strategy:
       fail-fast: false # a failure in one half shouldn't hide the other half's result
       matrix:

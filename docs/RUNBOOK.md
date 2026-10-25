@@ -535,7 +535,7 @@ A **platform** Application (`kubectl -n argocd get applications -l app.kubernete
 | What you see | Cause | Fix |
 | --- | --- | --- |
 | `kyverno-policies` fails with a webhook error | Kyverno's admission webhook isn't serving yet | It retries for about 5 minutes; if it still fails, `kubectl -n kyverno get pods` |
-| A wave-1 Application (`gateway`, `tool-routes`, `kyverno-policies`) never appears | A wave-0 Application isn't Healthy, so the root waits | Fix that one first: `kubectl -n argocd get application platform -o jsonpath='{.status.operationState.message}'` |
+| `kyverno-policies` (wave 1) never appears | A wave-0 Application isn't Healthy, so the root waits | Fix that one first: `kubectl -n argocd get application platform -o jsonpath='{.status.operationState.message}'` |
 | OutOfSync on a webhook's `caBundle` or an aggregated ClusterRole | A field another controller writes, missing from the child's `ignoreDifferences` | Add it in `deploy/argocd/platform/templates/applications.yaml` (a PR) |
 | `ComparisonError` on a chart | The registry is unreachable, or a digest in `deploy/argocd/platform/values.yaml` doesn't exist | `kubectl -n argocd logs deploy/argocd-repo-server --tail=50`; `uv run pytest -m integration tests/test_platform.py` checks every pin against its registry |
 
@@ -818,8 +818,8 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Uninstall the app only | `helm -n prod uninstall shortly` (data stays in the PVC) |
 
 `cluster.sh up` bootstraps Argo CD with Helm (pinned by version and digest, values in `deploy/kind/argocd-values.yaml`) and creates the two secrets the platform needs, which git never holds (`grafana-admin` in `monitoring`, the S3 identity `seaweedfs-s3` in `backups`). It then applies the platform's root Application (`deploy/argocd/platform-root.yaml`, with the node's architecture and `PLATFORM_REVISION`, default `main`) and waits until every platform Application is Synced and Healthy. Argo CD installs the rest from `deploy/argocd/platform/`, in two sync waves:
-- **Wave 0:** metrics-server, Envoy Gateway, Argo Rollouts with the Gateway API plugin for that architecture, kube-prometheus-stack, Kyverno, and the backup bucket.
-- **Wave 1:** the Gateway, the tool routes, the Kyverno policies, and the alerts on Argo CD.
+- **Wave 0:** metrics-server, Envoy Gateway with the Gateway and the tool routes, Argo Rollouts with the Gateway API plugin for that architecture, kube-prometheus-stack, Kyverno, and the backup bucket.
+- **Wave 1:** the Kyverno policies, and the alerts on Argo CD.
 
 `cluster.sh up` then creates the `staging` and `prod` namespaces, which enforce the restricted Pod Security Standard. In each it generates a random password into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`, the network policies and the backup CronJob (`deploy/kind/postgres-backup.yaml`, with the bucket credentials copied into Secret `backup-s3`). It never overwrites existing Secrets.
 
