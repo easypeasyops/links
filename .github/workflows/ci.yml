@@ -210,6 +210,15 @@ jobs:
           POLICIES: ${{ matrix.policies }}
           BACKUPS: ${{ matrix.backups }}
 
+      # When a sync never finishes, the job's timeout kills the wait before it can explain.
+      - name: Argo CD state (on failure)
+        if: (failure() || cancelled()) && steps.scope.outputs.full == 'true'
+        run: |
+          kubectl -n argocd get applications -o wide || true
+          kubectl -n argocd get applications -o jsonpath='{range .items[*]}{"== "}{.metadata.name}{" "}{.status.sync.status}/{.status.health.status}{"\n"}{range .status.conditions[*]}  {.type}: {.message}{"\n"}{end}{range .status.resources[?(@.health.status!="Healthy")]}  {.health.status}: {.kind}/{.namespace}/{.name} {.health.message}{"\n"}{end}{.status.operationState.phase}: {.status.operationState.message}{"\n"}{end}' || true
+          kubectl get pods -A | grep -vE "Running|Completed" || true
+          kubectl -n argocd logs deploy/argocd-repo-server --tail=40 || true
+
       - name: Deploy, promote, rollback drill
         if: steps.scope.outputs.full == 'true'
         run: scripts/k8s-e2e.sh

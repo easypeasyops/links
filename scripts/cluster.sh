@@ -107,11 +107,16 @@ up() {
 # adopts resources that already run, before its first sync has applied git (seen on the
 # first takeover: OutOfSync/Healthy). On timeout, say what is out of sync, and fail.
 wait_synced() {
-  local app=$1 timeout=$2 state="" t0=$SECONDS
+  local app=$1 timeout=$2 state="" t0=$SECONDS last=$SECONDS
   while ((SECONDS - t0 < timeout)); do
     state=$(kubectl -n argocd get application "$app" \
       -o jsonpath='{.status.sync.status}/{.status.health.status}' 2>/dev/null || true)
     [[ "$state" == Synced/Healthy ]] && return 0
+    if ((SECONDS - last >= 30)); then # progress, so a slow sync shows where it is
+      last=$SECONDS
+      echo "  ... $app is ${state:-not there yet} after $((SECONDS - t0))s; $(kubectl -n argocd get applications \
+        -o jsonpath='{range .items[*]}{.metadata.name}={.status.sync.status}/{.status.health.status} {end}' 2>/dev/null)"
+    fi
     sleep 3
   done
   echo "FAIL: Argo CD application $app is ${state:-missing} after ${timeout}s:" >&2
@@ -167,7 +172,7 @@ json.dump(app, sys.stdout)' | kubectl apply -f - >/dev/null
   echo "platform: syncing deploy/argocd/platform at $revision ($arch) through Argo CD"
   # The root is Healthy once every wave is: Argo CD reports each child's health
   # (argocd-cm, deploy/kind/argocd-values.yaml) and syncs wave 1 only after wave 0.
-  wait_synced platform 900 || exit 1
+  wait_synced platform 600 || exit 1
   children=$(kubectl -n argocd get applications -l app.kubernetes.io/part-of=platform -o name)
   for app in $children; do wait_synced "${app#*/}" 300 || exit 1; done
   kubectl -n argocd get applications -l app.kubernetes.io/part-of=platform
