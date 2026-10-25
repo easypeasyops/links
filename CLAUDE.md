@@ -32,6 +32,15 @@ the one reviewed with the code.
 
 ## Pull requests opened by Claude
 
+- **One problem per PR, small enough to review in one sitting**: aim for about 200 changed
+  lines (a sweet spot, not a hard limit). Tests and the docs updates the change needs ride
+  in the same PR; vendored or generated files (`deploy/platform/metrics-server/components.yaml`,
+  `deploy/helm/shortly/rules/slo.yaml`) don't count, but say so in the description.
+- A bigger change goes in as a stack: each PR leaves `main` working and CI green on its own
+  (dormant pieces first, for example a chart nothing applies yet, then the switch that uses
+  it), and its description says where it sits in the stack.
+- A refactor and a behaviour change never share a PR.
+
 - Docs-only and record-digest PRs: turn on auto-merge (squash) when opening them; they merge
   once CI is green. Docs-only PRs skip the CI work (`scripts/ci-scope.sh`).
 - Promotion PRs (`scripts/promote.sh … --pr`) and code / CI PRs: never auto-merge. Merging a
