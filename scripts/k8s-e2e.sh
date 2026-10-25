@@ -235,8 +235,10 @@ expect_front() { # port host path status
   done
   fail "front door: http://$2:$1$3 answered $got, expected $4"
 }
+# Prod only: the alert drill (step 7) scales staging to 0 in the background while this runs,
+# so a staging check here fails or passes by timing (seen in CI). Step 3a already proves the
+# Gateway routes staging.
 expect_front 8080 sho.rt.localhost /healthz 200
-expect_front 8080 staging.sho.rt.localhost /healthz 200
 tools=(grafana.localhost/api/health prometheus.localhost/-/ready alertmanager.localhost/-/ready)
 if kubectl get ns argocd >/dev/null 2>&1; then tools+=(argocd.localhost/healthz); fi
 for t in "${tools[@]}"; do
