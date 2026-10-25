@@ -47,14 +47,30 @@ groups:
       sum by (namespace) (rate(http_requests_total{method="GET", route="/{code}"}[30d]))
     labels:
       slo: redirect-availability
+  - record: slo:sli_events:increase1h
+    expr: sum by (namespace) (increase(http_requests_total{method="GET", route="/{code}"}[1h]))
+    labels:
+      slo: redirect-availability
+  - record: slo:sli_events:increase6h
+    expr: sum by (namespace) (increase(http_requests_total{method="GET", route="/{code}"}[6h]))
+    labels:
+      slo: redirect-availability
+  - record: slo:sli_events:increase1d
+    expr: sum by (namespace) (increase(http_requests_total{method="GET", route="/{code}"}[1d]))
+    labels:
+      slo: redirect-availability
+  - record: slo:sli_events:increase3d
+    expr: sum by (namespace) (increase(http_requests_total{method="GET", route="/{code}"}[3d]))
+    labels:
+      slo: redirect-availability
   - record: slo:error_budget_remaining:ratio
     expr: 1 - slo:sli_error:ratio_rate30d{slo="redirect-availability"} / 0.001
     labels:
       slo: redirect-availability
   - alert: RedirectAvailabilityBudgetBurn
     expr: |-
-      (slo:sli_error:ratio_rate1h{slo="redirect-availability"} > 0.0144 and slo:sli_error:ratio_rate5m{slo="redirect-availability"} > 0.0144)
-      or (slo:sli_error:ratio_rate6h{slo="redirect-availability"} > 0.006 and slo:sli_error:ratio_rate30m{slo="redirect-availability"} > 0.006)
+      (slo:sli_error:ratio_rate1h{slo="redirect-availability"} > 0.0144 and slo:sli_error:ratio_rate5m{slo="redirect-availability"} > 0.0144 and slo:sli_error:ratio_rate1h{slo="redirect-availability"} * slo:sli_events:increase1h{slo="redirect-availability"} >= 5)
+      or (slo:sli_error:ratio_rate6h{slo="redirect-availability"} > 0.006 and slo:sli_error:ratio_rate30m{slo="redirect-availability"} > 0.006 and slo:sli_error:ratio_rate6h{slo="redirect-availability"} * slo:sli_events:increase6h{slo="redirect-availability"} >= 5)
     for: 2m
     labels:
       severity: page
@@ -65,8 +81,8 @@ groups:
       runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
   - alert: RedirectAvailabilityBudgetBurn
     expr: |-
-      (slo:sli_error:ratio_rate1d{slo="redirect-availability"} > 0.003 and slo:sli_error:ratio_rate2h{slo="redirect-availability"} > 0.003)
-      or (slo:sli_error:ratio_rate3d{slo="redirect-availability"} > 0.001 and slo:sli_error:ratio_rate6h{slo="redirect-availability"} > 0.001)
+      (slo:sli_error:ratio_rate1d{slo="redirect-availability"} > 0.003 and slo:sli_error:ratio_rate2h{slo="redirect-availability"} > 0.003 and slo:sli_error:ratio_rate1d{slo="redirect-availability"} * slo:sli_events:increase1d{slo="redirect-availability"} >= 5)
+      or (slo:sli_error:ratio_rate3d{slo="redirect-availability"} > 0.001 and slo:sli_error:ratio_rate6h{slo="redirect-availability"} > 0.001 and slo:sli_error:ratio_rate3d{slo="redirect-availability"} * slo:sli_events:increase3d{slo="redirect-availability"} >= 5)
     for: 15m
     labels:
       severity: ticket
@@ -121,14 +137,30 @@ groups:
       route="/{code}"}[30d])))
     labels:
       slo: redirect-latency
+  - record: slo:sli_events:increase1h
+    expr: sum by (namespace) (increase(http_request_duration_seconds_count{method="GET", route="/{code}"}[1h]))
+    labels:
+      slo: redirect-latency
+  - record: slo:sli_events:increase6h
+    expr: sum by (namespace) (increase(http_request_duration_seconds_count{method="GET", route="/{code}"}[6h]))
+    labels:
+      slo: redirect-latency
+  - record: slo:sli_events:increase1d
+    expr: sum by (namespace) (increase(http_request_duration_seconds_count{method="GET", route="/{code}"}[1d]))
+    labels:
+      slo: redirect-latency
+  - record: slo:sli_events:increase3d
+    expr: sum by (namespace) (increase(http_request_duration_seconds_count{method="GET", route="/{code}"}[3d]))
+    labels:
+      slo: redirect-latency
   - record: slo:error_budget_remaining:ratio
     expr: 1 - slo:sli_error:ratio_rate30d{slo="redirect-latency"} / 0.01
     labels:
       slo: redirect-latency
   - alert: RedirectLatencyBudgetBurn
     expr: |-
-      (slo:sli_error:ratio_rate1h{slo="redirect-latency"} > 0.144 and slo:sli_error:ratio_rate5m{slo="redirect-latency"} > 0.144)
-      or (slo:sli_error:ratio_rate6h{slo="redirect-latency"} > 0.06 and slo:sli_error:ratio_rate30m{slo="redirect-latency"} > 0.06)
+      (slo:sli_error:ratio_rate1h{slo="redirect-latency"} > 0.144 and slo:sli_error:ratio_rate5m{slo="redirect-latency"} > 0.144 and slo:sli_error:ratio_rate1h{slo="redirect-latency"} * slo:sli_events:increase1h{slo="redirect-latency"} >= 5)
+      or (slo:sli_error:ratio_rate6h{slo="redirect-latency"} > 0.06 and slo:sli_error:ratio_rate30m{slo="redirect-latency"} > 0.06 and slo:sli_error:ratio_rate6h{slo="redirect-latency"} * slo:sli_events:increase6h{slo="redirect-latency"} >= 5)
     for: 2m
     labels:
       severity: page
@@ -139,8 +171,8 @@ groups:
       runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
   - alert: RedirectLatencyBudgetBurn
     expr: |-
-      (slo:sli_error:ratio_rate1d{slo="redirect-latency"} > 0.03 and slo:sli_error:ratio_rate2h{slo="redirect-latency"} > 0.03)
-      or (slo:sli_error:ratio_rate3d{slo="redirect-latency"} > 0.01 and slo:sli_error:ratio_rate6h{slo="redirect-latency"} > 0.01)
+      (slo:sli_error:ratio_rate1d{slo="redirect-latency"} > 0.03 and slo:sli_error:ratio_rate2h{slo="redirect-latency"} > 0.03 and slo:sli_error:ratio_rate1d{slo="redirect-latency"} * slo:sli_events:increase1d{slo="redirect-latency"} >= 5)
+      or (slo:sli_error:ratio_rate3d{slo="redirect-latency"} > 0.01 and slo:sli_error:ratio_rate6h{slo="redirect-latency"} > 0.01 and slo:sli_error:ratio_rate3d{slo="redirect-latency"} * slo:sli_events:increase3d{slo="redirect-latency"} >= 5)
     for: 15m
     labels:
       severity: ticket
@@ -195,14 +227,30 @@ groups:
       sum by (namespace) (rate(http_requests_total{method="POST", route="/links"}[30d]))
     labels:
       slo: create-availability
+  - record: slo:sli_events:increase1h
+    expr: sum by (namespace) (increase(http_requests_total{method="POST", route="/links"}[1h]))
+    labels:
+      slo: create-availability
+  - record: slo:sli_events:increase6h
+    expr: sum by (namespace) (increase(http_requests_total{method="POST", route="/links"}[6h]))
+    labels:
+      slo: create-availability
+  - record: slo:sli_events:increase1d
+    expr: sum by (namespace) (increase(http_requests_total{method="POST", route="/links"}[1d]))
+    labels:
+      slo: create-availability
+  - record: slo:sli_events:increase3d
+    expr: sum by (namespace) (increase(http_requests_total{method="POST", route="/links"}[3d]))
+    labels:
+      slo: create-availability
   - record: slo:error_budget_remaining:ratio
     expr: 1 - slo:sli_error:ratio_rate30d{slo="create-availability"} / 0.005
     labels:
       slo: create-availability
   - alert: CreateAvailabilityBudgetBurn
     expr: |-
-      (slo:sli_error:ratio_rate1h{slo="create-availability"} > 0.072 and slo:sli_error:ratio_rate5m{slo="create-availability"} > 0.072)
-      or (slo:sli_error:ratio_rate6h{slo="create-availability"} > 0.03 and slo:sli_error:ratio_rate30m{slo="create-availability"} > 0.03)
+      (slo:sli_error:ratio_rate1h{slo="create-availability"} > 0.072 and slo:sli_error:ratio_rate5m{slo="create-availability"} > 0.072 and slo:sli_error:ratio_rate1h{slo="create-availability"} * slo:sli_events:increase1h{slo="create-availability"} >= 5)
+      or (slo:sli_error:ratio_rate6h{slo="create-availability"} > 0.03 and slo:sli_error:ratio_rate30m{slo="create-availability"} > 0.03 and slo:sli_error:ratio_rate6h{slo="create-availability"} * slo:sli_events:increase6h{slo="create-availability"} >= 5)
     for: 2m
     labels:
       severity: page
@@ -213,8 +261,8 @@ groups:
       runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
   - alert: CreateAvailabilityBudgetBurn
     expr: |-
-      (slo:sli_error:ratio_rate1d{slo="create-availability"} > 0.015 and slo:sli_error:ratio_rate2h{slo="create-availability"} > 0.015)
-      or (slo:sli_error:ratio_rate3d{slo="create-availability"} > 0.005 and slo:sli_error:ratio_rate6h{slo="create-availability"} > 0.005)
+      (slo:sli_error:ratio_rate1d{slo="create-availability"} > 0.015 and slo:sli_error:ratio_rate2h{slo="create-availability"} > 0.015 and slo:sli_error:ratio_rate1d{slo="create-availability"} * slo:sli_events:increase1d{slo="create-availability"} >= 5)
+      or (slo:sli_error:ratio_rate3d{slo="create-availability"} > 0.005 and slo:sli_error:ratio_rate6h{slo="create-availability"} > 0.005 and slo:sli_error:ratio_rate3d{slo="create-availability"} * slo:sli_events:increase3d{slo="create-availability"} >= 5)
     for: 15m
     labels:
       severity: ticket
@@ -269,14 +317,30 @@ groups:
       route="/links"}[30d])))
     labels:
       slo: create-latency
+  - record: slo:sli_events:increase1h
+    expr: sum by (namespace) (increase(http_request_duration_seconds_count{method="POST", route="/links"}[1h]))
+    labels:
+      slo: create-latency
+  - record: slo:sli_events:increase6h
+    expr: sum by (namespace) (increase(http_request_duration_seconds_count{method="POST", route="/links"}[6h]))
+    labels:
+      slo: create-latency
+  - record: slo:sli_events:increase1d
+    expr: sum by (namespace) (increase(http_request_duration_seconds_count{method="POST", route="/links"}[1d]))
+    labels:
+      slo: create-latency
+  - record: slo:sli_events:increase3d
+    expr: sum by (namespace) (increase(http_request_duration_seconds_count{method="POST", route="/links"}[3d]))
+    labels:
+      slo: create-latency
   - record: slo:error_budget_remaining:ratio
     expr: 1 - slo:sli_error:ratio_rate30d{slo="create-latency"} / 0.01
     labels:
       slo: create-latency
   - alert: CreateLatencyBudgetBurn
     expr: |-
-      (slo:sli_error:ratio_rate1h{slo="create-latency"} > 0.144 and slo:sli_error:ratio_rate5m{slo="create-latency"} > 0.144)
-      or (slo:sli_error:ratio_rate6h{slo="create-latency"} > 0.06 and slo:sli_error:ratio_rate30m{slo="create-latency"} > 0.06)
+      (slo:sli_error:ratio_rate1h{slo="create-latency"} > 0.144 and slo:sli_error:ratio_rate5m{slo="create-latency"} > 0.144 and slo:sli_error:ratio_rate1h{slo="create-latency"} * slo:sli_events:increase1h{slo="create-latency"} >= 5)
+      or (slo:sli_error:ratio_rate6h{slo="create-latency"} > 0.06 and slo:sli_error:ratio_rate30m{slo="create-latency"} > 0.06 and slo:sli_error:ratio_rate6h{slo="create-latency"} * slo:sli_events:increase6h{slo="create-latency"} >= 5)
     for: 2m
     labels:
       severity: page
@@ -287,8 +351,8 @@ groups:
       runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
   - alert: CreateLatencyBudgetBurn
     expr: |-
-      (slo:sli_error:ratio_rate1d{slo="create-latency"} > 0.03 and slo:sli_error:ratio_rate2h{slo="create-latency"} > 0.03)
-      or (slo:sli_error:ratio_rate3d{slo="create-latency"} > 0.01 and slo:sli_error:ratio_rate6h{slo="create-latency"} > 0.01)
+      (slo:sli_error:ratio_rate1d{slo="create-latency"} > 0.03 and slo:sli_error:ratio_rate2h{slo="create-latency"} > 0.03 and slo:sli_error:ratio_rate1d{slo="create-latency"} * slo:sli_events:increase1d{slo="create-latency"} >= 5)
+      or (slo:sli_error:ratio_rate3d{slo="create-latency"} > 0.01 and slo:sli_error:ratio_rate6h{slo="create-latency"} > 0.01 and slo:sli_error:ratio_rate3d{slo="create-latency"} * slo:sli_events:increase3d{slo="create-latency"} >= 5)
     for: 15m
     labels:
       severity: ticket

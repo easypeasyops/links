@@ -29,6 +29,7 @@
 #  10. the cleanup CronJob deletes links past their grace period, and only those
 #  11. prod's backup runs, only backup pods reach the bucket, and the dump restores into a
 #      fresh database with every link (scripts/restore-drill.sh; skipped if BACKUPS=0)
+#  11b. `cluster.sh wake` restarts the CronJob scheduler and takes an overdue backup at once
 #  12. GitOps: Argo CD takes prod over from this commit, reverts a hand edit, and runs a
 #      canary it started itself without fighting Argo Rollouts over the route's weights
 #      (needs GITOPS_REVISION, a commit Argo CD can fetch; CI sets it)
@@ -485,6 +486,19 @@ if kubectl -n prod get cronjob postgres-backup >/dev/null 2>&1; then
   pass "network policy: the backup bucket refuses pods other than backup and restore pods"
   SOURCE=prod EXPECT_CODE=e2ebkp1 EXPECT_LINKS="$want_links" "$ROOT/scripts/restore-drill.sh"
   kubectl -n prod delete job backup-e2e --wait=false >/dev/null
+
+  # 11b. `cluster.sh wake` (after a laptop slept): the controller restarts, and an overdue
+  # backup starts at once. MAX_AGE=0 makes every backup "overdue" here.
+  restarts() { kubectl -n kube-system get pod -l component=kube-controller-manager \
+    -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'; }
+  before=$(restarts)
+  WAKE_BACKUP_MAX_AGE=0 "$ROOT/scripts/cluster.sh" wake
+  (($(restarts) == before + 1)) || fail "wake: kube-controller-manager was not restarted"
+  wake_job=$(kubectl -n prod get jobs -o name | grep -m1 'job.batch/backup-wake-' || true)
+  [[ -n "$wake_job" ]] || fail "wake: no backup-wake Job in prod"
+  kubectl -n prod wait --for=condition=complete "$wake_job" --timeout=180s >/dev/null \
+    || fail "wake: $wake_job did not complete"
+  pass "wake: kube-controller-manager restarted, and the overdue prod backup ran at once ($wake_job)"
 else
   echo "skip backup checks: no postgres-backup CronJob (BACKUPS=0?)"
 fi

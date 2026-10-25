@@ -14,6 +14,8 @@
 # Always installed: Envoy Gateway (the Gateway API implementation that is the cluster's
 # front door), Argo Rollouts (prod's canary releases) and Argo CD (GitOps: it deploys the
 # app from git, deploy/argocd/). The app's chart depends on the first two.
+#   scripts/cluster.sh wake            # after the laptop slept: restart the CronJob
+#                                       # scheduler, back up any environment that's overdue
 #   scripts/cluster.sh down
 set -euo pipefail
 
@@ -286,6 +288,39 @@ install_backups() {
   echo "backups ready: SeaweedFS S3 in namespace backups"
 }
 
+# A sleeping Mac pauses Docker's VM, and the CronJob controller's timers only count time
+# while it runs: at 10% awake, "the next run in an hour" comes 9 hours later (seen on
+# 2026-10-24: backups at 22:41, 07:41, 16:41 and none between). Restarting the controller
+# makes it read every CronJob against the wall clock at once; startingDeadlineSeconds (50
+# minutes) lets it start a run it just missed. Backups older than WAKE_BACKUP_MAX_AGE
+# seconds (default an hour, the schedule) are taken right away instead of waiting.
+wake() {
+  local node="$CLUSTER-control-plane" before ns last age
+  kubectl config use-context "kind-$CLUSTER" >/dev/null
+  before=$(kubectl -n kube-system get pod "kube-controller-manager-$node" \
+    -o jsonpath='{.status.containerStatuses[0].restartCount}')
+  # A static pod: stopping its container makes the kubelet start a fresh one.
+  docker exec "$node" sh -c 'crictl stop $(crictl ps -q --name kube-controller-manager)' >/dev/null
+  for _ in $(seq 1 60); do
+    [[ "$(kubectl -n kube-system get pod "kube-controller-manager-$node" \
+      -o jsonpath='{.status.containerStatuses[0].restartCount}/{.status.containerStatuses[0].ready}' 2>/dev/null)" \
+      == "$((before + 1))/true" ]] && break
+    sleep 2
+  done
+  echo "kube-controller-manager restarted (restarts: $((before + 1))): CronJobs rescheduled from the wall clock"
+  for ns in "${ENVS[@]}"; do
+    kubectl -n "$ns" get cronjob postgres-backup >/dev/null 2>&1 || continue
+    last=$(kubectl -n "$ns" get cronjob postgres-backup -o jsonpath='{.status.lastSuccessfulTime}')
+    age=$(python3 -c "import datetime as d,sys; t=sys.argv[1]; print(int((d.datetime.now(d.timezone.utc)-d.datetime.fromisoformat(t.replace('Z','+00:00'))).total_seconds()) if t else 10**9)" "$last")
+    if ((age > ${WAKE_BACKUP_MAX_AGE:-3600})); then
+      kubectl -n "$ns" create job "backup-wake-$(date +%s)" --from=cronjob/postgres-backup >/dev/null
+      echo "$ns: last backup ${last:-never}: started one now (kubectl -n $ns get jobs)"
+    else
+      echo "$ns: last backup $last: recent enough"
+    fi
+  done
+}
+
 down() {
   local mapping
   for mapping in "${FRONT_DOOR_PORTS[@]}"; do
@@ -296,6 +331,7 @@ down() {
 
 case "${1:-}" in
   up) up ;;
+  wake) wake ;;
   down) down ;;
-  *) echo "usage: $0 up|down" >&2; exit 2 ;;
+  *) echo "usage: $0 up|wake|down" >&2; exit 2 ;;
 esac

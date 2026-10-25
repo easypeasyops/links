@@ -7,6 +7,10 @@ Alerting method: multi-window, multi-burn-rate (Google SRE Workbook, "Alerting o
 Burn rate = how fast the error budget is being spent; 1x spends exactly the budget over the
 window. Each alert needs BOTH a long window (is this significant?) and a short window (is it
 still happening?), so it fires fast on a real incident and stops soon after recovery.
+
+Each alert also needs MIN_BAD_EVENTS bad events in its long window. A ratio alone can't tell
+1 slow request out of 3 (a quiet hour, 33%) from 300 out of 900: on low traffic it pages on
+a single event. (Workbook, "Low-traffic services and error budget alerting".)
 """
 
 import argparse
@@ -33,6 +37,14 @@ BURN_ALERTS: list[tuple[str, list[tuple[str, str, float]], str]] = [
 
 PACE = {"page": "burning fast", "ticket": "burning steadily"}
 
+# Below this many bad events in the long window, no burn-rate alert fires, whatever the ratio.
+# Small enough that a real incident on a quiet service still alerts (5 failed requests in an
+# hour); large enough that one or two unlucky requests don't wake anyone.
+MIN_BAD_EVENTS = 5
+LONG_WINDOWS = sorted(
+    {long for _, pairs, _ in BURN_ALERTS for long, _, _ in pairs}, key=WINDOWS.index
+)
+
 # Per-namespace, so staging and prod scraped by one Prometheus get separate budgets. Without a
 # namespace label (local compose) the result is one series with no namespace.
 BY = "sum by (namespace)"
@@ -54,6 +66,15 @@ def error_ratio(sli: dict[str, Any], window: str) -> str:
         total = f"{BY} (rate(http_request_duration_seconds_count{{{sel}}}[{window}]))"
         return f"1 - ({good} / {total})"
     raise ValueError(f"unknown SLI type {sli['type']!r}")
+
+
+def events(sli: dict[str, Any], window: str) -> str:
+    """Valid events (the SLI's denominator) in the window, as a count."""
+    metric = {
+        "availability": "http_requests_total",
+        "latency": "http_request_duration_seconds_count",
+    }[sli["type"]]
+    return f"{BY} (increase({metric}{{{sli['selector']}}}[{window}]))"
 
 
 def days(pairs: list[tuple[str, str, float]], pick: Any) -> str:
@@ -91,6 +112,14 @@ def build(spec: dict[str, Any]) -> dict[str, Any]:
             }
             for w in WINDOWS
         ]
+        rules += [
+            {
+                "record": f"slo:sli_events:increase{w}",
+                "expr": events(slo["sli"], w),
+                "labels": labels(),
+            }
+            for w in LONG_WINDOWS
+        ]
         rules.append(
             {
                 "record": "slo:error_budget_remaining:ratio",
@@ -99,9 +128,12 @@ def build(spec: dict[str, Any]) -> dict[str, Any]:
             }
         )
         for severity, pairs, for_ in BURN_ALERTS:
+            sel = f'{{slo="{name}"}}'
             conditions = [
-                f'(slo:sli_error:ratio_rate{long}{{slo="{name}"}} > {fmt(rate * budget)}'
-                f' and slo:sli_error:ratio_rate{short}{{slo="{name}"}} > {fmt(rate * budget)})'
+                f"(slo:sli_error:ratio_rate{long}{sel} > {fmt(rate * budget)}"
+                f" and slo:sli_error:ratio_rate{short}{sel} > {fmt(rate * budget)}"
+                f" and slo:sli_error:ratio_rate{long}{sel} * slo:sli_events:increase{long}{sel}"
+                f" >= {MIN_BAD_EVENTS})"
                 for long, short, rate in pairs
             ]
             windows = " or ".join(f"{rate:g}x over {long}" for long, _, rate in pairs)

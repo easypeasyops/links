@@ -120,6 +120,58 @@ tests:
               description: 'GET /{code} answers in under 50 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
               runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
 
+  # A quiet hour: 3 creates an hour, 1 of them slow (33%, far over any burn threshold). One
+  # slow request is not an incident: below MIN_BAD_EVENTS (5) in the long window, nothing
+  # fires. A sustained tail still alerts once it adds up: here at 6 bad events in 6 hours.
+  - name: one slow request on a quiet service does not page
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_count{method="POST",route="/links"}'
+        values: '0+0.05x420' # 3 per hour
+      - series: 'http_request_duration_seconds_bucket{method="POST",route="/links",le="0.1"}'
+        values: '0+0.0333333x420' # 2 per hour under 100 ms
+    alert_rule_test:
+      - eval_time: 70m
+        alertname: CreateLatencyBudgetBurn
+        exp_alerts: []
+      - eval_time: 6h50m
+        alertname: CreateLatencyBudgetBurn
+        exp_alerts:
+          - exp_labels: {severity: page, slo: create-latency}
+            exp_annotations:
+              summary: 'create-latency: error budget burning fast (14.4x over 1h or 6x over 6h)'
+              description: 'POST /links answers in under 100 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+          - exp_labels: {severity: ticket, slo: create-latency}
+            exp_annotations:
+              summary: 'create-latency: error budget burning steadily (3x over 1d or 1x over 3d)'
+              description: 'POST /links answers in under 100 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+
+  # The v0.7.1 canary on the kind cluster (2026-10-24): about 44 creates a minute, 7% over
+  # 100 ms, on an otherwise idle prod. A real tail, so the guard must not hide it: it pages.
+  - name: a real latency tail on modest traffic still pages
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_count{namespace="prod",method="POST",route="/links"}'
+        values: '0+44x30'
+      - series: 'http_request_duration_seconds_bucket{namespace="prod",method="POST",route="/links",le="0.1"}'
+        values: '0+41x30'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: CreateLatencyBudgetBurn
+        exp_alerts:
+          - exp_labels: {namespace: prod, severity: page, slo: create-latency}
+            exp_annotations:
+              summary: 'create-latency: error budget burning fast (14.4x over 1h or 6x over 6h)'
+              description: 'POST /links answers in under 100 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+          - exp_labels: {namespace: prod, severity: ticket, slo: create-latency}
+            exp_annotations:
+              summary: 'create-latency: error budget burning steadily (3x over 1d or 1x over 3d)'
+              description: 'POST /links answers in under 100 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+
   # Staging and prod are separate budgets: an outage in staging must not page for prod.
   - name: budgets are per namespace
     interval: 1m
