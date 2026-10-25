@@ -15,9 +15,10 @@ spec:
   schedule: {{ .Values.cleanup.schedule | quote }}
   timeZone: Etc/UTC
   # Never two runs at once from the schedule (a manual run may overlap: SKIP LOCKED makes
-  # that safe). A run missed by more than 10 minutes (cluster down) is skipped, not queued.
+  # that safe). A run that starts late (a laptop that slept, a controller restart) still
+  # starts within 50 minutes; later than that it is skipped, not queued.
   concurrencyPolicy: Forbid
-  startingDeadlineSeconds: 600
+  startingDeadlineSeconds: 3000
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:

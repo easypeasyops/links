@@ -448,6 +448,8 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 
 **Burn-rate alerts** (multi-window, multi-burn-rate, from the Google SRE Workbook). The burn rate is how fast the budget is being spent; at 1x it lasts exactly 30 days. An alert fires only when a long window shows the burn is significant **and** a short window shows it is still happening. That makes it fire within minutes of a real incident, and clear once the short windows are clean again: after 5 minutes for the 14.4x pair, 30 minutes for the 6x pair.
 
+**A minimum of bad events.** Each pair also needs at least 5 bad events in its long window (`MIN_BAD_EVENTS` in `scripts/gen_slo_rules.py`, from the recorded `slo:sli_events:increase<window>`). A ratio alone can't tell 1 slow request out of 3 in a quiet hour (33%) from 300 out of 900. Five is low enough that a real incident on a quiet service still alerts, and that a sustained tail adds up (the promtool test: 1 slow create an hour pages after 6 hours). It would not have silenced the page during the v0.7.1 canary, rightly: 7% of about 670 creates over 100 ms is a real tail (Known limitations).
+
 | Severity | Fires when (either pair) | Budget spent by then | `for` |
 | --- | --- | --- | --- |
 | page | 14.4x over 1h and 5m, or 6x over 6h and 30m | 2% or 5% | 2m |
@@ -615,6 +617,7 @@ This is the expensive rehearsal. `scripts/k8s-e2e.sh` runs the same steps CI and
 | 9. NetworkPolicy refusals | Metrics port and Postgres reject strangers; controls still succeed | A CNI that ignores NetworkPolicy accepts the objects silently; only a refusal test catches that |
 | 10. Expired-link cleanup | The CronJob's Job deletes exactly the links past their grace period, and the concurrently built index is valid | Deletes on a live table are where data loss hides; a wrong cutoff or a failed index build must fail CI, not prod |
 | 11. Backup and restore | Prod's backup Job dumps and uploads; only backup pods reach the bucket; the dump restores into a fresh Postgres with the same revision, every link and a canary | Backups are only real once restored; this proves it on every PR, and times it |
+| 11b. `cluster.sh wake` | The CronJob controller restarts and an overdue backup runs at once | A laptop that slept goes hours without backups, and the fix is a command nobody has run |
 | 12. GitOps | Argo CD takes prod over from the PR's own commit, reverts a hand edit, and runs a full canary it started, without fighting Argo Rollouts over the weights | Two controllers on one object is where GitOps setups break; the first canary under Argo CD must not be in prod |
 
 Chart lint + kubeconform run *before* kind starts, so a template typo fails in seconds. Like `check` and `image`, it skips its steps on a docs-only PR (below).
@@ -897,6 +900,7 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | CNI doesn't enforce NetworkPolicy (a new cluster, a CNI change) | Nothing breaks, and nothing is isolated: every policy is silently ignored | e2e step 9 fails: a refused connection succeeds |
 | A new outbound dependency (collector, external API) | Its connections time out: the app's egress allows DNS and the database only | Timeouts to the new host; add a `networkPolicy.extraEgress` rule |
 | Cleanup job failing or not scheduled | Expired rows accumulate; requests unaffected (expired links still answer 410) | `ShortlyCleanupNotRunning` after 3 missed hours; failed Jobs in `kubectl get jobs` |
+| The laptop sleeps (kind) | Docker's VM pauses; the CronJob controller's timers count only running time, so hourly jobs run hours apart (9 hours, at 10% awake) and Prometheus has gaps | `ShortlyBackupNotRunning` / `ShortlyCleanupNotRunning`; `scripts/cluster.sh wake` restarts the controller and takes overdue backups; `startingDeadlineSeconds: 3000` lets a just-missed run start |
 | Backup job failing or not scheduled | Nothing user-facing; the recovery point ages, so a database loss would cost more data | `ShortlyBackupNotRunning` after 2 missed runs; failed Jobs in `kubectl get jobs` |
 | Backup bucket down or full | Backup Jobs fail at upload (the dump itself is fine); existing backups unaffected unless the bucket's volume is lost | `ShortlyBackupNotRunning`; upload errors in the Job's `upload` log |
 | Database lost (volume deleted, corrupted) | Every request fails; restore from the newest dump loses up to 1 hour of writes | `ShortlyDown` / `ShortlyNotReady`; RUNBOOK, Restore Postgres from a backup |
@@ -1071,6 +1075,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | Canary (PR #40) | A healthy canary was aborted in CI for "no traffic": its first measurement, 30 s in, came before Prometheus had discovered and scraped the new pod twice | `traffic` allows one miss; the CI delay is 45 s (default 60 s) |
 | Canary (PR #40) | The HPA drill passed without proving anything: a Rollout's ready count includes the old version's pods for 30 s after a promotion or abort, so "a new pod is ready" was true at t=0 | The drill waits for ready ≤ the HPA floor before loading, and fails otherwise |
 | v0.7.1 promotion (PR #55) | `promote.sh prod` refused v0.7.1 although staging ran it on main: `git log -p … \| grep -q` under `pipefail`, where grep quits at the first match and `git log`, still writing, dies of SIGPIPE. It appeared only once the history outgrew the pipe buffer, so the small test repo never saw it | History read into a variable first; `test_promote_allows_prod_with_a_long_staging_history` fails on the old code |
+| v0.7.1 in prod (PR #57) | Hourly backups ran 9 hours apart on the laptop (22:41, 07:41, 16:41): the Docker VM was awake about 10% of the time, and the CronJob controller's timers count only running time. A run that came late was skipped (`startingDeadlineSeconds: 600`) | `scripts/cluster.sh wake`; deadline 3000 s; e2e step 11b proves wake restarts the controller and takes the backup |
+| v0.7.1 in prod (PR #57) | Burn-rate alerts had no floor on events: one slow request in a quiet hour is a 33% ratio, a page | 5 bad events in the long window; promtool tests for a quiet hour (silent) and the v0.7.1 canary's real tail (pages) |
 
 ## Known limitations and future work
 
@@ -1091,7 +1097,8 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 - Alert receivers are placeholders: alerts are routed but not delivered to a person (no PagerDuty or Slack integration).
 - Prometheus keeps 2 days of data in kind and has no persistent volume, so 30-day error budgets reset when its pod restarts.
 - The SLIs are measured in the app. Requests that never reach it (ingress or network failures) are invisible except through `ShortlyDown` and `ShortlyNotReady`; a load-balancer SLI would be more complete. Now that a Gateway sits in front, Envoy's own request metrics could supply that SLI; they aren't scraped yet.
-- At very low traffic one error is a large ratio, so burn-rate alerts can be noisy; a minimum-request-rate guard is not implemented.
+- Burn-rate alerts need 5 bad events in their long window (see SLOs and alerting); below that, a quiet service with a real problem stays silent until it adds up.
+- **Open: a latency tail on the laptop cluster.** During the v0.7.1 canary (2026-10-24, about 44 creates and 380 redirects a minute) 7% of creates took over 100 ms and 3.4% of redirects over 50 ms, on old and new pods alike, with the DB pool at 1 connection, no shedding and the node 3 of 10 cores busy. The Docker VM was paused about a third of each hour even then (Prometheus scraped 150–190 of 240 samples an hour), which may be the cause; not yet confirmed. Both latency SLOs burn whenever the kind cluster serves traffic.
 - Local kind only; no production cluster.
 - GitOps: Argo CD polls GitHub every 60 s (no webhook: a laptop isn't reachable from GitHub), so a merge takes up to a minute to land. One replica of each Argo CD component, admin login with a generated password, no SSO: fine for a laptop, not for a team.
 - Argo CD manages the app only. The platform (Envoy Gateway, Argo Rollouts, monitoring, Kyverno, backups, Argo CD itself) is still installed imperatively by `scripts/cluster.sh`.

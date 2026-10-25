@@ -368,6 +368,8 @@ Ask the questions in order; the first yes picks the playbook below.
 | `page` | 2% of the 30-day budget gone in an hour, or 5% in six hours; still happening | Now. Mitigate first, investigate after |
 | `ticket` | 10% gone in a day or three days; a slow leak | Working hours. Find the cause before the budget runs out |
 
+Either needs at least 5 bad requests in its long window: a single slow request on a quiet service doesn't page. On the kind cluster the latency SLOs burn whenever it serves traffic (DESIGN, Known limitations): check whether the old and new versions are equally slow before blaming a release.
+
 1. Find the scale and the shape:
 
    ```promql
@@ -626,6 +628,7 @@ kubectl -n prod logs job/<the latest one> --tail=30        # one JSON line per r
 | Jobs fail with `cleanup failed` and a connection error | Postgres unreachable, or the network policy doesn't admit the Job (labels changed) | Database first (Pods not Ready playbook); else compare the pod's labels with the `postgres` NetworkPolicy |
 | Jobs fail with a timeout (`DeadlineExceeded`) | A huge backlog, or a slow database: 900 s wasn't enough | Check the DB; the next runs continue where it stopped. To catch up faster, run it by hand (below) |
 | No Jobs at all; `SUSPEND` is `True` | Someone suspended it | `kubectl -n prod patch cronjob shortly-cleanup -p '{"spec":{"suspend":false}}'` |
+| No failed Jobs; `LAST SCHEDULE` hours old; on the laptop | The Mac slept: the CronJob controller's timers stall while Docker's VM is paused | `scripts/cluster.sh wake` (below) |
 | No Jobs, not suspended | Created by Kyverno? Check events: an image without release provenance is refused | `kubectl -n prod get events --sort-by=.lastTimestamp \| grep -i cleanup`; see Admission policy refuses pods |
 | Jobs succeed but the alert fires | kube-state-metrics down or not scraping | `kubectl -n monitoring get pods`; the alert can't see successes without it |
 
@@ -673,6 +676,7 @@ kubectl -n prod logs job/<the latest one> -c upload --tail=20    # rclone
 | `upload` times out or is refused | The bucket is down, or the `seaweedfs` NetworkPolicy no longer admits the Job | `kubectl -n backups get pods`; `kubectl -n backups logs statefulset/seaweedfs --tail=50` |
 | `upload` gets 403 | Credentials differ between `backup-s3` (app namespace) and `seaweedfs-s3` (backups) | Delete `backup-s3` in the namespace and re-run `scripts/cluster.sh up`, which copies them again |
 | No Jobs; `SUSPEND` is `True` | Suspended, perhaps by a restore that didn't finish | `kubectl -n prod patch cronjob postgres-backup -p '{"spec":{"suspend":false}}'` |
+| No failed Jobs; `LAST SCHEDULE` hours old; on the laptop | The Mac slept: the CronJob controller's timers stall while Docker's VM is paused (runs come hours apart) | `scripts/cluster.sh wake`: restarts the controller and backs up every environment whose last backup is over an hour old |
 
 **Take one now**, after fixing the cause: `kubectl -n prod create job backup-manual-$(date +%s) --from=cronjob/postgres-backup`. Then prove it: `SOURCE=prod scripts/restore-drill.sh`.
 
@@ -767,6 +771,7 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 scripts/cluster.sh up` |
 | Create without Kyverno and the admission policies | `POLICIES=0 scripts/cluster.sh up` |
 | Create without the backup bucket and backup CronJobs | `BACKUPS=0 scripts/cluster.sh up` |
+| After the laptop slept (backup or cleanup alerts, gaps in Grafana) | `scripts/cluster.sh wake`. To stop it happening while plugged in: `caffeinate -s` in a spare terminal, or System Settings → Battery → prevent sleep on power adapter |
 | Create without the front door (ports 8080 and 8090 left free) | `FRONT_DOOR=0 scripts/cluster.sh up`; then port-forward by hand, e.g. `kubectl -n monitoring port-forward svc/grafana 3000:80` |
 | Open the app through the Gateway | http://sho.rt.localhost:8080 (prod) or http://staging.sho.rt.localhost:8080, always on (the front door, below) |
 | Front door down? (a UI or the app doesn't answer on 8080 / 8090) | `docker ps --filter name=shortly-front-door` (two, `Up`); `scripts/cluster.sh up` recreates them. A port taken by an old `kubectl port-forward` is the usual cause: it says so; stop that one |

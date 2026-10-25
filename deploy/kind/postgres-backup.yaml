@@ -16,7 +16,10 @@ spec:
   schedule: "41 * * * *" # hourly, off the hour, and away from the cleanup job (:17)
   timeZone: Etc/UTC
   concurrencyPolicy: Forbid # a slow dump is never doubled up by the next one
-  startingDeadlineSeconds: 600
+  # A run that starts late (a laptop that slept, a controller restart: scripts/cluster.sh
+  # wake) still starts within 50 minutes, instead of being skipped. Under the hour, so a
+  # late run never collides with the next schedule's.
+  startingDeadlineSeconds: 3000
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
   jobTemplate:
