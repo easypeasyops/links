@@ -217,6 +217,9 @@ jobs:
           kubectl -n argocd get applications -o wide || true
           kubectl -n argocd get applications -o jsonpath='{range .items[*]}{"== "}{.metadata.name}{" "}{.status.sync.status}/{.status.health.status}{"\n"}{range .status.conditions[*]}  {.type}: {.message}{"\n"}{end}{range .status.resources[?(@.health.status!="Healthy")]}  {.health.status}: {.kind}/{.namespace}/{.name} {.health.message}{"\n"}{end}{.status.operationState.phase}: {.status.operationState.message}{"\n"}{end}' || true
           kubectl get pods -A | grep -vE "Running|Completed" || true
+          # Why each restarted container last stopped (OOMKilled, Error...).
+          kubectl get pods -A -o jsonpath='{range .items[*]}{range .status.containerStatuses[?(@.restartCount>0)]}{.name}: {.restartCount} restarts, last {.lastState.terminated.reason} (exit {.lastState.terminated.exitCode}){"\n"}{end}{end}' || true
+          kubectl -n argocd logs statefulset/argocd-application-controller --previous --tail=30 || true
           kubectl -n argocd logs deploy/argocd-repo-server --tail=40 || true
 
       - name: Deploy, promote, rollback drill

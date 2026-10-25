@@ -44,9 +44,12 @@ applicationSet:
 
 controller:
   replicas: 1
+  # It caches every resource it manages. 768Mi was enough for the app; with the platform
+  # (kube-prometheus-stack, Kyverno, Envoy Gateway and their large CRDs) it crash-looped in
+  # CI, and nothing synced while it was down.
   resources:
-    requests: { cpu: 100m, memory: 256Mi }
-    limits: { memory: 768Mi }
+    requests: { cpu: 100m, memory: 512Mi }
+    limits: { memory: 2Gi }
 server:
   replicas: 1
   resources:
