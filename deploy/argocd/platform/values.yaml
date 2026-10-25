@@ -1,0 +1,48 @@
+# The platform under Argo CD (DESIGN, GitOps with Argo CD). scripts/cluster.sh sets the
+# first block through the root Application's Helm parameters; the rest is the pin list.
+
+# Where the git-backed children (manifests, policies, values files) come from. `main` on a
+# laptop: a merged platform change reaches the cluster within a minute, like an app
+# promotion. CI sets the PR's commit.
+repoURL: https://github.com/statsguy/shortly.git
+revision: main
+# The node's CPU architecture: the Argo Rollouts plugin is a per-architecture binary
+# (amd64 in CI, arm64 on Apple silicon). cluster.sh reads it from the node.
+arch: amd64
+# What to install (cluster.sh's MONITORING, POLICIES, BACKUPS knobs; CI's delivery job
+# skips the last two).
+components:
+  monitoring: true
+  policies: true
+  backups: true
+
+# Helm charts, pulled by Argo CD from their OCI registries by DIGEST: the tag says what it
+# is, the digest that it can't change. tests/test_platform.py (integration) checks each
+# version still resolves to its digest, so a re-pushed tag is caught.
+charts:
+  envoyGateway: # Envoy Gateway: the Gateway API implementation; ships the Gateway API CRDs
+    repo: oci://registry-1.docker.io/envoyproxy/gateway-helm
+    version: v1.9.2
+    digest: sha256:be034275b55deeddd6b7bc1f4da6eeb02b8efc418a4a29e2b1977851b24b1e63
+  argoRollouts: # Argo Rollouts v1.10.0: prod's canary releases
+    repo: oci://ghcr.io/argoproj/argo-helm/argo-rollouts
+    version: 2.43.6
+    digest: sha256:ea68b0aed72752c8c8aa8d948c62d8d6076a255c5e6238648769bf1b01137f21
+  kubePrometheusStack: # Prometheus Operator, Prometheus, Alertmanager, Grafana
+    repo: oci://ghcr.io/prometheus-community/charts/kube-prometheus-stack
+    version: 91.9.0
+    digest: sha256:04047e500c803dc8d2bc284ecb43e9229bb32b5c36bd13fc89592c8a2f3cdc72
+  kyverno: # Kyverno v1.19.1, the engine tests/test_admission_policies.py runs
+    repo: oci://ghcr.io/kyverno/charts/kyverno
+    version: 3.9.1
+    digest: sha256:720542b97bdbc2633535c2297332690d21cfbb944053eb1ec1f0dbe8e3895444
+
+# Argo Rollouts' Gateway API traffic router. The controller downloads it when it starts and
+# refuses it unless the checksum matches. The project publishes no checksums: these were
+# computed from the release binaries when the version was pinned (that protects against a
+# later swap, not a bad original).
+gatewayAPIPlugin:
+  version: v0.17.0
+  sha256:
+    amd64: 1904ca787d33107c140521899d61fff030ee75d99908bd175fca5a4647759061
+    arm64: 5221279f7bf2c9b2c0ff6ed7ff12718ecce1d4892f1ff5e5224bb723cfd0fd92

@@ -1,0 +1,16 @@
+# metrics-server for the kind cluster, deployed by Argo CD (deploy/argocd/platform/).
+# components.yaml is the upstream v0.9.0 release manifest, vendored byte for byte and
+# checked against SHA256SUMS (recorded when it was first pinned) by tests/test_platform.py:
+# a manifest fetched at deploy time would be code you run with cluster-admin, unreviewed.
+# The one change is the patch below.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - components.yaml
+patches:
+  # kind kubelets serve self-signed certificates. Local clusters only: never in a real one.
+  - target: { kind: Deployment, name: metrics-server, namespace: kube-system }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --kubelet-insecure-tls

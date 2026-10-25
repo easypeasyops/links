@@ -1,0 +1,8 @@
+apiVersion: v2
+name: platform
+description: >-
+  The kind cluster's platform as Argo CD Applications (app-of-apps): one child Application
+  per component, ordered by sync wave. Rendered by the root Application "platform"
+  (deploy/argocd/platform-root.yaml), which scripts/cluster.sh applies.
+type: application
+version: 0.1.0

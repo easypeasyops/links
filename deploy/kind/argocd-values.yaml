@@ -1,5 +1,6 @@
-# Argo CD for the kind cluster (scripts/cluster.sh): GitOps for the app's two environments
-# (deploy/argocd/). One replica of everything, no SSO, no notifications: a laptop, not a
+# Argo CD for the kind cluster, bootstrapped by scripts/cluster.sh (the one component not
+# deployed from git): GitOps for the app's two environments and for the platform under
+# them (deploy/argocd/). One replica of everything, no SSO, no notifications: a laptop, not a
 # team. The UI is at http://argocd.localhost:8090, through the Gateway's tools listener
 # (deploy/kind/tools/argocd.yaml).
 global:
@@ -20,6 +21,19 @@ configs:
     admin.enabled: true
     statusbadge.enabled: false
     exec.enabled: false
+    # Report an Application's own health, so the platform root's sync waves wait for each
+    # wave's children to be Healthy before the next (Argo CD dropped this default in 1.8).
+    resource.customizations.health.argoproj.io_Application: |
+      hs = {}
+      hs.status = "Progressing"
+      hs.message = ""
+      if obj.status ~= nil and obj.status.health ~= nil then
+        hs.status = obj.status.health.status
+        if obj.status.health.message ~= nil then
+          hs.message = obj.status.health.message
+        end
+      end
+      return hs
 
 dex:
   enabled: false # no SSO
