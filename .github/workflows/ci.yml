@@ -247,3 +247,21 @@ jobs:
         run: |
           echo "kind e2e: $RESULT"
           [[ "$RESULT" == success ]]
+
+  # The one required status check (ruleset main-rules requires `ci` only). It passes when
+  # every job above passed, docs-only skips included, so jobs can be split, renamed or moved
+  # into reusable workflows without a ruleset change. Add a new job to `needs` or it isn't
+  # gating anything.
+  gate:
+    name: ci
+    if: always()
+    needs: [check, image, k8s]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Every job passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          jq -e 'all(.[]; .result == "success")' <<<"$NEEDS" >/dev/null
