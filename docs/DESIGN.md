@@ -439,7 +439,7 @@ Four SLOs say what users can expect from shortly. Alerts fire when the error bud
 
 **What counts as good.** 404 (unknown link) and 410 (expired) are correct answers, so they are good events. Every 5xx is bad, including the 503 from load shedding: the user did not get an answer. The redirect latency target is the load test's gate (p99 < 50 ms). Redirects get the stricter objectives because every click depends on them, while a failed create can be retried by its caller.
 
-**Source of truth.** The SLOs are declared in `deploy/prometheus/slos.yaml`. `scripts/gen_slo_rules.py` turns that file into Prometheus rules in `deploy/helm/shortly/rules/slo.yaml`, which is committed so reviewers see the real PromQL. The rules live in the chart because the chart ships them (see Delivery below). For each SLO the generator emits:
+**Source of truth.** The SLOs are declared in `deploy/prometheus/slos.yaml`. `scripts/gen_slo_rules.py` turns that file into Prometheus rules in `deploy/helm/shortly/rules/slo.yaml`, which is committed so reviewers see the real PromQL. The generator holds nothing of shortly's (platform plan 1.4): `--spec` and `--out` name an app's spec and rules file (shortly's are the defaults), and the spec's `runbook_url` is where every alert links. One gap for a second app: the SLI selectors pick series by `method` and `route` only, so two apps with the same route in one namespace would share an SLI; the spec would then need a `job` matcher. The rules live in the chart because the chart ships them (see Delivery below). For each SLO the generator emits:
 
 - `slo:sli_error:ratio_rate<window>`: the error ratio over 5m, 30m, 1h, 2h, 6h, 1d, 3d and 30d.
 - `slo:objective:ratio`: the target itself.

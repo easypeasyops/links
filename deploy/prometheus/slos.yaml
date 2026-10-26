@@ -12,6 +12,8 @@
 # 5xx, including 503 from load shedding, counts as bad: the user did not get an answer.
 
 window: 30d # burn-rate factors in the generator assume a 30-day window
+# Where every SLO alert's runbook_url points: the app's playbook for burn-rate alerts.
+runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
 
 slos:
   - name: redirect-availability
