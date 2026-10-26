@@ -11,9 +11,8 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-# The app's listener admits the environment-named and the per-app namespaces while the
-# environments move (platform plan, Phase 2).
-APP_NAMESPACES = {"staging", "prod", "shortly-staging", "shortly-prod"}
+# The app's listener admits the app's namespaces, <app>-<env> (platform plan, Phase 2).
+APP_NAMESPACES = {"shortly-staging", "shortly-prod"}
 LISTENER_NAMESPACES = {"http": APP_NAMESPACES, "tools": {"argocd", "monitoring"}}
 
 

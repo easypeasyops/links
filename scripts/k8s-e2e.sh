@@ -33,9 +33,6 @@
 #  12. GitOps: Argo CD takes prod over from this commit, reverts a hand edit, and runs a
 #      canary it started itself without fighting Argo Rollouts over the route's weights
 #      (needs GITOPS_REVISION, a commit Argo CD can fetch; CI sets it)
-#  13. `cluster.sh move-namespaces` copies each environment's database into a per-app
-#      namespace, every link included, and refuses to copy over one that has data
-#      (platform plan 2.2a; under a throwaway prefix, deleted afterwards)
 #
 # E2E_SUITE splits the run for CI's two parallel kind jobs. Both run steps 0-3a, then:
 #   platform: 3b, 3c, 6-12 (rate limit, front door, autoscaling, monitoring and the alert drill, admission,
@@ -594,22 +591,6 @@ PY
   pass "GitOps: a change through Argo CD ran a full canary (weights up to ${max_weight}%, analysis Successful twice, synthetic traffic included) in $((SECONDS - start))s; Argo CD stayed in sync"
 else
   echo "skip GitOps checks: no Argo CD, or GITOPS_REVISION unset (CI sets it)"
-fi
-
-# ---------------------------------------------------------------- 13. namespace move
-# What a laptop runs once before the switch to per-app namespaces (platform plan 2.2):
-# rehearsed here under a throwaway prefix, from the environment-named namespaces.
-if suite platform && [[ -z "$NAMESPACE_PREFIX" ]]; then
-  links() { kubectl -n "$1" exec postgres-0 -- psql -U shortly -d shortly -tAc "select count(*) from links"; }
-  want=$(links "$PROD_NS")
-  MOVE_TO_PREFIX=e2emove- "$ROOT/scripts/cluster.sh" move-namespaces >/dev/null
-  got=$(links e2emove-prod)
-  [[ "$got" == "$want" && "$want" -gt 0 ]] || fail "namespace move: e2emove-prod has $got links, prod has $want"
-  [[ "$(links e2emove-staging)" == "$(links "$STAGING_NS")" ]] || fail "namespace move: staging's links differ"
-  again=$(MOVE_TO_PREFIX=e2emove- "$ROOT/scripts/cluster.sh" move-namespaces)
-  grep -q "e2emove-prod: already has" <<<"$again" || fail "namespace move: a second run didn't refuse: $again"
-  kubectl delete namespace e2emove-staging e2emove-prod --wait=false >/dev/null
-  pass "namespace move: both databases copied into per-app namespaces ($want prod links), a second run refused"
 fi
 
 echo "k8s e2e passed"

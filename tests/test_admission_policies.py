@@ -158,8 +158,7 @@ def test_policies_cover_the_app_namespaces_only() -> None:
     for name in ("require-release-provenance.yaml", "allowed-images.yaml"):
         selector = _load(name)["spec"]["matchConstraints"]["namespaceSelector"]
         values = selector["matchExpressions"][0]["values"]
-        # The environment-named namespaces and the per-app ones, during the move (Phase 2).
-        assert sorted(values) == ["prod", "shortly-prod", "shortly-staging", "staging"], name
+        assert sorted(values) == ["shortly-prod", "shortly-staging"], name  # <app>-<env>
 
 
 # ------------------------------------------------------------------ Kyverno CLI cases
