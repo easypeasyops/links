@@ -240,6 +240,10 @@ def test_alertmanager_config_is_valid(alertmanager_config: Path) -> None:
         (["namespace=prod", "severity=page"], "pager"),
         (["namespace=prod", "severity=ticket"], "tickets"),
         (["namespace=staging", "severity=page"], "staging"),  # staging never pages
+        # Per-app namespaces (platform plan, Phase 2): any app's staging, and prod still pages.
+        (["namespace=shortly-staging", "severity=page"], "staging"),
+        (["namespace=shortly-prod", "severity=page"], "pager"),
+        (["namespace=prodstaging", "severity=page"], "pager"),  # the regex is anchored
         (["alertname=Watchdog", "severity=none"], "null"),
         (["namespace=monitoring", "severity=warning"], "null"),  # the stack's own alerts
     ],
