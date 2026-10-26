@@ -21,6 +21,13 @@ configs:
     # reaches the cluster within a minute. (A webhook from GitHub would make it instant;
     # it needs the server reachable from the internet, which a laptop isn't.)
     timeout.reconciliation: 60s
+    # Watch status changes again (Argo CD 2's behaviour). Argo CD 3 ignores status-only
+    # updates by default, so its cached copy of an object keeps an old status: in CI it
+    # reported CRDs "not established" for minutes after the API server had established
+    # them, and once kept a GatewayClass Degraded until the 10-minute platform wait gave
+    # up. A refresh doesn't help (it re-reads the same stale cache). The extra load is
+    # nothing on a cluster this size.
+    resource.ignoreResourceUpdatesEnabled: "false"
     # Admin login for the UI on a laptop; the generated password is in the Secret
     # argocd-initial-admin-secret.
     admin.enabled: true
