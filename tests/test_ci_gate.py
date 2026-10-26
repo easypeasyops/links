@@ -12,7 +12,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/ci.yml"
 # Jobs that only report others' results.
-REPORTERS = {"gate", "k8s-result"}
+REPORTERS = {"gate"}
 
 
 def _jobs() -> dict[str, Any]:

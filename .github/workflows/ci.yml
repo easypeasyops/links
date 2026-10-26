@@ -15,109 +15,49 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: lint, type-check, test
+  # Docs-only PRs skip the work in every job (scripts/ci-scope.sh says why the jobs still
+  # run and report success). Decided once, here; the jobs take it as an input.
+  scope:
+    name: change scope
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      # Actions pinned to commit SHAs: tags are mutable, SHAs are not.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          # Full history: tests/test_gitops.py checks prod's digest against everything
-          # staging has run on main.
-          fetch-depth: 0
-
-      # Docs-only PRs skip the work (scripts/ci-scope.sh says why the job still runs).
-      - name: Does this change need the checks?
-        id: scope
-        run: scripts/ci-scope.sh
-
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-        if: steps.scope.outputs.full == 'true'
-        with:
-          enable-cache: true # Python version comes from .python-version
-
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-        if: steps.scope.outputs.full == 'true'
-        with:
-          version: v4.3.1 # tests/test_platform.py renders the platform chart
-
-      - name: Install (fails if uv.lock is stale)
-        if: steps.scope.outputs.full == 'true'
-        run: uv sync --locked
-
-      - name: Format check
-        if: steps.scope.outputs.full == 'true'
-        run: uv run ruff format --check .
-
-      - name: Lint
-        if: steps.scope.outputs.full == 'true'
-        run: uv run ruff check .
-
-      - name: Type check
-        if: steps.scope.outputs.full == 'true'
-        run: uv run mypy src tests
-
-      - name: Test
-        if: steps.scope.outputs.full == 'true'
-        run: uv run pytest --cov-fail-under=90
-        env:
-          # gh verifies the released image's provenance (tests/test_deploy_gate.py); the
-          # read-only token is enough: the attestation bundle comes from the registry.
-          GH_TOKEN: ${{ github.token }}
-  image:
-    name: build, scan, smoke-test image
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 2
+    outputs:
+      full: ${{ steps.scope.outputs.full }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           fetch-depth: 2 # the PR merge commit and its first parent, for scripts/ci-scope.sh
-
-      # Docs-only PRs skip the work (scripts/ci-scope.sh says why the job still runs).
       - name: Does this change need the checks?
         id: scope
         run: scripts/ci-scope.sh
 
-      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        if: steps.scope.outputs.full == 'true'
+  # The generic jobs live in reusable workflows (platform plan, Phase 1): any app's CI calls
+  # them with its own inputs. Their checks are named "<caller> / <job>"; only `ci` (gate,
+  # below) is required, so the names are free to change.
+  check:
+    needs: scope
+    uses: ./.github/workflows/reusable-python-check.yml
+    with:
+      run: ${{ needs.scope.outputs.full == 'true' }}
+      # Full history: tests/test_gitops.py checks prod's digest against everything
+      # staging has run on main.
+      fetch-depth: 0
+      helm-version: v4.3.1 # tests render the charts (test_platform.py, test_chart_golden.py)
 
-      - name: Build
-        if: steps.scope.outputs.full == 'true'
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: .
-          load: true # into the local daemon, so the next steps can use it
-          tags: shortly:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+  image:
+    needs: scope
+    uses: ./.github/workflows/reusable-image.yml
+    with:
+      run: ${{ needs.scope.outputs.full == 'true' }}
+      smoke-command: SHORTLY_IMAGE="$IMAGE" scripts/smoke.sh
 
-      # Fail on HIGH/CRITICAL vulns that have a fix available. Unfixed ones can't be
-      # acted on yet, and failing on them just trains people to ignore the scanner.
-      - name: Scan image
-        if: steps.scope.outputs.full == 'true'
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: shortly:ci
-          version: v0.70.0
-          scanners: vuln
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
-
-      - name: Smoke test
-        if: steps.scope.outputs.full == 'true'
-        run: scripts/smoke.sh
-        env:
-          SHORTLY_IMAGE: shortly:ci
-  
   # Two kind clusters in parallel, each running half of the e2e drills (E2E_SUITE in
   # scripts/k8s-e2e.sh): the platform checks plus GitOps, and the delivery drills (rollbacks
   # and canaries). One cluster ran them in about 14 minutes; two take about 8.
   k8s:
     name: kind e2e (${{ matrix.suite }})
+    needs: scope
     runs-on: ubuntu-latest
     timeout-minutes: 20 # a hung drill shouldn't hold a runner
     strategy:
@@ -133,20 +73,14 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 2 # the PR merge commit and its first parent (main), to diff them
-
-      # Docs-only PRs skip the work (scripts/ci-scope.sh says why the job still runs).
-      - name: Does this change need the checks?
-        id: scope
-        run: scripts/ci-scope.sh
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-        if: steps.scope.outputs.full == 'true'
+        if: needs.scope.outputs.full == 'true'
         with:
           version: v4.3.1 # deploy.sh uses Helm 4 flags (--rollback-on-failure)
 
       - name: Lint and schema-validate the chart
-        if: steps.scope.outputs.full == 'true'
+        if: needs.scope.outputs.full == 'true'
         run: |
           helm lint deploy/helm/shortly --set image.tag=ci
           # --api-versions renders the ServiceMonitor/PrometheusRule (normally only rendered
@@ -182,16 +116,16 @@ jobs:
             -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" /t
 
       - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
-        if: steps.scope.outputs.full == 'true'
+        if: needs.scope.outputs.full == 'true'
         with:
           cluster_name: shortly
           config: deploy/kind/cluster.yaml
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-        if: steps.scope.outputs.full == 'true'
+        if: needs.scope.outputs.full == 'true'
 
       - name: Build image
-        if: steps.scope.outputs.full == 'true'
+        if: needs.scope.outputs.full == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -200,7 +134,7 @@ jobs:
           cache-from: type=gha
 
       - name: Platform through Argo CD; namespaces, Postgres, secrets
-        if: steps.scope.outputs.full == 'true'
+        if: needs.scope.outputs.full == 'true'
         run: scripts/cluster.sh up
         env:
           # Argo CD syncs the platform from this commit (the PR's head: a merge commit only
@@ -212,7 +146,7 @@ jobs:
 
       # When a sync never finishes, the job's timeout kills the wait before it can explain.
       - name: Argo CD state (on failure)
-        if: (failure() || cancelled()) && steps.scope.outputs.full == 'true'
+        if: (failure() || cancelled()) && needs.scope.outputs.full == 'true'
         run: |
           kubectl -n argocd get applications -o wide || true
           kubectl -n argocd get applications -o jsonpath='{range .items[*]}{"== "}{.metadata.name}{" "}{.status.sync.status}/{.status.health.status}{"\n"}{range .status.conditions[*]}  {.type}: {.message}{"\n"}{end}{range .status.resources[?(@.health.status!="Healthy")]}  {.health.status}: {.kind}/{.namespace}/{.name} {.health.message}{"\n"}{end}{.status.operationState.phase}: {.status.operationState.message}{"\n"}{end}' || true
@@ -223,7 +157,7 @@ jobs:
           kubectl -n argocd logs deploy/argocd-repo-server --tail=40 || true
 
       - name: Deploy, promote, rollback drill
-        if: steps.scope.outputs.full == 'true'
+        if: needs.scope.outputs.full == 'true'
         run: scripts/k8s-e2e.sh
         env:
           IMAGE: shortly:e2e
@@ -232,22 +166,6 @@ jobs:
           # GitHub serves; the merge commit CI checks out is not fetchable by Argo CD).
           GITOPS_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
 
-  # The required status check (ruleset main-rules) has this name: one result for both kind
-  # jobs, so splitting or reshaping them never needs a ruleset change.
-  k8s-result:
-    name: deploy to kind, rollback drill
-    if: always()
-    needs: k8s
-    runs-on: ubuntu-latest
-    timeout-minutes: 2
-    steps:
-      - name: Both kind jobs passed (or were skipped as docs-only)
-        env:
-          RESULT: ${{ needs.k8s.result }}
-        run: |
-          echo "kind e2e: $RESULT"
-          [[ "$RESULT" == success ]]
-
   # The one required status check (ruleset main-rules requires `ci` only). It passes when
   # every job above passed, docs-only skips included, so jobs can be split, renamed or moved
   # into reusable workflows without a ruleset change. Add a new job to `needs` or it isn't
@@ -255,7 +173,7 @@ jobs:
   gate:
     name: ci
     if: always()
-    needs: [check, image, k8s]
+    needs: [scope, check, image, k8s]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:

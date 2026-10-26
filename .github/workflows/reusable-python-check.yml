@@ -1,0 +1,76 @@
+name: Python checks (reusable)
+
+# Lint, type-check and test a uv-managed Python project: the `check` job any Python app's
+# CI calls (platform plan, Phase 1). The caller decides whether the change needs the work
+# (scripts/ci-scope.sh) and passes `run`; with `run: false` the job still reports success,
+# so required checks never wait on a docs-only change.
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: "false: report success without doing the work (docs-only change)"
+        type: boolean
+        default: true
+      fetch-depth:
+        description: "Git history to check out (0 = all, for tests that read history)"
+        type: number
+        default: 1
+      coverage-min:
+        type: number
+        default: 90
+      typecheck-paths:
+        type: string
+        default: src tests
+      helm-version:
+        description: "Install this Helm for tests that render charts; empty: no Helm"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: lint, type-check, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Actions pinned to commit SHAs: tags are mutable, SHAs are not.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.run
+        with:
+          persist-credentials: false
+          fetch-depth: ${{ inputs.fetch-depth }}
+
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        if: inputs.run
+        with:
+          enable-cache: true # Python version comes from .python-version
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        if: inputs.run && inputs.helm-version != ''
+        with:
+          version: ${{ inputs.helm-version }}
+
+      - name: Install (fails if uv.lock is stale)
+        if: inputs.run
+        run: uv sync --locked
+
+      - name: Format check
+        if: inputs.run
+        run: uv run ruff format --check .
+
+      - name: Lint
+        if: inputs.run
+        run: uv run ruff check .
+
+      - name: Type check
+        if: inputs.run
+        run: uv run mypy ${{ inputs.typecheck-paths }}
+
+      - name: Test
+        if: inputs.run
+        run: uv run pytest --cov-fail-under=${{ inputs.coverage-min }}
+        env:
+          # Tests may verify release provenance with gh; the read-only token is enough.
+          GH_TOKEN: ${{ github.token }}
