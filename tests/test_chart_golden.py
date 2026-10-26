@@ -107,3 +107,10 @@ def test_env_entries_with_when_render_only_when_switched_on() -> None:
     assert on["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://otel:4318"
     assert on["OTEL_RESOURCE_ATTRIBUTES"] == "deployment.environment.name=prod"
     assert on["SHORTLY_DATABASE_URL"] == "<secret>"
+
+
+def test_templates_name_no_app() -> None:
+    """The chart is becoming the platform's generic service chart (platform plan, Phase 1):
+    what is shortly's (its name, env, commands, schedules) belongs in values.yaml."""
+    for path in sorted((CHART / "templates").iterdir()):
+        assert "shortly" not in path.read_text().lower(), f"{path.name} names the app"

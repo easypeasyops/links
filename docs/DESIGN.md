@@ -307,7 +307,7 @@ CREATE TABLE rate_limits (    -- GCRA state (see Rate limiting); short-lived row
 
 **Autocommit.** The app's engine runs with `isolation_level="AUTOCOMMIT"`. Every query the app issues is a single statement, which Postgres already executes atomically, so the implicit `BEGIN … COMMIT/ROLLBACK` added two round trips per request for no safety gain. Removing them raised one pod's capacity by about 25% (see Capacity). An integration test checks the behaviour (a write is visible to another connection without `commit()`). A future multi-statement unit of work must opt back in explicitly with `conn.execution_options(isolation_level="READ COMMITTED")`. Migrations use their own engine and stay transactional.
 
-**Expired-link cleanup.** A link past its expiry answers 410 Gone, but its row would stay forever. A CronJob (`templates/cleanup-cronjob.yaml`, hourly at :17) runs `python -m shortly.cleanup`, which deletes links that expired more than `SHORTLY_CLEANUP_GRACE_DAYS` ago (7). Until then, a link still answers 410 rather than 404. Deletion is designed to be harmless on a busy table:
+**Expired-link cleanup.** A link past its expiry answers 410 Gone, but its row would stay forever. A CronJob (the `cleanup` entry of `cronJobs` in the chart's values, rendered by `templates/cronjobs.yaml`; hourly at :17) runs `python -m shortly.cleanup`, which deletes links that expired more than `SHORTLY_CLEANUP_GRACE_DAYS` ago (7). Until then, a link still answers 410 rather than 404. Deletion is designed to be harmless on a busy table:
 
 | Property | How |
 | --- | --- |
@@ -329,7 +329,7 @@ Guards in the test suite:
 - Every run downgrades to base and re-applies head.
 - Integration tests run against a real `postgres:17-alpine` container (testcontainers), migrated with the real migrations.
 
-**How migrations run in production.** A Helm `pre-install,pre-upgrade` hook Job runs `alembic upgrade head` from the release's own image before any new pod starts. A failed migration aborts the release while the old pods keep serving. It is one Job per release, never an initContainer per replica, which would race on the schema.
+**How migrations run in production.** A Helm `pre-install,pre-upgrade` hook Job runs `alembic upgrade head` from the release's own image before any new pod starts (the command is `migrations.command` in the chart's values; the chart only knows to run it first). A failed migration aborts the release while the old pods keep serving. It is one Job per release, never an initContainer per replica, which would race on the schema.
 
 **Compatibility rule: expand, deploy, contract.** During a rollout, old pods serve against the new schema, and a rollback runs old code against it too. Every migration must therefore be backward compatible with the previous app version. Destructive changes (drop or rename a column) ship in a later release, after no running version reads the old shape.
 

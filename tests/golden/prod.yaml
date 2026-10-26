@@ -50,7 +50,7 @@ spec:
 
 ---
 # Source: shortly/templates/networkpolicy.yaml
-# The cleanup Job's pods: nothing may connect to them; they may reach DNS and the database.
+# A scheduled job's pods: nothing may connect to them; they may reach DNS and the database.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -845,12 +845,7 @@ spec:
       stabilizationWindowSeconds: 0
 
 ---
-# Source: shortly/templates/cleanup-cronjob.yaml
-# Deletes links that expired more than cleanup.graceDays ago (python -m shortly.cleanup):
-# bounded batches, each one short statement that commits on its own. Same image as the
-# release, so Kyverno verifies its provenance like the app's (CronJobs are checked too).
-#
-# Run it now:  kubectl -n <ns> create job cleanup-manual --from=cronjob/<release>-cleanup
+# Source: shortly/templates/cronjobs.yaml
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -865,7 +860,7 @@ metadata:
 spec:
   schedule: "17 * * * *"
   timeZone: Etc/UTC
-  # Never two runs at once from the schedule (a manual run may overlap: SKIP LOCKED makes
+  # Never two runs at once from the schedule (a manual run may overlap: the job must make
   # that safe). A run that starts late (a laptop that slept, a controller restart) still
   # starts within 50 minutes; later than that it is skipped, not queued.
   concurrencyPolicy: Forbid
@@ -897,7 +892,10 @@ spec:
             - name: cleanup
               image: ghcr.io/statsguy/shortly@sha256:0000000000000000000000000000000000000000000000000000000000000000
               imagePullPolicy: IfNotPresent
-              command: ["python", "-m", "shortly.cleanup"]
+              command:
+                - python
+                - -m
+                - shortly.cleanup
               env:
                 - name: SHORTLY_DATABASE_URL
                   valueFrom:
@@ -938,8 +936,11 @@ spec:
                 capabilities:
                   drop: ["ALL"]
               resources:
-                requests: { cpu: 50m, memory: 96Mi }
-                limits: { memory: 192Mi }
+                limits:
+                  memory: 192Mi
+                requests:
+                  cpu: 50m
+                  memory: 96Mi
 
 ---
 # Source: shortly/templates/rollout.yaml
@@ -1792,7 +1793,7 @@ spec:
 ---
 # Source: shortly/templates/servicemonitor.yaml
 # Prometheus finds the pods through the Service's endpoints and scrapes each one. The job
-# label becomes the Service name ("shortly"), which the alert rules select on.
+# label becomes the Service name (the release name), which the alert rules select on.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
@@ -1817,9 +1818,9 @@ spec:
       interval: 15s
 ---
 # Source: shortly/templates/migrate-job.yaml
-# Runs `alembic upgrade head` from the SAME image as the release, before the new pods
-# start. One Job per release — not an initContainer in every replica, which would have N
-# pods racing to migrate the same schema.
+# Runs the app's migration command (migrations.command) from the SAME image as the
+# release, before the new pods start. One Job per release — not an initContainer in every
+# replica, which would have N pods racing to migrate the same schema.
 #
 # Rule this enables: migrations must be backward-compatible with the PREVIOUS app
 # version (expand → deploy → contract), because old pods keep serving while new ones roll
@@ -1865,11 +1866,6 @@ spec:
         - name: migrate
           image: ghcr.io/statsguy/shortly@sha256:0000000000000000000000000000000000000000000000000000000000000000
           imagePullPolicy: IfNotPresent
-          # `alembic upgrade head`, except when the database is AHEAD of this image: its
-          # revision is one this release doesn't know, which happens exactly on a rollback
-          # (a reverted promotion, or an older digest redeployed). Expand/contract makes
-          # the old code work on the newer schema, so the right move is to leave it alone.
-          # (Helm skipped hooks on `helm rollback`; Argo CD runs them on every sync.)
           command:
             - sh
             - -c
@@ -1915,6 +1911,9 @@ spec:
             capabilities:
               drop: ["ALL"]
           resources:
-            requests: { cpu: 50m, memory: 128Mi }
-            limits: { memory: 256Mi }
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
 

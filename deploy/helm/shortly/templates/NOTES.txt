@@ -1,4 +1,4 @@
-shortly {{ include "service.version" . }} → namespace {{ .Release.Namespace }} (revision {{ .Release.Revision }})
+{{ .Values.app.name }} {{ include "service.version" . }} → namespace {{ .Release.Namespace }} (revision {{ .Release.Revision }})
 {{ if .Values.canary.enabled }}
   kubectl -n {{ .Release.Namespace }} get rollout {{ include "service.fullname" . }} -w   # canary: phase, step, weights
   kubectl -n {{ .Release.Namespace }} get analysisrun                 # one per analysis step

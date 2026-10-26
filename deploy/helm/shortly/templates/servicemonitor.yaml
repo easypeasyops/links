@@ -3,7 +3,7 @@
        --api-versions monitoring.coreos.com/v1/ServiceMonitor */}}
 {{- if and .Values.monitoring.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}
 # Prometheus finds the pods through the Service's endpoints and scrapes each one. The job
-# label becomes the Service name ("shortly"), which the alert rules select on.
+# label becomes the Service name (the release name), which the alert rules select on.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
