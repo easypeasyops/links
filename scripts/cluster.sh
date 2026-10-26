@@ -117,6 +117,8 @@ wait_synced() {
       # Each Application's state, and for one that isn't healthy, what holds it back.
       echo "  ... $app is ${state:-not there yet} after $((SECONDS - t0))s; $(kubectl -n argocd get applications \
         -o jsonpath='{range .items[*]}{.metadata.name}={.status.sync.status}/{.status.health.status}{range .status.resources[?(@.health.status=="Degraded")]} [Degraded {.kind}/{.name}: {.health.message}]{end}{range .status.resources[?(@.health.status=="Progressing")]} [Progressing {.kind}/{.name}]{end} {end}' 2>/dev/null)"
+      # The API server's own view, to compare with Argo CD's (whose health can lag).
+      echo "      API server: $(kubectl get crd -o jsonpath='{range .items[*]}{.status.conditions[?(@.type=="Established")].status}{"\n"}{end}' 2>/dev/null | grep -vc True || true) CRDs not yet Established"
     fi
     sleep 3
   done
