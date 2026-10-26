@@ -66,44 +66,24 @@ max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
 {{- end -}}
 {{- end -}}
 
-{{/* Env shared by the app and the migration Job — one source of truth. */}}
+{{/* The app's environment, shared by the app, the migration Job and the cleanup Job: the
+     `env` list from values, in order. Each string is a template (it may read other values,
+     such as config.*, which env files override); an entry with `when` is rendered only if
+     `when` renders to something other than "", "0" or "false". */}}
 {{- define "service.env" -}}
-- name: SHORTLY_DATABASE_URL
+{{- $root := . }}
+{{- range .Values.env }}
+{{- if or (not (hasKey . "when")) (not (has (tpl (toString .when) $root) (list "" "0" "false"))) }}
+- name: {{ .name }}
+{{- if .secret }}
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.database.existingSecret }}
-      key: {{ .Values.database.secretKey }}
-- name: SHORTLY_BASE_URL
-  value: {{ .Values.config.baseUrl | quote }}
-- name: SHORTLY_LOG_LEVEL
-  value: {{ .Values.config.logLevel | quote }}
-- name: SHORTLY_DB_POOL_SIZE
-  value: {{ .Values.config.dbPoolSize | quote }}
-- name: SHORTLY_METRICS_PORT
-  value: {{ .Values.config.metricsPort | quote }}
-- name: SHORTLY_DB_POOL_TIMEOUT_SECONDS
-  value: {{ .Values.config.dbPoolTimeoutSeconds | quote }}
-- name: SHORTLY_DB_STATEMENT_TIMEOUT_MS
-  value: {{ .Values.config.dbStatementTimeoutMs | quote }}
-- name: SHORTLY_DB_LOCK_TIMEOUT_MS
-  value: {{ .Values.config.dbLockTimeoutMs | quote }}
-- name: SHORTLY_MAX_CONCURRENT_REQUESTS
-  value: {{ .Values.config.maxConcurrentRequests | quote }}
-{{- if .Values.config.faultErrorRatio }}
-- name: SHORTLY_FAULT_ERROR_RATIO # DRILL: requests fail on purpose (see values.yaml)
-  value: {{ .Values.config.faultErrorRatio | quote }}
+      name: {{ tpl .secret.name $root }}
+      key: {{ tpl .secret.key $root }}
+{{- else }}
+  value: {{ tpl (toString .value) $root | quote }}
 {{- end }}
-- name: SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE
-  value: {{ .Values.config.rateLimit.createsPerMinute | quote }}
-- name: SHORTLY_RATE_LIMIT_BURST
-  value: {{ .Values.config.rateLimit.burst | quote }}
-- name: FORWARDED_ALLOW_IPS # read by uvicorn itself
-  value: {{ .Values.config.forwardedAllowIps | quote }}
-{{- if .Values.otel.endpoint }}
-- name: OTEL_EXPORTER_OTLP_ENDPOINT
-  value: {{ .Values.otel.endpoint | quote }}
-- name: OTEL_RESOURCE_ATTRIBUTES
-  value: {{ printf "deployment.environment.name=%s" .Release.Namespace | quote }}
+{{- end }}
 {{- end }}
 {{- end -}}
 

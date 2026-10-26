@@ -88,6 +88,35 @@ database:
 otel:
   endpoint: ""
 
+# The app's environment variables. The chart renders this list as it is, in order: which
+# variables the app reads is the app's business, not the chart's. Each string is a template,
+# so it can read other values (config.* above, which env files override). An entry with
+# `when` is rendered only if `when` renders to something other than "", "0" or "false".
+env:
+  - name: SHORTLY_DATABASE_URL
+    secret: { name: "{{ .Values.database.existingSecret }}", key: "{{ .Values.database.secretKey }}" }
+  - { name: SHORTLY_BASE_URL, value: "{{ .Values.config.baseUrl }}" }
+  - { name: SHORTLY_LOG_LEVEL, value: "{{ .Values.config.logLevel }}" }
+  - { name: SHORTLY_DB_POOL_SIZE, value: "{{ .Values.config.dbPoolSize }}" }
+  - { name: SHORTLY_METRICS_PORT, value: "{{ .Values.config.metricsPort }}" }
+  - { name: SHORTLY_DB_POOL_TIMEOUT_SECONDS, value: "{{ .Values.config.dbPoolTimeoutSeconds }}" }
+  - { name: SHORTLY_DB_STATEMENT_TIMEOUT_MS, value: "{{ .Values.config.dbStatementTimeoutMs }}" }
+  - { name: SHORTLY_DB_LOCK_TIMEOUT_MS, value: "{{ .Values.config.dbLockTimeoutMs }}" }
+  - { name: SHORTLY_MAX_CONCURRENT_REQUESTS, value: "{{ .Values.config.maxConcurrentRequests }}" }
+  # DRILL: requests fail on purpose (config.faultErrorRatio)
+  - name: SHORTLY_FAULT_ERROR_RATIO
+    value: "{{ .Values.config.faultErrorRatio }}"
+    when: "{{ .Values.config.faultErrorRatio }}"
+  - { name: SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE, value: "{{ .Values.config.rateLimit.createsPerMinute }}" }
+  - { name: SHORTLY_RATE_LIMIT_BURST, value: "{{ .Values.config.rateLimit.burst }}" }
+  - { name: FORWARDED_ALLOW_IPS, value: "{{ .Values.config.forwardedAllowIps }}" } # read by uvicorn itself
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: "{{ .Values.otel.endpoint }}"
+    when: "{{ .Values.otel.endpoint }}"
+  - name: OTEL_RESOURCE_ATTRIBUTES
+    value: "deployment.environment.name={{ .Release.Namespace }}"
+    when: "{{ .Values.otel.endpoint }}"
+
 migrations:
   enabled: true
   # The Job runs as a Helm pre-install/pre-upgrade hook: the schema is migrated BEFORE

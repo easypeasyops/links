@@ -202,7 +202,7 @@ spec:
               value: "60"
             - name: SHORTLY_RATE_LIMIT_BURST
               value: "20"
-            - name: FORWARDED_ALLOW_IPS # read by uvicorn itself
+            - name: FORWARDED_ALLOW_IPS
               value: "127.0.0.1"
           securityContext:
             allowPrivilegeEscalation: false
@@ -327,7 +327,7 @@ spec:
                   value: "60"
                 - name: SHORTLY_RATE_LIMIT_BURST
                   value: "20"
-                - name: FORWARDED_ALLOW_IPS # read by uvicorn itself
+                - name: FORWARDED_ALLOW_IPS
                   value: "127.0.0.1"
                 - name: SHORTLY_CLEANUP_GRACE_DAYS
                   value: "7"
@@ -488,7 +488,7 @@ spec:
               value: "60"
             - name: SHORTLY_RATE_LIMIT_BURST
               value: "20"
-            - name: FORWARDED_ALLOW_IPS # read by uvicorn itself
+            - name: FORWARDED_ALLOW_IPS
               value: "127.0.0.1"
           securityContext:
             allowPrivilegeEscalation: false
