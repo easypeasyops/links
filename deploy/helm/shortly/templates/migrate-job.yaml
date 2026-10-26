@@ -1,7 +1,7 @@
 {{- if .Values.migrations.enabled }}
-# Runs `alembic upgrade head` from the SAME image as the release, before the new pods
-# start. One Job per release — not an initContainer in every replica, which would have N
-# pods racing to migrate the same schema.
+# Runs the app's migration command (migrations.command) from the SAME image as the
+# release, before the new pods start. One Job per release — not an initContainer in every
+# replica, which would have N pods racing to migrate the same schema.
 #
 # Rule this enables: migrations must be backward-compatible with the PREVIOUS app
 # version (expand → deploy → contract), because old pods keep serving while new ones roll
@@ -37,27 +37,12 @@ spec:
         - name: migrate
           image: {{ include "service.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          # `alembic upgrade head`, except when the database is AHEAD of this image: its
-          # revision is one this release doesn't know, which happens exactly on a rollback
-          # (a reverted promotion, or an older digest redeployed). Expand/contract makes
-          # the old code work on the newer schema, so the right move is to leave it alone.
-          # (Helm skipped hooks on `helm rollback`; Argo CD runs them on every sync.)
           command:
-            - sh
-            - -c
-            - |
-              out=$(alembic upgrade head 2>&1); rc=$?
-              printf '%s\n' "$out"
-              if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "Can't locate revision identified by"; then
-                echo "migrate: the database is at a newer revision than this release (a rollback); schema left as it is"
-                exit 0
-              fi
-              exit "$rc"
+            {{- toYaml .Values.migrations.command | nindent 12 }}
           env:
             {{- include "service.env" . | trim | nindent 12 }}
           securityContext:
             {{- include "service.containerSecurityContext" . | nindent 12 }}
           resources:
-            requests: { cpu: 50m, memory: 128Mi }
-            limits: { memory: 256Mi }
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
 {{- end }}

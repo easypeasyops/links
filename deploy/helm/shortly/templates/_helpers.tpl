@@ -15,13 +15,14 @@ app.kubernetes.io/name: {{ .Values.app.name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
-{{/* Labels of the cleanup Job's pods. Deliberately NOT the selector labels: a pod matching
-     those is counted by the HPA (its CPU skews the average) and the PodDisruptionBudget.
-     part-of ties every pod of the chart together for the Postgres network policy. */}}
-{{- define "service.cleanupSelectorLabels" -}}
-app.kubernetes.io/name: {{ .Values.app.name }}-cleanup
-app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/part-of: {{ .Values.app.partOf }}
+{{/* Labels of a scheduled job's pods, (dict "root" $ "name" <cronJobs key>). Deliberately
+     NOT the selector labels: a pod matching those is counted by the HPA (its CPU skews the
+     average) and the PodDisruptionBudget. part-of ties every pod of the chart together for
+     the database's network policy. */}}
+{{- define "service.jobSelectorLabels" -}}
+app.kubernetes.io/name: {{ .root.Values.app.name }}-{{ .name }}
+app.kubernetes.io/instance: {{ .root.Release.Name }}
+app.kubernetes.io/part-of: {{ .root.Values.app.partOf }}
 {{- end -}}
 
 {{/* Egress every pod of the chart needs: DNS, and the database. Nothing else. */}}
@@ -66,13 +67,13 @@ max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
 {{- end -}}
 {{- end -}}
 
-{{/* The app's environment, shared by the app, the migration Job and the cleanup Job: the
-     `env` list from values, in order. Each string is a template (it may read other values,
-     such as config.*, which env files override); an entry with `when` is rendered only if
-     `when` renders to something other than "", "0" or "false". */}}
-{{- define "service.env" -}}
-{{- $root := . }}
-{{- range .Values.env }}
+{{/* Renders an env list from values (`env`, or a scheduled job's own `env`), in order.
+     Each string is a template (it may read other values, such as config.*, which env files
+     override); an entry with `when` is rendered only if `when` renders to something other
+     than "", "0" or "false". Call with (dict "root" $ "env" <list>). */}}
+{{- define "service.envList" -}}
+{{- $root := .root }}
+{{- range .env }}
 {{- if or (not (hasKey . "when")) (not (has (tpl (toString .when) $root) (list "" "0" "false"))) }}
 - name: {{ .name }}
 {{- if .secret }}
@@ -85,6 +86,11 @@ max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
 {{- end }}
 {{- end }}
 {{- end }}
+{{- end -}}
+
+{{/* The app's environment, shared by the app, the migration Job and the scheduled jobs. */}}
+{{- define "service.env" -}}
+{{- include "service.envList" (dict "root" . "env" .Values.env) }}
 {{- end -}}
 
 {{/* Restricted Pod Security Standard: what every container in this chart runs with. */}}

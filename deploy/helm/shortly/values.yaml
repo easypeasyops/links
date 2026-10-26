@@ -123,6 +123,25 @@ migrations:
   # new pods start, and a failed migration aborts the release (old pods keep serving).
   backoffLimit: 1
   activeDeadlineSeconds: 300
+  # The app's migration command. shortly's: `alembic upgrade head`, except when the
+  # database is AHEAD of this image: its revision is one this release doesn't know, which
+  # happens exactly on a rollback (a reverted promotion, or an older digest redeployed).
+  # Expand/contract makes the old code work on the newer schema, so the right move is to
+  # leave it alone. (Helm skipped hooks on `helm rollback`; Argo CD runs them on every sync.)
+  command:
+    - sh
+    - -c
+    - |
+      out=$(alembic upgrade head 2>&1); rc=$?
+      printf '%s\n' "$out"
+      if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "Can't locate revision identified by"; then
+        echo "migrate: the database is at a newer revision than this release (a rollback); schema left as it is"
+        exit 0
+      fi
+      exit "$rc"
+  resources:
+    requests: { cpu: 50m, memory: 128Mi }
+    limits: { memory: 256Mi }
 
 service:
   type: ClusterIP
@@ -203,16 +222,27 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
-# Expired-link cleanup (templates/cleanup-cronjob.yaml). Links expired less than graceDays
-# ago are kept, so they still answer 410 Gone. One run deletes at most
-# batchSize x maxBatches rows; a bigger backlog is finished by the next runs.
-cleanup:
-  enabled: true
-  schedule: "17 * * * *" # hourly, off the top of the hour when every other job runs
-  graceDays: 7
-  batchSize: 1000
-  maxBatches: 100
-  activeDeadlineSeconds: 900
+# Scheduled jobs (templates/cronjobs.yaml): one CronJob per entry, named <release>-<key>,
+# from the release image, with the app's env plus its own. Their pods are labelled
+# <app.name>-<key>, so neither the HPA nor the PodDisruptionBudget counts them, and get a
+# network policy of their own: DNS and the database only. Set an entry to null to drop it.
+cronJobs:
+  # Expired-link cleanup (python -m shortly.cleanup). Links expired less than
+  # SHORTLY_CLEANUP_GRACE_DAYS ago are kept, so they still answer 410 Gone. Bounded batches,
+  # each one short statement that commits on its own: one run deletes at most
+  # BATCH_SIZE x MAX_BATCHES rows, and a bigger backlog is finished by the next runs. A
+  # manual run may overlap a scheduled one, which SKIP LOCKED makes safe.
+  cleanup:
+    schedule: "17 * * * *" # hourly, off the top of the hour when every other job runs
+    command: ["python", "-m", "shortly.cleanup"]
+    activeDeadlineSeconds: 900
+    env:
+      - { name: SHORTLY_CLEANUP_GRACE_DAYS, value: "7" }
+      - { name: SHORTLY_CLEANUP_BATCH_SIZE, value: "1000" }
+      - { name: SHORTLY_CLEANUP_MAX_BATCHES, value: "100" }
+    resources:
+      requests: { cpu: 50m, memory: 96Mi }
+      limits: { memory: 192Mi }
 
 # Who may talk to the pods, and whom they may talk to (templates/networkpolicy.yaml). Needs a
 # CNI that enforces NetworkPolicy (kind's kindnet does; the e2e proves it); on one that
