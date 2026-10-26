@@ -5,7 +5,7 @@ metadata:
   labels:
     {{- include "shortly.selectorLabels" . | nindent 4 }}
     app.kubernetes.io/version: {{ include "shortly.version" . | quote }}
-    app.kubernetes.io/part-of: shortly
+    app.kubernetes.io/part-of: {{ .Values.app.partOf }}
   annotations:
     prometheus.io/scrape: "true"
     prometheus.io/port: {{ .Values.config.metricsPort | quote }}

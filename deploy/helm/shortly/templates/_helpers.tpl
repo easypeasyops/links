@@ -3,7 +3,7 @@
 {{- end -}}
 
 {{- define "shortly.labels" -}}
-app.kubernetes.io/name: shortly
+app.kubernetes.io/name: {{ .Values.app.name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/version: {{ include "shortly.version" . | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
@@ -11,7 +11,7 @@ helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
 
 {{- define "shortly.selectorLabels" -}}
-app.kubernetes.io/name: shortly
+app.kubernetes.io/name: {{ .Values.app.name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
@@ -19,9 +19,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
      those is counted by the HPA (its CPU skews the average) and the PodDisruptionBudget.
      part-of ties every pod of the chart together for the Postgres network policy. */}}
 {{- define "shortly.cleanupSelectorLabels" -}}
-app.kubernetes.io/name: shortly-cleanup
+app.kubernetes.io/name: {{ .Values.app.name }}-cleanup
 app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/part-of: shortly
+app.kubernetes.io/part-of: {{ .Values.app.partOf }}
 {{- end -}}
 
 {{/* Egress every pod of the chart needs: DNS, and the database. Nothing else. */}}

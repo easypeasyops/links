@@ -1,5 +1,12 @@
 # Defaults are production-shaped; values-<env>.yaml files override per environment.
 
+# The app this chart deploys. `name` is its app.kubernetes.io/name label (and so its pods'
+# selector); `partOf` is app.kubernetes.io/part-of on every pod of the chart, which the
+# database's network policy admits (deploy/kind/network-policies.yaml).
+app:
+  name: shortly
+  partOf: shortly
+
 image:
   repository: ghcr.io/statsguy/shortly
   # Deploy by digest (sha256:...) whenever possible: a digest is immutable, so the bits

@@ -760,7 +760,7 @@ The probes, and `/metrics`, never wait in the request threadpool. FastAPI runs s
 | Anyone (`networkPolicy.httpFrom`): the Gateway's Envoy proxy, and in-cluster callers | shortly | 8000 | The public API. On a real cluster, narrow this to the proxy's namespace |
 | Prometheus pods in `monitoring` | shortly | 9100 | Scrapes; nobody else sees internal metrics |
 | shortly (app, migration and cleanup Jobs) | kube-dns | 53 UDP/TCP | Name resolution |
-| shortly (pods labelled `app.kubernetes.io/part-of: shortly`) | postgres | 5432 | The only dependency, in both directions |
+| shortly (pods labelled `app.kubernetes.io/part-of: shortly`, the chart's `app.partOf`) | postgres | 5432 | The only dependency, in both directions |
 | Anything else | any pod in `staging` or `prod` | any | Refused: default-deny ingress |
 
 The app's egress is closed too: it can reach DNS and the database, nothing else. A dependency added later (an OpenTelemetry collector, a URL reputation API) needs an explicit `networkPolicy.extraEgress` rule, which a reviewer sees. Kubelet probes and `kubectl port-forward` don't go through these rules. Postgres's own egress stays open, because the e2e uses `postgres-0` as an in-cluster client.
