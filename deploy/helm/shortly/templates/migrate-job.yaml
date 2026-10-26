@@ -54,7 +54,7 @@ spec:
               fi
               exit "$rc"
           env:
-            {{- include "service.env" . | nindent 12 }}
+            {{- include "service.env" . | trim | nindent 12 }}
           securityContext:
             {{- include "service.containerSecurityContext" . | nindent 12 }}
           resources:

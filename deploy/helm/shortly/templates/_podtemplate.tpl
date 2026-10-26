@@ -37,7 +37,7 @@ spec:
         - name: metrics
           containerPort: {{ .Values.config.metricsPort }}
       env:
-        {{- include "service.env" . | nindent 8 }}
+        {{- include "service.env" . | trim | nindent 8 }}
       securityContext:
         {{- include "service.containerSecurityContext" . | nindent 8 }}
       # startupProbe gates the other two, so a slow start isn't killed by liveness.

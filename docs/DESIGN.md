@@ -370,6 +370,8 @@ flowchart LR
 
 All configuration comes from environment variables, parsed by `pydantic-settings` at startup. An invalid or missing value stops the process on boot rather than failing on the first request; the rollback drill relies on this.
 
+In Kubernetes the list of variables is the `env` list in the chart's `values.yaml`, rendered as it is by the chart (the app's business, not the chart's: platform plan 1.3b). Each value is a template reading `config.*`, which env files and `--set` override; the drill-only and tracing-only variables carry a `when` and are left out unless switched on.
+
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SHORTLY_DATABASE_URL` | required | Postgres DSN; always from a Kubernetes Secret |

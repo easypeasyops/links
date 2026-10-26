@@ -41,7 +41,7 @@ spec:
               imagePullPolicy: {{ .Values.image.pullPolicy }}
               command: ["python", "-m", "shortly.cleanup"]
               env:
-                {{- include "service.env" . | nindent 16 }}
+                {{- include "service.env" . | trim | nindent 16 }}
                 - name: SHORTLY_CLEANUP_GRACE_DAYS
                   value: {{ .Values.cleanup.graceDays | quote }}
                 - name: SHORTLY_CLEANUP_BATCH_SIZE
