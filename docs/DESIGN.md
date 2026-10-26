@@ -581,6 +581,7 @@ flowchart TB
 | mypy `--strict` | Wrong types at the HTTP ↔ service ↔ store boundaries | Runtime `AttributeError` / invalid status mapping that tests might not hit |
 | pytest + real Postgres (testcontainers) | Contract between SQLAlchemy models, Alembic, and `PostgresStore` | Passing unit tests against `InMemoryStore` while production SQL is wrong |
 | `--cov-fail-under=90` | Untested branches quietly landing | Regressions in collision retry, load shedding, rate-limit edges |
+| Chart golden files (`tests/golden/`, `test_chart_golden.py`) | Any change in what the chart renders for staging or prod: a template edit, a values default, an env setting | Refactors of the chart that quietly change what reaches the cluster; reviewers reading templates instead of the manifests Argo CD applies |
 | promtool / amtool / Kyverno CLI tests | Alert rules that never fire; policies that never deny; dashboard PromQL that selects nothing | Silent monitoring: the first time you learn an alert is broken is during an incident |
 
 Toolchain: Python 3.14 (`.python-version`), uv + committed `uv.lock`, `src/` layout. The same ruff/mypy/pytest stack runs in pre-commit locally so developers see failures before the PR.

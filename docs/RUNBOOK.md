@@ -737,6 +737,7 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 
 | Job → step | Usual cause | Reproduce and fix |
 | --- | --- | --- |
+| test → `test_chart_golden.py` | The chart now renders different manifests for an environment (a template, values default or env file changed) | Read the diff in the failure. If it's intended: `UPDATE_GOLDEN=1 uv run pytest tests/test_chart_golden.py`, commit `tests/golden/`. If not, the change has a side effect: fix it. The image digest and chart version are normalised, so promotions and release bumps never trip it |
 | test → `test_generated_slo_rules_are_current` | `slos.yaml` or the generator changed without regenerating | `uv run python scripts/gen_slo_rules.py`, commit `deploy/helm/shortly/rules/slo.yaml` |
 | test → `test_every_rule_selector_matches_something_the_app_exports` | A metric, route, label or histogram bucket changed, and an alert now selects nothing | Update the rule (or `slos.yaml`) to the new name, or revert the rename |
 | test → `test_promtool_unit_tests_pass` | A rule's behaviour changed, or its annotations no longer match the test | Run promtool (command in `deploy/prometheus/tests/alerts_test.yaml`); fix the rule or update the expected alert |

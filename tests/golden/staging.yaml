@@ -1,0 +1,501 @@
+---
+# Source: shortly/templates/networkpolicy.yaml
+# Least privilege on the network, for the app pods and the migration Job (both carry the
+# selector labels). Once a pod is selected, everything not listed here is denied:
+#   in:  the app port from httpFrom (anyone by default), the metrics port from Prometheus
+#   out: DNS, and the database. Nothing else: the app calls no other service.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shortly
+  labels:
+    app.kubernetes.io/name: shortly
+    app.kubernetes.io/instance: shortly
+    app.kubernetes.io/version: "000000000000"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: shortly-<version>
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: shortly
+      app.kubernetes.io/instance: shortly
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - { port: 8000, protocol: TCP }
+    - ports:
+        - { port: 9100, protocol: TCP }
+      from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - { port: 5432, protocol: TCP }
+
+---
+# Source: shortly/templates/networkpolicy.yaml
+# The cleanup Job's pods: nothing may connect to them; they may reach DNS and the database.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: shortly-cleanup
+  labels:
+    app.kubernetes.io/name: shortly
+    app.kubernetes.io/instance: shortly
+    app.kubernetes.io/version: "000000000000"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: shortly-<version>
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: shortly-cleanup
+      app.kubernetes.io/instance: shortly
+      app.kubernetes.io/part-of: shortly
+  policyTypes: [Ingress, Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - { port: 5432, protocol: TCP }
+
+---
+# Source: shortly/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: shortly
+  labels:
+    app.kubernetes.io/name: shortly
+    app.kubernetes.io/instance: shortly
+    app.kubernetes.io/version: "000000000000"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: shortly-<version>
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: shortly
+    app.kubernetes.io/instance: shortly
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: metrics # for Prometheus only; the NetworkPolicy admits nobody else
+      port: 9100
+      targetPort: metrics
+
+---
+# Source: shortly/templates/deployment.yaml
+# Staging and other non-canary environments. With canary.enabled the Rollout
+# (rollout.yaml) owns these pods instead.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shortly
+  labels:
+    app.kubernetes.io/name: shortly
+    app.kubernetes.io/instance: shortly
+    app.kubernetes.io/version: "000000000000"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: shortly-<version>
+spec:
+  replicas: 1
+  # With autoscaling on, `replicas` is left out ON PURPOSE: the HPA owns it, and a value
+  # here would reset the live count on every `helm upgrade` (mid-spike, too).
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0 # never drop below desired capacity during a rollout
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shortly
+      app.kubernetes.io/instance: shortly
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shortly
+        app.kubernetes.io/instance: shortly
+        app.kubernetes.io/version: "000000000000"
+        app.kubernetes.io/part-of: shortly
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+        prometheus.io/path: /metrics
+    spec:
+      automountServiceAccountToken: false # the app never talks to the Kubernetes API
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # Spread replicas across nodes so one node failure isn't an outage.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: shortly
+              app.kubernetes.io/instance: shortly
+      containers:
+        - name: app
+          image: ghcr.io/statsguy/shortly@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+            - name: metrics
+              containerPort: 9100
+          env:
+            - name: SHORTLY_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: shortly-db
+                  key: url
+            - name: SHORTLY_BASE_URL
+              value: "http://staging.sho.rt.localhost"
+            - name: SHORTLY_LOG_LEVEL
+              value: "DEBUG"
+            - name: SHORTLY_DB_POOL_SIZE
+              value: "5"
+            - name: SHORTLY_METRICS_PORT
+              value: "9100"
+            - name: SHORTLY_DB_POOL_TIMEOUT_SECONDS
+              value: "1"
+            - name: SHORTLY_DB_STATEMENT_TIMEOUT_MS
+              value: "2000"
+            - name: SHORTLY_DB_LOCK_TIMEOUT_MS
+              value: "1000"
+            - name: SHORTLY_MAX_CONCURRENT_REQUESTS
+              value: "16"
+            - name: SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE
+              value: "60"
+            - name: SHORTLY_RATE_LIMIT_BURST
+              value: "20"
+            - name: FORWARDED_ALLOW_IPS # read by uvicorn itself
+              value: "127.0.0.1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # startupProbe gates the other two, so a slow start isn't killed by liveness.
+          startupProbe:
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 2
+            failureThreshold: 30
+          # Both probes are answered on the event loop, outside the request threadpool, so
+          # an overloaded pod is still "alive" and still reports its DB reachability. 2 s
+          # of timeout (default 1 s) absorbs CPU contention without hiding a wedged process.
+          livenessProbe: # "restart me if wedged" — never checks the DB (see api.py)
+            httpGet: { path: /healthz, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe: # "send me traffic?" — DB down ⇒ out of rotation, not restarted
+            httpGet: { path: /readyz, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              # Kubernetes sends SIGTERM and removes the pod from endpoints *concurrently*.
+              # Sleeping first lets routers stop sending traffic before uvicorn drains.
+              sleep:
+                seconds: 5
+          resources:
+            limits:
+              memory: 192Mi
+            requests:
+              cpu: 25m
+              memory: 96Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp # read-only root FS; give Python a writable /tmp
+          emptyDir:
+            sizeLimit: 16Mi
+
+---
+# Source: shortly/templates/cleanup-cronjob.yaml
+# Deletes links that expired more than cleanup.graceDays ago (python -m shortly.cleanup):
+# bounded batches, each one short statement that commits on its own. Same image as the
+# release, so Kyverno verifies its provenance like the app's (CronJobs are checked too).
+#
+# Run it now:  kubectl -n <ns> create job cleanup-manual --from=cronjob/<release>-cleanup
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: shortly-cleanup
+  labels:
+    app.kubernetes.io/name: shortly
+    app.kubernetes.io/instance: shortly
+    app.kubernetes.io/version: "000000000000"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: shortly-<version>
+    app.kubernetes.io/component: cleanup
+spec:
+  schedule: "17 * * * *"
+  timeZone: Etc/UTC
+  # Never two runs at once from the schedule (a manual run may overlap: SKIP LOCKED makes
+  # that safe). A run that starts late (a laptop that slept, a controller restart) still
+  # starts within 50 minutes; later than that it is skipped, not queued.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3000
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 900
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: shortly-cleanup
+            app.kubernetes.io/instance: shortly
+            app.kubernetes.io/part-of: shortly
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: cleanup
+              image: ghcr.io/statsguy/shortly@sha256:0000000000000000000000000000000000000000000000000000000000000000
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "shortly.cleanup"]
+              env:
+                - name: SHORTLY_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: shortly-db
+                      key: url
+                - name: SHORTLY_BASE_URL
+                  value: "http://staging.sho.rt.localhost"
+                - name: SHORTLY_LOG_LEVEL
+                  value: "DEBUG"
+                - name: SHORTLY_DB_POOL_SIZE
+                  value: "5"
+                - name: SHORTLY_METRICS_PORT
+                  value: "9100"
+                - name: SHORTLY_DB_POOL_TIMEOUT_SECONDS
+                  value: "1"
+                - name: SHORTLY_DB_STATEMENT_TIMEOUT_MS
+                  value: "2000"
+                - name: SHORTLY_DB_LOCK_TIMEOUT_MS
+                  value: "1000"
+                - name: SHORTLY_MAX_CONCURRENT_REQUESTS
+                  value: "16"
+                - name: SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE
+                  value: "60"
+                - name: SHORTLY_RATE_LIMIT_BURST
+                  value: "20"
+                - name: FORWARDED_ALLOW_IPS # read by uvicorn itself
+                  value: "127.0.0.1"
+                - name: SHORTLY_CLEANUP_GRACE_DAYS
+                  value: "7"
+                - name: SHORTLY_CLEANUP_BATCH_SIZE
+                  value: "1000"
+                - name: SHORTLY_CLEANUP_MAX_BATCHES
+                  value: "100"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              resources:
+                requests: { cpu: 50m, memory: 96Mi }
+                limits: { memory: 192Mi }
+
+---
+# Source: shortly/templates/httproute.yaml
+# Users reach the app through the cluster's Gateway (Gateway API), by hostname. In prod,
+# Argo Rollouts shifts this route's weights between the stable and canary Services during
+# a canary release.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: shortly
+  labels:
+    app.kubernetes.io/name: shortly
+    app.kubernetes.io/instance: shortly
+    app.kubernetes.io/version: "000000000000"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: shortly-<version>
+spec:
+  parentRefs:
+    - name: shortly
+      namespace: gateway
+  hostnames:
+    - staging.sho.rt.localhost
+  rules:
+    - backendRefs:
+        - name: shortly
+          port: 80
+
+---
+# Source: shortly/templates/servicemonitor.yaml
+# Prometheus finds the pods through the Service's endpoints and scrapes each one. The job
+# label becomes the Service name ("shortly"), which the alert rules select on.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: shortly
+  labels:
+    app.kubernetes.io/name: shortly
+    app.kubernetes.io/instance: shortly
+    app.kubernetes.io/version: "000000000000"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: shortly-<version>
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: shortly
+      app.kubernetes.io/instance: shortly
+  # Copied from each pod onto its series: tells a canary's metrics from the stable pods'
+  # (templates/analysistemplate.yaml). Pods without it (no Rollout) just don't get it.
+  podTargetLabels: [rollouts-pod-template-hash]
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+---
+# Source: shortly/templates/migrate-job.yaml
+# Runs `alembic upgrade head` from the SAME image as the release, before the new pods
+# start. One Job per release — not an initContainer in every replica, which would have N
+# pods racing to migrate the same schema.
+#
+# Rule this enables: migrations must be backward-compatible with the PREVIOUS app
+# version (expand → deploy → contract), because old pods keep serving while new ones roll
+# out, and a rollback runs old code against the new schema.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: shortly-migrate-1
+  labels:
+    app.kubernetes.io/name: shortly
+    app.kubernetes.io/instance: shortly
+    app.kubernetes.io/version: "000000000000"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: shortly-<version>
+    app.kubernetes.io/component: migrate
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "0"
+    # Keep a failed Job around for `kubectl logs`; delete successful ones.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: shortly
+        app.kubernetes.io/instance: shortly
+        app.kubernetes.io/component: migrate
+        app.kubernetes.io/part-of: shortly
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: ghcr.io/statsguy/shortly@sha256:0000000000000000000000000000000000000000000000000000000000000000
+          imagePullPolicy: IfNotPresent
+          # `alembic upgrade head`, except when the database is AHEAD of this image: its
+          # revision is one this release doesn't know, which happens exactly on a rollback
+          # (a reverted promotion, or an older digest redeployed). Expand/contract makes
+          # the old code work on the newer schema, so the right move is to leave it alone.
+          # (Helm skipped hooks on `helm rollback`; Argo CD runs them on every sync.)
+          command:
+            - sh
+            - -c
+            - |
+              out=$(alembic upgrade head 2>&1); rc=$?
+              printf '%s\n' "$out"
+              if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "Can't locate revision identified by"; then
+                echo "migrate: the database is at a newer revision than this release (a rollback); schema left as it is"
+                exit 0
+              fi
+              exit "$rc"
+          env:
+            - name: SHORTLY_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: shortly-db
+                  key: url
+            - name: SHORTLY_BASE_URL
+              value: "http://staging.sho.rt.localhost"
+            - name: SHORTLY_LOG_LEVEL
+              value: "DEBUG"
+            - name: SHORTLY_DB_POOL_SIZE
+              value: "5"
+            - name: SHORTLY_METRICS_PORT
+              value: "9100"
+            - name: SHORTLY_DB_POOL_TIMEOUT_SECONDS
+              value: "1"
+            - name: SHORTLY_DB_STATEMENT_TIMEOUT_MS
+              value: "2000"
+            - name: SHORTLY_DB_LOCK_TIMEOUT_MS
+              value: "1000"
+            - name: SHORTLY_MAX_CONCURRENT_REQUESTS
+              value: "16"
+            - name: SHORTLY_RATE_LIMIT_CREATES_PER_MINUTE
+              value: "60"
+            - name: SHORTLY_RATE_LIMIT_BURST
+              value: "20"
+            - name: FORWARDED_ALLOW_IPS # read by uvicorn itself
+              value: "127.0.0.1"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 256Mi }
+
