@@ -144,6 +144,24 @@ jobs:
           POLICIES: ${{ matrix.policies }}
           BACKUPS: ${{ matrix.backups }}
 
+      # Where the platform's start-up time goes: each image pull (from the kubelet's events)
+      # and each pod's time from creation to Ready. The baseline for making set-up faster.
+      - name: Platform start-up report
+        if: needs.scope.outputs.full == 'true'
+        run: |
+          echo "== image pulls, slowest first (they overlap: pods pull in parallel)"
+          kubectl get events -A -o json | jq -r '
+            def secs: if test("ms$") then (.[:-2] | tonumber) / 1000
+              else capture("^((?<m>[0-9]+)m)?(?<s>[0-9.]+)s$") | ((.m // "0") | tonumber) * 60 + (.s | tonumber) end;
+            .items[] | select(.reason == "Pulled") | .message | select(startswith("Successfully pulled"))
+            | capture("image \"(?<image>[^\"]+)\" in (?<d>[0-9.hms]+) ") | "\(.d | secs)\t\(.image)"' \
+            | sort -rn | awk -F'\t' '{ printf "%7.1fs  %s\n", $1, $2; t += $1; n++ } END { printf "%7.1fs  summed over %d pulls\n", t, n }'
+          echo "== pods: seconds from creation to Ready, slowest first"
+          kubectl get pods -A -o json | jq -r '.items[]
+            | (.status.conditions // [] | map(select(.type == "Ready" and .status == "True")) | first) as $ready
+            | select($ready) | "\(($ready.lastTransitionTime | fromdateiso8601) - (.metadata.creationTimestamp | fromdateiso8601))\t\(.metadata.namespace)/\(.metadata.name)"' \
+            | sort -rn | awk -F'\t' 'NR <= 15 { printf "%5ds  %s\n", $1, $2 }'
+
       # When a sync never finishes, the job's timeout kills the wait before it can explain.
       - name: Argo CD state (on failure)
         if: (failure() || cancelled()) && needs.scope.outputs.full == 'true'
