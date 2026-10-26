@@ -45,6 +45,9 @@ set -euo pipefail
 
 IMAGE="${IMAGE:?set IMAGE, e.g. IMAGE=shortly:e2e}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# ENVS, and the namespace each runs in: helpers below take an environment (staging, prod)
+# shellcheck source=scripts/lib/namespaces.sh
+source "$ROOT/scripts/lib/namespaces.sh"
 PF_PIDS=()
 ALERT_PID="" ALERT_LOG=$(mktemp)
 SUITE="${E2E_SUITE:-all}"
@@ -65,7 +68,8 @@ on_exit() {
   fi
   if [[ $status -ne 0 ]]; then
     echo "--- diagnostics ---"
-    for ns in staging prod; do
+    for env in "${ENVS[@]}"; do
+      ns=$(ns_of "$env")
       kubectl -n "$ns" get pods,jobs -o wide || true
       kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -20 || true
       kubectl -n "$ns" logs -l app.kubernetes.io/name=shortly --all-containers --tail=30 || true
@@ -81,7 +85,8 @@ trap on_exit EXIT
 
 # Port-forward a service port to a local port; wait until it answers.
 forward() {
-  local ns=$1 port=$2 svc_port=${3:-80} path=${4:-/healthz}
+  local ns port=$2 svc_port=${3:-80} path=${4:-/healthz}
+  ns=$(ns_of "$1")
   kubectl -n "$ns" port-forward svc/shortly "$port:$svc_port" >/dev/null 2>&1 &
   PF_PIDS+=($!)
   for _ in $(seq 1 30); do
@@ -94,14 +99,14 @@ forward() {
 # GET a path through the Service from INSIDE the cluster (kube-proxy load-balancing, like a
 # real client). Port-forward can't be used for this: it pins one pod and dies with it.
 # Uses busybox wget in the Postgres pod; exit 0 only on a 2xx.
-in_cluster() { kubectl -n "$1" exec postgres-0 -- wget -q -O /dev/null -T 2 "http://shortly$2" 2>/dev/null; }
+in_cluster() { kubectl -n "$(ns_of "$1")" exec postgres-0 -- wget -q -O /dev/null -T 2 "http://shortly$2" 2>/dev/null; }
 
-revision() { helm -n "$1" status shortly -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'; }
+revision() { helm -n "$(ns_of "$1")" status shortly -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'; }
 # prod runs an Argo Rollout (canary.enabled), staging a Deployment: same pod template.
-workload() { if kubectl -n "$1" get rollout shortly >/dev/null 2>&1; then echo rollout/shortly; else echo deploy/shortly; fi; }
-deployed_image() { kubectl -n "$1" get "$(workload "$1")" -o jsonpath='{.spec.template.spec.containers[0].image}'; }
-pod_env() { kubectl -n "$1" get "$(workload "$1")" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$2\")].value}"; }
-ro() { kubectl -n prod get rollout shortly -o jsonpath="$1"; }
+workload() { if kubectl -n "$(ns_of "$1")" get rollout shortly >/dev/null 2>&1; then echo rollout/shortly; else echo deploy/shortly; fi; }
+deployed_image() { kubectl -n "$(ns_of "$1")" get "$(workload "$1")" -o jsonpath='{.spec.template.spec.containers[0].image}'; }
+pod_env() { kubectl -n "$(ns_of "$1")" get "$(workload "$1")" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$2\")].value}"; }
+ro() { kubectl -n "$PROD_NS" get rollout shortly -o jsonpath="$1"; }
 
 # ---------------------------------------------------------------- 0. digest-mode render
 # Releases deploy by digest, but this test deploys a local image by tag. Render the digest
@@ -111,8 +116,9 @@ ro() { kubectl -n prod get rollout shortly -o jsonpath="$1"; }
 # admission policy (step 8) refuses any shortly digest without release provenance.
 release_digest=$(sed -nE 's/^\| Current release \| v[0-9.]+, `(sha256:[0-9a-f]{64})`.*/\1/p' "$ROOT/docs/RUNBOOK.md")
 [[ -n "$release_digest" ]] || fail "no 'Current release' digest in docs/RUNBOOK.md"
-for ns in staging prod; do
-  helm template shortly "$ROOT/deploy/helm/shortly" -n "$ns" -f "$ROOT/deploy/envs/$ns.yaml" \
+for env in "${ENVS[@]}"; do
+  ns=$(ns_of "$env")
+  helm template shortly "$ROOT/deploy/helm/shortly" -n "$ns" -f "$ROOT/deploy/envs/$env.yaml" \
     --set image.repository=ghcr.io/statsguy/shortly --set "image.digest=$release_digest" \
     | kubectl -n "$ns" apply --dry-run=server -f - >/dev/null \
     || fail "API server rejected the digest-mode render for $ns"
@@ -139,12 +145,12 @@ pass "staging: migrated, ready, create → 307, metrics on port 9100 only"
 # ---------------------------------------------------------------- 3. promote to prod
 "$ROOT/scripts/deploy.sh" prod "$IMAGE" >/dev/null
 [[ "$(workload prod)" == rollout/shortly ]] || fail "prod is not an Argo Rollout (canary.enabled?)"
-ready=$(kubectl -n prod get rollout shortly -o jsonpath='{.status.readyReplicas}')
+ready=$(kubectl -n "$PROD_NS" get rollout shortly -o jsonpath='{.status.readyReplicas}')
 [[ "$ready" == 2 ]] || fail "prod has $ready ready replicas, want 2"
-kubectl -n prod get pdb shortly >/dev/null || fail "prod PodDisruptionBudget missing"
-kubectl -n prod get hpa shortly >/dev/null || fail "prod HorizontalPodAutoscaler missing"
+kubectl -n "$PROD_NS" get pdb shortly >/dev/null || fail "prod PodDisruptionBudget missing"
+kubectl -n "$PROD_NS" get hpa shortly >/dev/null || fail "prod HorizontalPodAutoscaler missing"
 [[ "$(deployed_image prod)" == "$(deployed_image staging)" ]] || fail "prod runs a different image than staging"
-[[ "$(kubectl -n prod get hpa shortly -o jsonpath='{.spec.scaleTargetRef.kind}')" == Rollout ]] || fail "prod HPA doesn't scale the Rollout"
+[[ "$(kubectl -n "$PROD_NS" get hpa shortly -o jsonpath='{.spec.scaleTargetRef.kind}')" == Rollout ]] || fail "prod HPA doesn't scale the Rollout"
 pass "promoted the same image to prod: a Rollout, 2/2 ready, PDB and HPA (on the Rollout) present"
 
 in_cluster prod /readyz || fail "prod not reachable through its Service"
@@ -155,12 +161,12 @@ in_cluster prod /readyz || fail "prod not reachable through its Service"
 GW=http://shortly-gateway.envoy-gateway-system.svc
 gw() { # host path [extra wget args...] -> prints "STATUS LOCATION"
   local host=$1 path=$2; shift 2
-  kubectl -n prod exec postgres-0 -- wget -S -O /dev/null -T 5 --header "Host: $host" "$@" "$GW$path" 2>&1 \
+  kubectl -n "$PROD_NS" exec postgres-0 -- wget -S -O /dev/null -T 5 --header "Host: $host" "$@" "$GW$path" 2>&1 \
     | awk '/^  HTTP\//{if (!s) s=$2} /^  [Ll]ocation:/{if (!l) l=$2} END{print s, l}' # first response only: wget follows redirects
 }
 [[ "$(gw sho.rt.localhost /readyz)" == "200 " ]] || fail "gateway: prod /readyz via sho.rt.localhost"
 [[ "$(gw staging.sho.rt.localhost /readyz)" == "200 " ]] || fail "gateway: staging /readyz via staging.sho.rt.localhost"
-gw_code=$(kubectl -n prod exec postgres-0 -- wget -q -O - -T 5 --header "Host: sho.rt.localhost" \
+gw_code=$(kubectl -n "$PROD_NS" exec postgres-0 -- wget -q -O - -T 5 --header "Host: sho.rt.localhost" \
   --header 'content-type: application/json' --header "X-Forwarded-For: 203.0.113.250" \
   --post-data '{"url":"https://gateway-e2e.invalid/via-gateway"}' "$GW/links" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])' 2>/dev/null || true)
@@ -191,12 +197,12 @@ if suite platform; then
 # Postgres. Per-pod counters would let all burst + 5 through.
 # X-Forwarded-For picks the client (prod trusts the pod network as kind's stand-in ingress).
 create_as() {
-  kubectl -n prod exec postgres-0 -- wget -S -O /dev/null -T 3 \
+  kubectl -n "$PROD_NS" exec postgres-0 -- wget -S -O /dev/null -T 3 \
     --header 'content-type: application/json' --header "X-Forwarded-For: $1" \
     --post-data '{"url":"https://example.com/rate"}' http://shortly/links 2>&1 \
     | grep -m1 -oE 'HTTP/1\.[01] [0-9]{3}' | cut -d' ' -f2
 }
-limits=$(helm -n prod get values shortly --all -o json \
+limits=$(helm -n "$PROD_NS" get values shortly --all -o json \
   | python3 -c 'import json,sys; r=json.load(sys.stdin)["config"]["rateLimit"]; print(r["burst"], r["createsPerMinute"])')
 read -r burst per_minute <<<"$limits"
 # GCRA refills while we send (one token per 60/per_minute s), and each kubectl exec takes
@@ -214,7 +220,7 @@ max=$(python3 -c "import math,sys; print($burst + math.ceil(($(date +%s.%N) - $t
 ((created <= max)) || fail "rate limit: $created creates succeeded, at most $max allowed (burst + refill)"
 ((refused > 0)) || fail "rate limit: $((burst + 5)) creates from one client, none refused"
 [[ "$(create_as "198.51.100.$((RANDOM % 250 + 1))")" == 201 ]] || fail "rate limit: another client was refused too"
-pass "rate limit: one client got $created creates (burst $burst, at most $max with refill), then 429s, across $(kubectl -n prod get rollout shortly -o jsonpath='{.status.readyReplicas}') pods; other clients unaffected"
+pass "rate limit: one client got $created creates (burst $burst, at most $max with refill), then 429s, across $(kubectl -n "$PROD_NS" get rollout shortly -o jsonpath='{.status.readyReplicas}') pods; other clients unaffected"
 
 fi # 3b
 
@@ -257,7 +263,7 @@ good_image=$(deployed_image prod)
 canary_fast=(--set canary.pauseWithoutAnalysis=5s)
 # Every measurement of every AnalysisRun for one pod hash: "name=Phase ..." per run.
 analysis_runs() {
-  kubectl -n prod get analysisrun -l "rollouts-pod-template-hash=$1" --sort-by=.metadata.creationTimestamp \
+  kubectl -n "$PROD_NS" get analysisrun -l "rollouts-pod-template-hash=$1" --sort-by=.metadata.creationTimestamp \
     -o jsonpath='{range .items[*]}{.status.phase}{" "}{end}'
 }
 
@@ -294,7 +300,7 @@ errors=$(cat "$errors_file")
 [[ "$(deployed_image prod)" == "$good_image" ]] || fail "prod not back on the good image"
 [[ "$(pod_env prod SHORTLY_LOG_LEVEL)" == INFO ]] || fail "prod's Rollout not back on the good config"
 [[ "$(ro '{.status.phase}')" == Healthy ]] || fail "Rollout is $(ro '{.status.phase}') after the rollback"
-status=$(helm -n prod status shortly -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
+status=$(helm -n "$PROD_NS" status shortly -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["status"])')
 [[ "$status" == deployed ]] || fail "release status is $status"
 [[ "$errors" == 0 ]] || fail "$errors failed requests during the bad rollout"
 pass "broken release auto-rolled back (now revision $(revision prod)); 0 failed requests during it"
@@ -320,7 +326,7 @@ pass "healthy canary promoted 10% → 50% → 100% in ${took}s ($runs)"
 
 # Back to the good revision with helm: inside rollbackWindow, so no steps, no analysis.
 start=$SECONDS
-helm -n prod rollback shortly "$good_rev" --force-conflicts --wait=legacy --timeout 2m >/dev/null
+helm -n "$PROD_NS" rollback shortly "$good_rev" --force-conflicts --wait=legacy --timeout 2m >/dev/null
 for _ in $(seq 1 60); do
   [[ "$(ro '{.status.phase}')" == Healthy && "$(ro '{.status.stableRS}')" == "$(ro '{.status.currentPodHash}')" ]] && break
   sleep 2
@@ -340,7 +346,7 @@ pass "manual helm rollback to revision $good_rev restored the previous release i
 # and abort at the first step, while users mostly never notice: only the canary's share
 # of traffic (10%) could fail at all. We measure that share through the Gateway.
 if ((monitoring)); then
-  gw_code2=$(kubectl -n prod exec postgres-0 -- wget -q -O - -T 5 --header "Host: sho.rt.localhost" \
+  gw_code2=$(kubectl -n "$PROD_NS" exec postgres-0 -- wget -q -O - -T 5 --header "Host: sho.rt.localhost" \
     --header 'content-type: application/json' --header "X-Forwarded-For: 203.0.113.251" \
     --post-data '{"url":"https://gateway-e2e.invalid/canary"}' "$GW/links" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])')
@@ -365,10 +371,10 @@ if ((monitoring)); then
   read -r ok bad <"$counts_file"
   [[ -z "$(pod_env prod SHORTLY_FAULT_ERROR_RATIO)" ]] || fail "prod still has fault injection after the abort"
   [[ "$(ro '{.status.phase}')" == Healthy ]] || fail "Rollout is $(ro '{.status.phase}') after the abort"
-  bad_hash=$(kubectl -n prod get analysisrun --sort-by=.metadata.creationTimestamp \
+  bad_hash=$(kubectl -n "$PROD_NS" get analysisrun --sort-by=.metadata.creationTimestamp \
     -o jsonpath='{.items[-1:].metadata.labels.rollouts-pod-template-hash}')
   [[ "$(analysis_runs "$bad_hash")" == "Failed " ]] || fail "bad canary's analysis: '$(analysis_runs "$bad_hash")', want one Failed"
-  failed_metric=$(kubectl -n prod get analysisrun -l "rollouts-pod-template-hash=$bad_hash" \
+  failed_metric=$(kubectl -n "$PROD_NS" get analysisrun -l "rollouts-pod-template-hash=$bad_hash" \
     -o jsonpath='{.items[0].status.metricResults[?(@.phase=="Failed")].name}')
   [[ "$failed_metric" == *error-ratio* ]] || fail "analysis failed on '$failed_metric', want error-ratio"
   total=$((ok + bad))
@@ -385,7 +391,7 @@ fi # 4-5b
 if suite platform; then
 # ---------------------------------------------------------------- 6. autoscaling
 if [[ "${HPA_DRILL:-1}" != 0 ]]; then
-  NS=prod "$ROOT/scripts/hpa-drill.sh"
+  NS="$PROD_NS" "$ROOT/scripts/hpa-drill.sh"
 fi
 
 # ---------------------------------------------------------------- 7. monitoring
@@ -411,14 +417,14 @@ fi
 # refusals: these must FAIL. A CNI that ignored NetworkPolicy would fail this step, not
 # pass it silently. Each refusal has a control that succeeds from the same place.
 in_cluster prod /readyz || fail "control: prod app port unreachable from postgres-0"
-if kubectl -n prod exec postgres-0 -- wget -q -O /dev/null -T 3 http://shortly:9100/metrics 2>/dev/null; then
+if kubectl -n "$PROD_NS" exec postgres-0 -- wget -q -O /dev/null -T 3 http://shortly:9100/metrics 2>/dev/null; then
   fail "network policy: a non-Prometheus pod scraped prod's metrics port"
 fi
 pass "network policy: the metrics port refuses pods other than Prometheus"
 
 # A pod that isn't shortly must not reach Postgres. pg_isready exits 2 = no response.
 probe_pg() {
-  kubectl -n prod run "np-probe-$1" --image=postgres:17-alpine --restart=Never --rm -i --quiet \
+  kubectl -n "$PROD_NS" run "np-probe-$1" --image=postgres:17-alpine --restart=Never --rm -i --quiet \
     --labels="$2" --overrides='{"spec":{"automountServiceAccountToken":false,
       "securityContext":{"runAsNonRoot":true,"runAsUser":70,"seccompProfile":{"type":"RuntimeDefault"}},
       "containers":[{"name":"probe","image":"postgres:17-alpine","command":["pg_isready","-h","postgres","-t","4"],
@@ -440,9 +446,9 @@ pass "network policy: Postgres accepts part-of=shortly only (not strangers, not 
 # rows went: expired 30 days ago (past the 7-day grace) gone; expired yesterday (410 Gone
 # still) and not yet expired kept. The Job runs the release image, under the restricted
 # PSS and its own NetworkPolicy, so this also proves it can reach Postgres.
-psql_staging() { kubectl -n staging exec postgres-0 -- psql -U shortly -d shortly -v ON_ERROR_STOP=1 -tAc "$1"; }
+psql_staging() { kubectl -n "$STAGING_NS" exec postgres-0 -- psql -U shortly -d shortly -v ON_ERROR_STOP=1 -tAc "$1"; }
 status_of() {
-  kubectl -n "$1" exec postgres-0 -- wget -S -O /dev/null -T 3 "http://shortly$2" 2>&1 \
+  kubectl -n "$(ns_of "$1")" exec postgres-0 -- wget -S -O /dev/null -T 3 "http://shortly$2" 2>&1 \
     | grep -m1 -oE 'HTTP/1\.[01] [0-9]{3}' | cut -d' ' -f2
 }
 [[ "$(psql_staging "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'ix_links_expires_at'")" == t ]] \
@@ -452,42 +458,42 @@ psql_staging "INSERT INTO links (code, target, created_at, expires_at) VALUES
   ('e2enew1', 'https://example.com/new', now() - interval '2 days',  now() - interval '1 day'),
   ('e2efut1', 'https://example.com/fut', now(),                      now() + interval '1 day')" >/dev/null
 [[ "$(status_of staging /e2eold1)" == 410 ]] || fail "cleanup: an expired link should answer 410 before cleanup"
-kubectl -n staging create job cleanup-e2e --from=cronjob/shortly-cleanup >/dev/null
-kubectl -n staging wait --for=condition=complete job/cleanup-e2e --timeout=180s >/dev/null \
-  || { kubectl -n staging logs job/cleanup-e2e --tail=20 || true; fail "cleanup: the Job did not complete"; }
+kubectl -n "$STAGING_NS" create job cleanup-e2e --from=cronjob/shortly-cleanup >/dev/null
+kubectl -n "$STAGING_NS" wait --for=condition=complete job/cleanup-e2e --timeout=180s >/dev/null \
+  || { kubectl -n "$STAGING_NS" logs job/cleanup-e2e --tail=20 || true; fail "cleanup: the Job did not complete"; }
 left=$(psql_staging "SELECT string_agg(code, ',' ORDER BY code) FROM links WHERE code LIKE 'e2e%'")
 [[ "$left" == "e2efut1,e2enew1" ]] || fail "cleanup: left $left, want e2efut1,e2enew1"
 [[ "$(status_of staging /e2eold1)" == 404 && "$(status_of staging /e2enew1)" == 410 ]] \
   || fail "cleanup: want 404 for the deleted link and 410 for the one in its grace period"
-summary=$(kubectl -n staging logs job/cleanup-e2e | grep '"cleanup finished"' || true)
+summary=$(kubectl -n "$STAGING_NS" logs job/cleanup-e2e | grep '"cleanup finished"' || true)
 [[ "$summary" == *'"deleted": 1'* ]] || fail "cleanup: no 'cleanup finished' log with deleted=1: $summary"
-kubectl -n staging delete job cleanup-e2e --wait=false >/dev/null
+kubectl -n "$STAGING_NS" delete job cleanup-e2e --wait=false >/dev/null
 pass "cleanup: the Job deleted only the link past its grace period (404), kept the rest (410, live)"
 
 # ---------------------------------------------------------------- 11. backup and restore
 # Back up prod now (the CronJob's own template), with a canary link written just before,
 # then restore that dump into a scratch database and check every link came back. A backup
 # is only proven by a restore; this one is proven on every PR.
-if kubectl -n prod get cronjob postgres-backup >/dev/null 2>&1; then
-  psql_prod() { kubectl -n prod exec postgres-0 -- psql -U shortly -d shortly -v ON_ERROR_STOP=1 -tAc "$1"; }
+if kubectl -n "$PROD_NS" get cronjob postgres-backup >/dev/null 2>&1; then
+  psql_prod() { kubectl -n "$PROD_NS" exec postgres-0 -- psql -U shortly -d shortly -v ON_ERROR_STOP=1 -tAc "$1"; }
   psql_prod "INSERT INTO links (code, target, created_at) VALUES ('e2ebkp1', 'https://example.com/backup', now())" >/dev/null
   want_links=$(psql_prod "SELECT count(*) FROM links")
-  kubectl -n prod create job backup-e2e --from=cronjob/postgres-backup >/dev/null
-  if ! kubectl -n prod wait --for=condition=complete job/backup-e2e --timeout=180s >/dev/null; then
-    kubectl -n prod logs job/backup-e2e --all-containers --tail=20 || true
+  kubectl -n "$PROD_NS" create job backup-e2e --from=cronjob/postgres-backup >/dev/null
+  if ! kubectl -n "$PROD_NS" wait --for=condition=complete job/backup-e2e --timeout=180s >/dev/null; then
+    kubectl -n "$PROD_NS" logs job/backup-e2e --all-containers --tail=20 || true
     fail "backup: the Job did not complete"
   fi
-  uploaded=$(kubectl -n prod logs job/backup-e2e -c upload | grep '"backup uploaded"' || true)
+  uploaded=$(kubectl -n "$PROD_NS" logs job/backup-e2e -c upload | grep '"backup uploaded"' || true)
   [[ -n "$uploaded" ]] || fail "backup: no 'backup uploaded' log line"
-  pass "backup: pg_dump checked and uploaded ($(kubectl -n prod logs job/backup-e2e -c dump | grep -o '"bytes": [0-9]*'))"
+  pass "backup: pg_dump checked and uploaded ($(kubectl -n "$PROD_NS" logs job/backup-e2e -c dump | grep -o '"bytes": [0-9]*'))"
   # The bucket is for backup pods only: postgres-0 (no component=backup label) is refused.
   # The control is the Job above, which reached it from the same namespace.
-  if kubectl -n prod exec postgres-0 -- nc -z -w 3 seaweedfs.backups.svc 8333 2>/dev/null; then
+  if kubectl -n "$PROD_NS" exec postgres-0 -- nc -z -w 3 seaweedfs.backups.svc 8333 2>/dev/null; then
     fail "network policy: a pod that isn't a backup pod reached the backup bucket"
   fi
   pass "network policy: the backup bucket refuses pods other than backup and restore pods"
-  SOURCE=prod EXPECT_CODE=e2ebkp1 EXPECT_LINKS="$want_links" "$ROOT/scripts/restore-drill.sh"
-  kubectl -n prod delete job backup-e2e --wait=false >/dev/null
+  SOURCE="$PROD_NS" EXPECT_CODE=e2ebkp1 EXPECT_LINKS="$want_links" "$ROOT/scripts/restore-drill.sh"
+  kubectl -n "$PROD_NS" delete job backup-e2e --wait=false >/dev/null
 
   # 11b. `cluster.sh wake` (after a laptop slept): the controller restarts, and an overdue
   # backup starts at once. MAX_AGE=0 makes every backup "overdue" here.
@@ -496,9 +502,9 @@ if kubectl -n prod get cronjob postgres-backup >/dev/null 2>&1; then
   before=$(restarts)
   WAKE_BACKUP_MAX_AGE=0 "$ROOT/scripts/cluster.sh" wake
   (($(restarts) == before + 1)) || fail "wake: kube-controller-manager was not restarted"
-  wake_job=$(kubectl -n prod get jobs -o name | grep -m1 'job.batch/backup-wake-' || true)
+  wake_job=$(kubectl -n "$PROD_NS" get jobs -o name | grep -m1 'job.batch/backup-wake-' || true)
   [[ -n "$wake_job" ]] || fail "wake: no backup-wake Job in prod"
-  kubectl -n prod wait --for=condition=complete "$wake_job" --timeout=180s >/dev/null \
+  kubectl -n "$PROD_NS" wait --for=condition=complete "$wake_job" --timeout=180s >/dev/null \
     || fail "wake: $wake_job did not complete"
   pass "wake: kube-controller-manager restarted, and the overdue prod backup ran at once ($wake_job)"
 else
@@ -548,10 +554,10 @@ PY
   pass "GitOps: Argo CD took prod over from $GITOPS_REVISION (Synced, Healthy) in $((SECONDS - start))s"
 
   # Self-heal: a hand edit to something the chart sets is put back.
-  kubectl -n prod patch pdb shortly --type merge -p '{"spec":{"minAvailable":0}}' >/dev/null
+  kubectl -n "$PROD_NS" patch pdb shortly --type merge -p '{"spec":{"minAvailable":0}}' >/dev/null
   start=$SECONDS healed=0
   for _ in $(seq 1 30); do
-    [[ "$(kubectl -n prod get pdb shortly -o jsonpath='{.spec.minAvailable}')" == 1 ]] && { healed=1; break; }
+    [[ "$(kubectl -n "$PROD_NS" get pdb shortly -o jsonpath='{.spec.minAvailable}')" == 1 ]] && { healed=1; break; }
     sleep 2
   done
   ((healed)) || fail "GitOps: self-heal did not restore the PodDisruptionBudget within 60s"
@@ -564,7 +570,7 @@ PY
     '[{"op":"add","path":"/spec/source/helm/valuesObject/config","value":{"logLevel":"DEBUG"}}]' >/dev/null
   start=$SECONDS max_weight=0 out_of_sync=0
   while ((SECONDS - start < 420)); do
-    w=$(kubectl -n prod get httproute shortly -o jsonpath='{.spec.rules[0].backendRefs[1].weight}')
+    w=$(kubectl -n "$PROD_NS" get httproute shortly -o jsonpath='{.spec.rules[0].backendRefs[1].weight}')
     ((${w:-0} > max_weight)) && max_weight=${w:-0}
     [[ "$(app '{.status.sync.status}')" == OutOfSync ]] && out_of_sync=$((out_of_sync + 1))
     new_hash=$(ro '{.status.stableRS}')

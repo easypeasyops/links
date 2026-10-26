@@ -13,6 +13,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/lib/namespaces.sh
+source "$(dirname "$0")/lib/namespaces.sh"
+export PROD_NS
 pass() { echo "ok   $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
@@ -31,7 +34,7 @@ kubectl -n monitoring get prometheus >/dev/null 2>&1 \
 # ---------------------------------------------------------------- 1. scrape
 n=0
 for _ in $(seq 1 40); do
-  n=$(query 'up{job="shortly", namespace="prod"} == 1' | count)
+  n=$(query "up{job=\"shortly\", namespace=\"$PROD_NS\"} == 1" | count)
   ((n >= 2)) && break
   sleep 3
 done
@@ -56,27 +59,27 @@ pass "chart's PrometheusRules loaded: 5 groups, every rule health=ok"
 # ---------------------------------------------------------------- 3. recording rules
 # A little traffic so the 5m rates exist even when the HPA drill was skipped.
 for _ in $(seq 1 20); do
-  kubectl -n prod exec postgres-0 -- wget -q -O /dev/null -T 2 http://shortly/no-such-code 2>/dev/null || true
+  kubectl -n "$PROD_NS" exec postgres-0 -- wget -q -O /dev/null -T 2 http://shortly/no-such-code 2>/dev/null || true
 done
 n=0
 for _ in $(seq 1 40); do
-  n=$(query 'slo:sli_error:ratio_rate5m{namespace="prod", slo="redirect-availability"}' | count)
+  n=$(query "slo:sli_error:ratio_rate5m{namespace=\"$PROD_NS\", slo=\"redirect-availability\"}" | count)
   ((n == 1)) && break
   sleep 3
 done
 ((n == 1)) || fail "no slo:sli_error:ratio_rate5m series for prod"
-remaining=$(query 'slo:error_budget_remaining:ratio{namespace="prod", slo="redirect-availability"}' \
+remaining=$(query "slo:error_budget_remaining:ratio{namespace=\"$PROD_NS\", slo=\"redirect-availability\"}" \
   | python3 -c 'import json, sys; r = json.load(sys.stdin)["data"]["result"]; print(r[0]["value"][1] if r else "none")')
 pass "SLO recording rules evaluate for prod (redirect budget remaining: $remaining)"
 
 # ---------------------------------------------------------------- 4. dashboard queries
 python3 - "$ROOT/deploy/helm/shortly/dashboards" <<'PY' || fail "a dashboard query is invalid"
-import json, pathlib, subprocess, sys, urllib.parse
+import json, os, pathlib, subprocess, sys, urllib.parse
 
 for path in sorted(pathlib.Path(sys.argv[1]).glob("*.json")):
     exprs = [t["expr"] for p in json.loads(path.read_text())["panels"] for t in p.get("targets", [])]
     for expr in exprs:
-        q = expr.replace("$namespace", "prod").replace("$__rate_interval", "5m")
+        q = expr.replace("$namespace", os.environ["PROD_NS"]).replace("$__rate_interval", "5m")
         url = "/api/v1/namespaces/monitoring/services/http:kps-prometheus:9090/proxy/api/v1/query?query="
         out = subprocess.run(["kubectl", "get", "--raw", url + urllib.parse.quote(q)],
                              capture_output=True, text=True)

@@ -9,7 +9,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-NS="${NS:-staging}"
+# shellcheck source=scripts/lib/namespaces.sh
+source "$(dirname "$0")/lib/namespaces.sh"
+NS="${NS:-$STAGING_NS}"
 REPO=ghcr.io/statsguy/shortly
 # The release the runbook documents (also checked by tests/test_deploy_gate.py).
 RELEASE=$(sed -nE 's/^\| Current release \| v[0-9.]+, `(sha256:[0-9a-f]{64})`.*/\1/p' "$ROOT/docs/RUNBOOK.md")

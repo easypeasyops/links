@@ -27,7 +27,9 @@ set -euo pipefail
 
 CLUSTER=shortly
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ENVS=(staging prod)
+# ENVS, and the namespace each runs in (ns_of)
+# shellcheck source=scripts/lib/namespaces.sh
+source "$ROOT/scripts/lib/namespaces.sh"
 # Argo CD: deploys the platform and the app from git. Pinned by version and digest: the
 # tag says what it is, the digest that it can't change. (The platform's chart pins are in
 # deploy/argocd/platform/values.yaml.)
@@ -59,7 +61,8 @@ up() {
   take_over_from_helm
   if on FRONT_DOOR; then front_door; fi
 
-  for ns in "${ENVS[@]}"; do
+  for env in "${ENVS[@]}"; do
+    ns=$(ns_of "$env")
     kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
     # Enforce the "restricted" Pod Security Standard: the API server itself rejects any pod
     # that runs as root, keeps capabilities, or allows privilege escalation.
@@ -90,15 +93,16 @@ up() {
     fi
   done
 
-  for ns in "${ENVS[@]}"; do
+  for env in "${ENVS[@]}"; do
+    ns=$(ns_of "$env")
     kubectl -n "$ns" rollout status statefulset/postgres --timeout=180s
   done
-  echo "cluster ready: namespaces ${ENVS[*]}"
+  echo "cluster ready: namespaces $STAGING_NS $PROD_NS"
 
   # Last, once Postgres and the secrets exist: from here on, git decides what runs.
   if on ARGOCD_APPS; then
     kubectl apply -f "$ROOT/deploy/argocd/project.yaml" -f "$ROOT/deploy/argocd/applications.yaml" >/dev/null
-    for ns in "${ENVS[@]}"; do wait_synced "shortly-$ns" 300; done
+    for env in "${ENVS[@]}"; do wait_synced "shortly-$env" 300; done
     kubectl -n argocd get applications
   fi
 }
@@ -246,7 +250,7 @@ front_door() {
 # minutes) lets it start a run it just missed. Backups older than WAKE_BACKUP_MAX_AGE
 # seconds (default an hour, the schedule) are taken right away instead of waiting.
 wake() {
-  local node="$CLUSTER-control-plane" before ns last age
+  local node="$CLUSTER-control-plane" before env ns last age
   kubectl config use-context "kind-$CLUSTER" >/dev/null
   before=$(kubectl -n kube-system get pod "kube-controller-manager-$node" \
     -o jsonpath='{.status.containerStatuses[0].restartCount}')
@@ -259,7 +263,8 @@ wake() {
     sleep 2
   done
   echo "kube-controller-manager restarted (restarts: $((before + 1))): CronJobs rescheduled from the wall clock"
-  for ns in "${ENVS[@]}"; do
+  for env in "${ENVS[@]}"; do
+    ns=$(ns_of "$env")
     kubectl -n "$ns" get cronjob postgres-backup >/dev/null 2>&1 || continue
     last=$(kubectl -n "$ns" get cronjob postgres-backup -o jsonpath='{.status.lastSuccessfulTime}')
     age=$(python3 -c "import datetime as d,sys; t=sys.argv[1]; print(int((d.datetime.now(d.timezone.utc)-d.datetime.fromisoformat(t.replace('Z','+00:00'))).total_seconds()) if t else 10**9)" "$last")
