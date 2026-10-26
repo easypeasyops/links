@@ -70,13 +70,13 @@ refused() {
   local out
   if out=$(try "$1" "$2"); then fail "$1 with $2 was ADMITTED, expected refused ($3)"; fi
   # Refused by Kyverno, not by something else (Pod Security, a typo in the manifest).
-  grep -q "shortly-require-release-provenance" <<<"$out" \
+  grep -q "require-release-provenance" <<<"$out" \
     || fail "$1 with $2 was refused, but not by the provenance policy:
 $out"
   pass "refused:  $1 $2 ($3)"
 }
 
-kubectl get imagevalidatingpolicy shortly-require-release-provenance >/dev/null 2>&1 \
+kubectl get imagevalidatingpolicy require-release-provenance >/dev/null 2>&1 \
   || fail "provenance policy not installed (POLICIES=0? see scripts/cluster.sh)"
 
 admitted pod "$REPO@$RELEASE" "the documented release"

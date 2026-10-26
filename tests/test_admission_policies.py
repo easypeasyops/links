@@ -108,13 +108,27 @@ def test_provenance_policy_matches_the_deploy_gate() -> None:
     signer = re.compile(identity["subjectRegExp"])
     base = "https://github.com/statsguy/shortly/.github/workflows"
     assert signer.match(f"{base}/release.yml@refs/tags/v0.2.0")
+    # Keyed by identity: another of our repos' release workflow is a valid signer too...
+    assert signer.match(
+        "https://github.com/statsguy/pager/.github/workflows/release.yml@refs/tags/v0.1.0"
+    )
     for wrong in (
         f"{base}/release.yml@refs/heads/main",  # a branch, not a release
         f"{base}/ci.yml@refs/tags/v0.2.0",  # CI, not the release workflow
         "https://github.com/evil/shortly/.github/workflows/release.yml@refs/tags/v0.2.0",
         f"{base}/release.yml@refs/tags/v0.2.0-evil",
+        "https://github.com/statsguy/a/b/.github/workflows/release.yml@refs/tags/v1.0.0",
     ):
         assert not signer.match(wrong), wrong
+    # ...so the provenance must also name the image's own repository.
+    binding = [
+        v
+        for v in policy["validations"]
+        if "externalParameters.workflow.repository" in v["expression"]
+    ]
+    assert len(binding) == 1
+    assert "'https://github.com/' + image.split('@')[0].substring(8)" in binding[0]["expression"]
+    assert policy["matchImageReferences"] == [{"glob": "ghcr.io/statsguy/*"}]
     verify = (ROOT / "scripts/verify-image.sh").read_text()
     assert "release.yml" in verify
     assert "https://slsa.dev/provenance/v1" in verify
@@ -207,6 +221,9 @@ def test_provenance_verdicts_against_the_real_registry(tmp_path: Path) -> None:
         (r"release\.yml@refs", r"ci\.yml@refs", "release digest with provenance"),
         ("https://actions.github.io/buildtypes/workflow/v1", "https://example.com/other",
          "not from a GitHub Actions workflow build"),
+        # The release's provenance must name the image's own repository.
+        ("'https://github.com/' + image", "'https://github.com/elsewhere-' + image",
+         "different repository than the image's"),
     ],
 )  # fmt: skip
 def test_provenance_policy_actually_checks(

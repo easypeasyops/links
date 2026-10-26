@@ -210,6 +210,7 @@ Steps and thresholds are chart values (`canary:` in `values.yaml`). An aborted c
 | --- | --- | --- |
 | `no valid provenance from …release.yml` | Wrong or mistyped digest, an image from somewhere else, or the registry or Sigstore unreachable | Copy the digest from the GitHub Release notes again; check network access to `ghcr.io` and `tuf-repo-cdn.sigstore.dev` |
 | `not from a release tag` | The image was built by `release.yml` but from a branch | Deploy a tagged release |
+| `is not one of statsguy's images` / `is not a ghcr.io/<owner>/<repo> image` | The image isn't ours, so no source repository can vouch for it | Deploy a release of one of our repos; set `VERIFY_OWNER` only for a different owner |
 | `is a tag; outside kind, deploy a released digest` | A tag was passed against a non-kind cluster | Use the digest from the release notes |
 | `gh (GitHub CLI) is required` | `gh` isn't installed | `brew install gh` |
 
@@ -471,7 +472,7 @@ kubectl -n prod get events --sort-by=.lastTimestamp | tail -30
 | `ImagePullBackOff` | Wrong digest, or the GHCR package is private | Check the digest; make the package public or add `imagePullSecrets` |
 | `violates PodSecurity "restricted"` | A chart change dropped a security setting | Restore the `securityContext` in the chart |
 | Migrate Job `Failed` | Migration error | `kubectl -n prod logs job/shortly-migrate-<REV>`; fix the migration in a new release |
-| `admission webhook … denied the request: … shortly-require-release-provenance` | The image isn't a release digest with valid provenance | See [Admission policy refuses pods](#admission-policy-refuses-pods) |
+| `admission webhook … denied the request: … require-release-provenance` | The image isn't a release digest with valid provenance | See [Admission policy refuses pods](#admission-policy-refuses-pods) |
 | `failed calling webhook … kyverno-svc` | Kyverno is down; no Pod can be created in `staging` or `prod` | See [Admission policy refuses pods](#admission-policy-refuses-pods) |
 | `Pending`, `Insufficient cpu/memory` | Node is full (the HPA may have asked for more pods than fit) | Add nodes, or lower `autoscaling.maxReplicas`; don't lower the CPU request without re-measuring |
 
@@ -551,8 +552,9 @@ kubectl get imagevalidatingpolicy,validatingpolicy     # READY must be true
 
 | Message | Cause | Fix |
 | --- | --- | --- |
-| `shortly images must be a release digest with provenance…` | An unreleased or unattested image: a CI build, a fork, or a per-platform child digest instead of the release's index digest | Deploy the digest from the GitHub Release notes. `scripts/verify-image.sh <ref>` tells you why it fails |
+| `ghcr.io/statsguy images must be a release digest with provenance…` | An unreleased or unattested image: a CI build, a fork, or a per-platform child digest instead of the release's index digest | Deploy the digest from the GitHub Release notes. `scripts/verify-image.sh <ref>` tells you why it fails |
 | `image ghcr.io/statsguy/shortly:… does not have a digest` | A tag was used | Use `@sha256:…`; tags are never verified |
+| `provenance names a different repository than the image's` | The image was built and signed by another of our repos' release workflows (`ghcr.io/statsguy/<repo>` must come from `statsguy/<repo>`) | Treat as suspicious: an image pushed under another repo's name. Find who pushed it |
 | `provenance is not from a GitHub Actions workflow build` | The attestation exists but describes a different build | Treat as suspicious: who produced this image? |
 | `failed calling webhook "…kyverno…"` or `context deadline exceeded` | Kyverno is down or slow, or it can't reach `ghcr.io` / Sigstore (Rekor, TUF). The policy fails closed, so **every** new Pod in `staging` and `prod`, Postgres included, is refused | `kubectl -n kyverno logs deploy/kyverno-admission-controller --tail=50`; `kubectl -n kyverno rollout restart deploy/kyverno-admission-controller` |
 
@@ -560,7 +562,7 @@ kubectl get imagevalidatingpolicy,validatingpolicy     # READY must be true
 
 ```bash
 # 1. Remove the provenance policy (the webhook follows within seconds).
-kubectl delete imagevalidatingpolicy shortly-require-release-provenance
+kubectl delete imagevalidatingpolicy require-release-provenance
 # 2. If Kyverno itself is down, the webhook still fails closed: remove its configurations.
 kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations | grep -i kyverno
 kubectl delete validatingwebhookconfiguration <name>      # each kyverno one listed above
