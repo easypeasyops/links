@@ -107,11 +107,22 @@ up() {
 # adopts resources that already run, before its first sync has applied git (seen on the
 # first takeover: OutOfSync/Healthy). On timeout, say what is out of sync, and fail.
 wait_synced() {
-  local app=$1 timeout=$2 state="" t0=$SECONDS last=$SECONDS
+  local app=$1 timeout=$2 state="" t0=$SECONDS last=$SECONDS refreshed=$SECONDS name
   while ((SECONDS - t0 < timeout)); do
     state=$(kubectl -n argocd get application "$app" \
       -o jsonpath='{.status.sync.status}/{.status.health.status}' 2>/dev/null || true)
     [[ "$state" == Synced/Healthy ]] && return 0
+    # Argo CD's health can lag the cluster: in CI it reported CRDs "not established" for
+    # about 2 minutes during set-up (it ignores status-only updates since 3.0 and catches
+    # up at the next reconcile). While we wait, ask it to look again: every 10 s, each
+    # Application not yet Synced and Healthy (a normal refresh: its cache, no git fetch).
+    if ((SECONDS - refreshed >= 10)); then
+      refreshed=$SECONDS
+      for name in $(kubectl -n argocd get applications -o jsonpath='{range .items[*]}{.metadata.name}={.status.sync.status}/{.status.health.status}{"\n"}{end}' 2>/dev/null \
+        | grep -v '=Synced/Healthy$' | cut -d= -f1); do
+        kubectl -n argocd annotate application "$name" argocd.argoproj.io/refresh=normal --overwrite >/dev/null 2>&1 || true
+      done
+    fi
     if ((SECONDS - last >= 30)); then # progress, so a slow sync shows where it is
       last=$SECONDS
       # Each Application's state, and for one that isn't healthy, what holds it back.
