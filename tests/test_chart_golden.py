@@ -40,7 +40,7 @@ def render(env: str, *sets: str) -> str:
     out = subprocess.run(
         [
             "helm", "template", "shortly", str(CHART),
-            "--namespace", env,
+            "--namespace", f"shortly-{env}",  # Argo CD's destination: <app>-<env>
             "--values", str(ROOT / f"deploy/envs/{env}.yaml"),
             "--set", f"image.digest={PLACEHOLDER_DIGEST}",
             # What the cluster offers, so the monitoring objects render as they do there.

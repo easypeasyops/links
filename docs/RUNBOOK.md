@@ -13,7 +13,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Repo | [github.com/statsguy/shortly](https://github.com/statsguy/shortly) |
 | Image | `ghcr.io/statsguy/shortly` — deploy by digest, never by tag |
 | Current release | v0.7.1, `sha256:f8e4982b3a4197e0d68b83ef7bd06f0213bd54afffd65f4a088c21fd0852e046` (previous: v0.7.0, `sha256:9df4c29bd25d9f69b0ce2f7776a0affeab4d2bca18c859668927e398f4a21670`) |
-| Environments | kind cluster `shortly`; namespaces `staging` (Deployment, 1 replica), `prod` (Argo Rollout, canary releases, HPA 2–4 replicas) |
+| Environments | kind cluster `shortly`; staging in namespace `shortly-staging` (Deployment, 1 replica), prod in `shortly-prod` (Argo Rollout, canary releases, HPA 2–4 replicas). Scripts take the environment (`staging`, `prod`); `scripts/lib/namespaces.sh` maps it to the namespace |
 | Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
 | Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
 | Database | `postgres` StatefulSet per namespace; URL in Secret `shortly-db` key `url` |
@@ -38,12 +38,12 @@ scripts/promote.sh staging $D --pr                         # deploy = merge this
 scripts/promote.sh prod $D --pr                            # after staging ran it
 kubectl -n argocd get applications                         # SYNC STATUS / HEALTH per environment
 git log --oneline -5 -- deploy/envs/prod.yaml              # what prod ran; roll back = revert one
-kubectl -n prod get pods -l app.kubernetes.io/name=shortly # pod status
-kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=100
-kubectl -n prod get rollout shortly                        # prod: PHASE Healthy, or the canary's step
-kubectl -n staging rollout status deploy/shortly
-kubectl -n prod get events --sort-by=.lastTimestamp | tail -20
-kubectl -n prod get hpa shortly                            # current CPU % vs target, replicas
+kubectl -n shortly-prod get pods -l app.kubernetes.io/name=shortly # pod status
+kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --tail=100
+kubectl -n shortly-prod get rollout shortly                        # prod: PHASE Healthy, or the canary's step
+kubectl -n shortly-staging rollout status deploy/shortly
+kubectl -n shortly-prod get events --sort-by=.lastTimestamp | tail -20
+kubectl -n shortly-prod get hpa shortly                            # current CPU % vs target, replicas
 curl -s http://sho.rt.localhost:8080/readyz              # the user path; staging: staging.sho.rt.localhost
 ```
 
@@ -52,7 +52,7 @@ curl -s http://sho.rt.localhost:8080/readyz              # the user path; stagin
 shortly is healthy when every desired pod is Ready, `/readyz` returns 200 through the Service, and the 5xx rate is near zero.
 
 ```bash
-NS=prod
+NS=shortly-prod
 kubectl -n $NS get rollout,deploy shortly 2>/dev/null     # READY must equal desired (prod: a Rollout, Healthy)
 kubectl -n $NS get hpa shortly                             # TARGETS like "12%/70%", never "<unknown>"
 kubectl -n $NS get pods -l app.kubernetes.io/name=shortly -o wide   # restarts, node placement
@@ -80,9 +80,9 @@ Do not judge health through `kubectl port-forward svc/...`: it attaches to one p
 **Logs.** Filter structured fields with `jq`:
 
 ```bash
-kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=500 \
+kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --tail=500 \
   | jq -c 'select(.level=="error" or .level=="warning")'
-kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=2000 \
+kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --tail=2000 \
   | jq -c 'select(.request_id=="<id from the x-request-id response header>")'
 ```
 
@@ -138,12 +138,12 @@ Staging and prod are deployed by **Argo CD from git** (docs/DESIGN.md, GitOps wi
 
    ```bash
    kubectl -n argocd get application shortly-staging -w      # SYNC STATUS Synced, HEALTH Healthy
-   kubectl -n staging get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+   kubectl -n shortly-staging get deploy shortly -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
    ```
 3. Check staging (see Health checks):
 
    ```bash
-   kubectl -n staging exec postgres-0 -- wget -q -O- http://shortly/readyz
+   kubectl -n shortly-staging exec postgres-0 -- wget -q -O- http://shortly/readyz
    # through the Gateway, as users (the front door)
    curl -s -X POST http://staging.sho.rt.localhost:8080/links -H 'content-type: application/json' -d '{"url":"https://example.com"}'
    curl -si http://staging.sho.rt.localhost:8080/<code from the response> | head -3   # expect 307 + Location
@@ -160,7 +160,7 @@ Staging and prod are deployed by **Argo CD from git** (docs/DESIGN.md, GitOps wi
    Merge it. Prod is a **canary**: the Rollout gives the new version 10%, then 50% of the traffic, judging each step (about 7 minutes; "Canary releases" below):
 
    ```bash
-   kubectl -n prod get rollout shortly -w                     # step, weights, PHASE Healthy at the end
+   kubectl -n shortly-prod get rollout shortly -w                     # step, weights, PHASE Healthy at the end
    kubectl -n argocd get application shortly-prod             # Synced; Healthy once the canary is done
    ```
 5. Watch for 15 minutes: 5xx ratio, p99 latency, restarts. The canary checks the first few minutes on a share of traffic; it doesn't replace this. If anything regresses, roll back (next section).
@@ -180,27 +180,27 @@ What happens in prod after a new version is synced (docs/DESIGN.md, Canary relea
 Each check, on the new version's pods only: at least 0.5 req/s of traffic, a 5xx ratio of at most 1%, and a redirect p99 of at most 250 ms. While each analysis runs, its `synthetic-traffic` Job sends 20 req/s through the Gateway (links to `example.com`); with real users, set `canary.analysis.syntheticTraffic.enabled: false` in `deploy/envs/prod.yaml`.
 
 ```bash
-kubectl -n prod get rollout shortly -w                                   # PHASE, step, weights
-kubectl -n prod get httproute shortly -o jsonpath='{range .spec.rules[0].backendRefs[*]}{.name}={.weight}{" "}{end}{"\n"}'
-kubectl -n prod get analysisrun                                          # one per analysis step
-kubectl -n prod get analysisrun <name> -o jsonpath='{range .status.metricResults[*]}{.name}: {.phase} {.measurements[-1:].value}{"\n"}{end}'
+kubectl -n shortly-prod get rollout shortly -w                                   # PHASE, step, weights
+kubectl -n shortly-prod get httproute shortly -o jsonpath='{range .spec.rules[0].backendRefs[*]}{.name}={.weight}{" "}{end}{"\n"}'
+kubectl -n shortly-prod get analysisrun                                          # one per analysis step
+kubectl -n shortly-prod get analysisrun <name> -o jsonpath='{range .status.metricResults[*]}{.name}: {.phase} {.measurements[-1:].value}{"\n"}{end}'
 ```
 
 Stop a canary by hand (traffic goes back to stable at once), then revert the promotion PR so git says what should run:
 
 ```bash
-kubectl -n prod patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}'
+kubectl -n shortly-prod patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}'
 gh pr list --state merged --search "deploy: in:title" --limit 3       # find the promotion PR
 git revert <its merge commit> && git push   # via a PR, as for any change to main
 ```
 
 Steps and thresholds are chart values (`canary:` in `values.yaml`). An aborted canary leaves the Application **Degraded** until the revert is merged; that's expected (Argo CD and git agree, the Rollout refused the version).
 
-**First upgrade onto chart 0.10.0** (Argo CD takes over): `scripts/cluster.sh up` installs Argo CD and applies `deploy/argocd/`. Each Application adopts the resources `deploy.sh` created (same names) and syncs `main`; nothing restarts unless `main` differs from what runs. Then delete Helm's release records, so that a stray `helm` command can't act on resources Argo CD owns: `kubectl -n staging delete secret -l owner=helm,name=shortly` and the same for `prod`. From then on, `deploy.sh` refuses both environments.
+**First upgrade onto chart 0.10.0** (Argo CD takes over): `scripts/cluster.sh up` installs Argo CD and applies `deploy/argocd/`. Each Application adopts the resources `deploy.sh` created (same names) and syncs `main`; nothing restarts unless `main` differs from what runs. Then delete Helm's release records, so that a stray `helm` command can't act on resources Argo CD owns: `kubectl -n shortly-staging delete secret -l owner=helm,name=shortly` and the same for `prod`. From then on, `deploy.sh` refuses both environments.
 
-**First upgrade onto chart 0.9.0** (prod becomes a Rollout): `deploy.sh` keeps the old Deployment serving (it annotates it `helm.sh/resource-policy: keep`), waits for the Rollout to be Healthy, then deletes the Deployment, and prints `migrated`. Meanwhile it shows `first version, no canary`: the first Rollout version starts at 100% (there is no stable version yet), so this one deploy has no canary. If it fails, the rollback brings the Deployment back under Helm; check `kubectl -n prod get deploy,rollout`.
+**First upgrade onto chart 0.9.0** (prod becomes a Rollout): `deploy.sh` keeps the old Deployment serving (it annotates it `helm.sh/resource-policy: keep`), waits for the Rollout to be Healthy, then deletes the Deployment, and prints `migrated`. Meanwhile it shows `first version, no canary`: the first Rollout version starts at 100% (there is no stable version yet), so this one deploy has no canary. If it fails, the rollback brings the Deployment back under Helm; check `kubectl -n shortly-prod get deploy,rollout`.
 
-**First upgrade onto chart 0.2.0** (the HPA arrives): the chart stops setting `replicas`, so Kubernetes may briefly set an existing prod Deployment to 1 replica until the HPA restores its minimum of 2, typically within 15 s. Do this upgrade at a quiet time, then check `kubectl -n prod get hpa,deploy shortly`. Fresh installs are not affected.
+**First upgrade onto chart 0.2.0** (the HPA arrives): the chart stops setting `replicas`, so Kubernetes may briefly set an existing prod Deployment to 1 replica until the HPA restores its minimum of 2, typically within 15 s. Do this upgrade at a quiet time, then check `kubectl -n shortly-prod get hpa,deploy shortly`. Fresh installs are not affected.
 
 **`deploy.sh` (CI's e2e and break glass only).** It refuses an environment that Argo CD manages (`REFUSED: … deployed by Argo CD from git`). For a digest, it first verifies the image's provenance (`scripts/verify-image.sh`) and stops if that fails; a tag is accepted only on a `kind-*` context. Then it runs `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the environment's values file (prod: `--wait=legacy`, then it follows the canary). Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
 
@@ -229,10 +229,10 @@ Say so in the incident channel. If verification itself is broken (Sigstore down)
 
 ```bash
 kubectl -n argocd get application shortly-prod -o jsonpath='{.status.operationState.message}{"\n"}'
-kubectl -n prod get events --sort-by=.lastTimestamp | tail -30
-kubectl -n prod get jobs                                      # a failed migrate Job is kept
-kubectl -n prod logs job/shortly-migrate-1
-kubectl -n prod logs -l app.kubernetes.io/name=shortly --previous --tail=50
+kubectl -n shortly-prod get events --sort-by=.lastTimestamp | tail -30
+kubectl -n shortly-prod get jobs                                      # a failed migrate Job is kept
+kubectl -n shortly-prod logs job/shortly-migrate-1
+kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --previous --tail=50
 ```
 
 ## Roll back
@@ -256,8 +256,8 @@ Roll back first, investigate second: when a release is bad, restore the last goo
 
    ```bash
    kubectl -n argocd get application shortly-prod     # Synced, Healthy
-   kubectl -n prod get rollout shortly -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
-   kubectl -n prod exec postgres-0 -- wget -q -O- http://shortly/readyz
+   kubectl -n shortly-prod get rollout shortly -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+   kubectl -n shortly-prod exec postgres-0 -- wget -q -O- http://shortly/readyz
    ```
 
    The image must be the previous digest.
@@ -270,13 +270,13 @@ Roll back first, investigate second: when a release is bad, restore the last goo
 
 If a migration itself broke something and the old code cannot run on the new schema, downgrade **before** rolling back. Only the new image contains the new revision, so the old one cannot undo it:
 
-1. Back up the database (`kubectl -n prod exec postgres-0 -- pg_dump -U shortly shortly > backup.sql`).
+1. Back up the database (`kubectl -n shortly-prod exec postgres-0 -- pg_dump -U shortly shortly > backup.sql`).
 2. Downgrade one revision from a pod still running the new image:
 
    ```bash
-   POD=$(kubectl -n prod get pods -l app.kubernetes.io/name=shortly,rollouts-pod-template-hash=$(kubectl -n prod get rollout shortly -o jsonpath='{.status.currentPodHash}') -o name | head -1)
-   kubectl -n prod exec $POD -- alembic downgrade -1
-   kubectl -n prod exec $POD -- alembic current
+   POD=$(kubectl -n shortly-prod get pods -l app.kubernetes.io/name=shortly,rollouts-pod-template-hash=$(kubectl -n shortly-prod get rollout shortly -o jsonpath='{.status.currentPodHash}') -o name | head -1)
+   kubectl -n shortly-prod exec $POD -- alembic downgrade -1
+   kubectl -n shortly-prod exec $POD -- alembic current
    ```
 3. Then revert the promotion as above.
 
@@ -289,9 +289,9 @@ Each environment's Postgres is dumped hourly (CronJob `postgres-backup`, :41 UTC
 **1. Choose the dump, and prove it restores.** Restore drills never touch the source:
 
 ```bash
-LIST=1 SOURCE=prod scripts/restore-drill.sh            # the backups: size, time
-KEEP=1 SOURCE=prod scripts/restore-drill.sh            # newest, into a scratch DB in namespace restore-drill
-KEEP=1 SOURCE=prod DUMP=shortly-20261022T204100Z.dump scripts/restore-drill.sh   # a specific one
+LIST=1 SOURCE=shortly-prod scripts/restore-drill.sh            # the backups: size, time
+KEEP=1 SOURCE=shortly-prod scripts/restore-drill.sh            # newest, into a scratch DB in namespace restore-drill
+KEEP=1 SOURCE=shortly-prod DUMP=shortly-20261022T204100Z.dump scripts/restore-drill.sh   # a specific one
 kubectl -n restore-drill exec -it restore -c postgres -- psql -U shortly shortly   # look before you trust it
 ```
 
@@ -300,7 +300,7 @@ Take the newest dump from **before** the problem. After a bad migration or a mas
 **2. Restore into the environment.** Stop everything that writes, restore, then let traffic back:
 
 ```bash
-NS=prod
+NS=shortly-prod
 kubectl -n $NS scale rollout/shortly --replicas=0         # staging: deploy/shortly; the HPA leaves 0 alone
 kubectl -n $NS patch cronjob shortly-cleanup -p '{"spec":{"suspend":true}}'
 kubectl -n $NS patch cronjob postgres-backup -p '{"spec":{"suspend":true}}'   # keep the good dumps
@@ -332,7 +332,7 @@ Every migration must work with both the new code and the code it replaces, becau
    uv run pytest                          # alembic check + downgrade/upgrade round trip run here
    ```
 2. **Migrate code** (release N or N+1): the app writes both shapes and reads the new one. Backfill existing rows in a separate, batched job if needed, never inside the migration.
-3. **Contract** (release N+2): once no running version reads the old shape (check `helm -n prod history` for what can still be rolled back to), drop it.
+3. **Contract** (release N+2): once no running version reads the old shape (check `helm -n shortly-prod history` for what can still be rolled back to), drop it.
 
 **Rules for the migration itself**
 
@@ -343,7 +343,7 @@ Every migration must work with both the new code and the code it replaces, becau
 
 ## Incident playbooks
 
-Start every incident with the same two questions: did something just change (`helm -n prod history shortly`), and is the database reachable? Most incidents are a recent release or the DB.
+Start every incident with the same two questions: did something just change (`helm -n shortly-prod history shortly`), and is the database reachable? Most incidents are a recent release or the DB.
 
 ```mermaid
 flowchart TD
@@ -387,19 +387,19 @@ Either needs at least 5 bad requests in its long window: a single slow request o
 No shortly target is being scraped, so every SLO alert is blind. Assume a full outage until you prove otherwise.
 
 ```bash
-kubectl -n prod get pods -l app.kubernetes.io/name=shortly     # are there pods at all?
-kubectl -n prod exec postgres-0 -- wget -q -O- http://shortly/readyz   # does the Service answer?
+kubectl -n shortly-prod get pods -l app.kubernetes.io/name=shortly     # are there pods at all?
+kubectl -n shortly-prod exec postgres-0 -- wget -q -O- http://shortly/readyz   # does the Service answer?
 ```
 
 - Pods are missing or crash-looping: see CrashLoopBackOff, or Deploy stuck or failed.
-- Pods are fine and the Service answers: the problem is the scrape, not the app. Check the target in Prometheus (Status → Targets, `serviceMonitor/prod/shortly`), the ServiceMonitor (`kubectl -n prod get servicemonitor shortly`), and any NetworkPolicy. Fix it anyway: until scraping works, nothing else can page.
+- Pods are fine and the Service answers: the problem is the scrape, not the app. Check the target in Prometheus (Status → Targets, `serviceMonitor/prod/shortly`), the ServiceMonitor (`kubectl -n shortly-prod get servicemonitor shortly`), and any NetworkPolicy. Fix it anyway: until scraping works, nothing else can page.
 
 ### ShortlyNoAvailablePods
 
 One environment's Deployment (staging) or Rollout (prod) has zero ready pods, so every request to it fails. The alert carries the `namespace`; the burn-rate and readiness alerts for that namespace are inhibited, because they are symptoms of the same thing.
 
 ```bash
-NS=prod
+NS=shortly-prod
 kubectl -n $NS get deploy,rollout,rs,pods -l app.kubernetes.io/name=shortly
 kubectl -n $NS get events --sort-by=.lastTimestamp | tail -20
 helm -n $NS history shortly
@@ -418,17 +418,17 @@ The Gateway is the user path; probes and Prometheus go around it. So a broken fr
 
 ```bash
 kubectl -n gateway get gateway shortly                         # PROGRAMMED must be True
-kubectl -n prod get httproute shortly -o jsonpath='{.status.parents[0].conditions}'   # Accepted, ResolvedRefs
+kubectl -n shortly-prod get httproute shortly -o jsonpath='{.status.parents[0].conditions}'   # Accepted, ResolvedRefs
 kubectl -n envoy-gateway-system get pods                       # envoy-gateway (controller) and the proxy
 kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50
-kubectl -n prod exec postgres-0 -- wget -q -O- --header 'Host: sho.rt.localhost' http://shortly-gateway.envoy-gateway-system.svc/readyz
+kubectl -n shortly-prod exec postgres-0 -- wget -q -O- --header 'Host: sho.rt.localhost' http://shortly-gateway.envoy-gateway-system.svc/readyz
 ```
 
 | What you see | Cause | Fix |
 | --- | --- | --- |
 | Gateway not `Programmed` | The controller is down, or the EnvoyProxy/GatewayClass is invalid | Controller logs; `kubectl get gatewayclass envoy -o yaml` |
 | Route not `Accepted` | Its namespace isn't allowed on the listener, or `hostnames` conflict with another route | Compare with `allowedRoutes` in `deploy/kind/gateway.yaml`; one hostname per environment |
-| `ResolvedRefs: False` | The route points at a Service or port that doesn't exist (a renamed release) | `kubectl -n prod get svc`; the route's `backendRefs` |
+| `ResolvedRefs: False` | The route points at a Service or port that doesn't exist (a renamed release) | `kubectl -n shortly-prod get svc`; the route's `backendRefs` |
 | Direct `wget http://shortly/readyz` works, through the Gateway it doesn't | The proxy can't reach the pods: a NetworkPolicy change narrowed `httpFrom` | Allow the proxy's namespace (`envoy-gateway-system`) on port 8000 |
 
 ### Pods not Ready, `/readyz` returns 503
@@ -436,19 +436,19 @@ kubectl -n prod exec postgres-0 -- wget -q -O- --header 'Host: sho.rt.localhost'
 **Likely cause:** the database is unreachable. `/healthz` stays 200, so pods are not restarted; they are only removed from the Service.
 
 ```bash
-kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=200 | jq -c 'select(.msg=="database ping failed")' | tail -3
-kubectl -n prod get pods -l app=postgres
-kubectl -n prod logs postgres-0 --tail=50
-kubectl -n prod exec postgres-0 -- pg_isready -U shortly -d shortly
+kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --tail=200 | jq -c 'select(.msg=="database ping failed")' | tail -3
+kubectl -n shortly-prod get pods -l app=postgres
+kubectl -n shortly-prod logs postgres-0 --tail=50
+kubectl -n shortly-prod exec postgres-0 -- pg_isready -U shortly -d shortly
 ```
 
-**Fix:** restore Postgres (restart `kubectl -n prod delete pod postgres-0`, check its PVC, free disk). The app recovers by itself once the DB answers; do not restart app pods. If credentials changed, check that Secret `shortly-db` matches `postgres-auth`.
+**Fix:** restore Postgres (restart `kubectl -n shortly-prod delete pod postgres-0`, check its PVC, free disk). The app recovers by itself once the DB answers; do not restart app pods. If credentials changed, check that Secret `shortly-db` matches `postgres-auth`.
 
 ### CrashLoopBackOff
 
 ```bash
-kubectl -n prod describe pod <pod> | sed -n '/Last State/,/Exit Code/p'
-kubectl -n prod logs <pod> --previous --tail=30
+kubectl -n shortly-prod describe pod <pod> | sed -n '/Last State/,/Exit Code/p'
+kubectl -n shortly-prod logs <pod> --previous --tail=30
 ```
 
 | What the log or state shows | Cause | Fix |
@@ -463,17 +463,17 @@ kubectl -n prod logs <pod> --previous --tail=30
 The old version keeps serving (a stalled rollout, or an aborted canary). If Argo CD itself didn't apply the change, see "A merged change didn't deploy (Argo CD)" below. To see why the pods didn't come up:
 
 ```bash
-kubectl -n prod get pods,jobs
-kubectl -n prod get events --sort-by=.lastTimestamp | tail -30
+kubectl -n shortly-prod get pods,jobs
+kubectl -n shortly-prod get events --sort-by=.lastTimestamp | tail -30
 ```
 
 | Event or state | Cause | Fix |
 | --- | --- | --- |
 | `ImagePullBackOff` | Wrong digest, or the GHCR package is private | Check the digest; make the package public or add `imagePullSecrets` |
 | `violates PodSecurity "restricted"` | A chart change dropped a security setting | Restore the `securityContext` in the chart |
-| Migrate Job `Failed` | Migration error | `kubectl -n prod logs job/shortly-migrate-<REV>`; fix the migration in a new release |
+| Migrate Job `Failed` | Migration error | `kubectl -n shortly-prod logs job/shortly-migrate-<REV>`; fix the migration in a new release |
 | `admission webhook … denied the request: … require-release-provenance` | The image isn't a release digest with valid provenance | See [Admission policy refuses pods](#admission-policy-refuses-pods) |
-| `failed calling webhook … kyverno-svc` | Kyverno is down; no Pod can be created in `staging` or `prod` | See [Admission policy refuses pods](#admission-policy-refuses-pods) |
+| `failed calling webhook … kyverno-svc` | Kyverno is down; no Pod can be created in `shortly-staging` or `shortly-prod` | See [Admission policy refuses pods](#admission-policy-refuses-pods) |
 | `Pending`, `Insufficient cpu/memory` | Node is full (the HPA may have asked for more pods than fit) | Add nodes, or lower `autoscaling.maxReplicas`; don't lower the CPU request without re-measuring |
 
 ### Canary aborted
@@ -481,17 +481,17 @@ kubectl -n prod get events --sort-by=.lastTimestamp | tail -30
 The prod Rollout aborted a new version (`kubectl -n argocd get application shortly-prod` shows Degraded; with `deploy.sh`, it printed `FAILED: canary aborted`). Users only saw the new version on its share of traffic, at most 50% and usually 10%, for a few minutes. Prod is serving the previous version; check that first, then find out why, then revert the promotion PR (Roll back):
 
 ```bash
-kubectl -n prod get rollout shortly                     # PHASE Healthy, on the old pod hash
-kubectl -n prod get analysisrun --sort-by=.metadata.creationTimestamp | tail -3
-kubectl -n prod get analysisrun <newest> -o jsonpath='{range .status.metricResults[*]}{.name}: {.phase} {.message} {.measurements[-1:].value}{"\n"}{end}'
-kubectl -n prod get events --sort-by=.lastTimestamp | grep -i -E 'rollout|analysis' | tail -10
+kubectl -n shortly-prod get rollout shortly                     # PHASE Healthy, on the old pod hash
+kubectl -n shortly-prod get analysisrun --sort-by=.metadata.creationTimestamp | tail -3
+kubectl -n shortly-prod get analysisrun <newest> -o jsonpath='{range .status.metricResults[*]}{.name}: {.phase} {.message} {.measurements[-1:].value}{"\n"}{end}'
+kubectl -n shortly-prod get events --sort-by=.lastTimestamp | grep -i -E 'rollout|analysis' | tail -10
 ```
 
 | Failed metric or message | Meaning | Next |
 | --- | --- | --- |
-| `error-ratio: Failed` | The new version answered 5xx on more than 1% of its requests | Its logs: `kubectl -n prod logs -l rollouts-pod-template-hash=<hash> --tail=200` (the canary's pods are kept 30 s after the abort; staging still runs the same digest). A real bug: fix it in a new release |
+| `error-ratio: Failed` | The new version answered 5xx on more than 1% of its requests | Its logs: `kubectl -n shortly-prod logs -l rollouts-pod-template-hash=<hash> --tail=200` (the canary's pods are kept 30 s after the abort; staging still runs the same digest). A real bug: fix it in a new release |
 | `redirect-p99: Failed` | Redirects on the new version were slower than 250 ms at p99, twice | A slow query or a CPU regression: compare with `scripts/loadtest.sh` on staging |
-| `traffic: Failed` | Too little traffic to judge, not a bad release | Did the analysis's `synthetic-traffic` Job run (`kubectl -n prod get jobs`, k6 image pull, its logs)? With synthetic traffic off, real traffic was below 0.5 req/s at 10%: deploy at a busier time, or turn it on |
+| `traffic: Failed` | Too little traffic to judge, not a bad release | Did the analysis's `synthetic-traffic` Job run (`kubectl -n shortly-prod get jobs`, k6 image pull, its logs)? With synthetic traffic off, real traffic was below 0.5 req/s at 10%: deploy at a busier time, or turn it on |
 | metrics in `Error` | Analysis couldn't query Prometheus | `kubectl -n monitoring get pods`; the Rollout aborts after 4 errors in a row. Fix Prometheus, then deploy again |
 | `ProgressDeadlineExceeded` | A canary pod wasn't ready within 180 s | Same as a crash loop or Pending pod: CrashLoopBackOff and Deploy stuck playbooks |
 | `out of time` | The canary didn't finish in `CANARY_TIMEOUT` (15 min) | Was the Argo Rollouts controller running (`kubectl -n argo-rollouts get pods`)? |
@@ -514,9 +514,9 @@ kubectl -n argocd logs deploy/argocd-repo-server --tail=50
 | --- | --- | --- |
 | Synced, but to an older revision | Not polled yet (every 60 s), or the repo server can't reach GitHub | Wait a minute; `kubectl -n argocd annotate application shortly-prod argocd.argoproj.io/refresh=normal --overwrite` forces a check; then repo-server logs |
 | `ComparisonError` | The chart doesn't render with that env file (a typo, a bad value) | The message names the template; fix it in a PR. Nothing changed in the cluster |
-| OutOfSync, sync failed, `PreSync` hook failed | The migration Job failed | `kubectl -n prod logs job/shortly-migrate-1`; fix in a new release or revert. The old version keeps serving |
+| OutOfSync, sync failed, `PreSync` hook failed | The migration Job failed | `kubectl -n shortly-prod logs job/shortly-migrate-1`; fix in a new release or revert. The old version keeps serving |
 | Synced, Degraded, Rollout aborted | The canary was refused | "Canary aborted" above, then revert the promotion |
-| Synced, Progressing for minutes | A canary in progress (about 7 minutes), or pods not becoming ready | `kubectl -n prod get rollout shortly`; "Deploy stuck or failed" |
+| Synced, Progressing for minutes | A canary in progress (about 7 minutes), or pods not becoming ready | `kubectl -n shortly-prod get rollout shortly`; "Deploy stuck or failed" |
 | OutOfSync, auto-sync not running | Someone turned auto-sync off (break glass) and didn't turn it back on | `kubectl apply -f deploy/argocd/applications.yaml` after checking git says what should run |
 | OutOfSync on the HTTPRoute or the `shortly-stable`/`shortly-canary` Services only | The Application lost its `ignoreDifferences` for what Argo Rollouts owns (an edited Application) | `kubectl apply -f deploy/argocd/applications.yaml` |
 
@@ -545,7 +545,7 @@ A **platform** Application (`kubectl -n argocd get applications -l app.kubernete
 Kyverno checks every Pod in `staging` and `prod` before it is created (`deploy/policies/`). Pods that are already running are never touched, so a refusal blocks deploys and scale-ups, not traffic. Find which case it is:
 
 ```bash
-kubectl -n prod get events --sort-by=.lastTimestamp | grep -i -E 'denied|webhook' | tail
+kubectl -n shortly-prod get events --sort-by=.lastTimestamp | grep -i -E 'denied|webhook' | tail
 kubectl -n kyverno get pods
 kubectl get imagevalidatingpolicy,validatingpolicy     # READY must be true
 ```
@@ -570,12 +570,12 @@ kubectl delete validatingwebhookconfiguration <name>      # each kyverno one lis
 scripts/cluster.sh up
 ```
 
-Afterwards, check that everything running is a release: `scripts/verify-image.sh` on each image from `kubectl -n prod get pods -o jsonpath='{..image}'`.
+Afterwards, check that everything running is a release: `scripts/verify-image.sh` on each image from `kubectl -n shortly-prod get pods -o jsonpath='{..image}'`.
 
 **Allowlist reports** (Audit in kind, so nothing is refused):
 
 ```bash
-kubectl -n prod get policyreport -o wide                  # FAIL > 0: an image outside the allowlist ran
+kubectl -n shortly-prod get policyreport -o wide                  # FAIL > 0: an image outside the allowlist ran
 ```
 
 
@@ -584,16 +584,16 @@ kubectl -n prod get policyreport -o wide                  # FAIL > 0: an image o
 Symptoms: connections that time out (rather than being refused) between pods that used to talk; a new dependency that never answers; Prometheus targets `down` with `context deadline exceeded`. NetworkPolicies drop packets silently, so it looks like a slow network, not an error.
 
 ```bash
-kubectl -n prod get networkpolicy                        # shortly, default-deny-ingress, postgres
-kubectl -n prod describe networkpolicy shortly            # what the app may receive and send
-kubectl -n prod get pods --show-labels                    # policies select by label: check them
+kubectl -n shortly-prod get networkpolicy                        # shortly, default-deny-ingress, postgres
+kubectl -n shortly-prod describe networkpolicy shortly            # what the app may receive and send
+kubectl -n shortly-prod get pods --show-labels                    # policies select by label: check them
 ```
 
 | What fails | Likely cause | Fix |
 | --- | --- | --- |
 | The app can't reach a new service (collector, external API) | The app's egress allows DNS and Postgres only | Add a rule to `networkPolicy.extraEgress` in the env values and redeploy |
 | Prometheus shows shortly targets down | Scraper pods don't match `networkPolicy.metricsFrom` (a namespace or label change) | Compare its labels with the policy; fix the values |
-| A new workload in `staging` or `prod` gets no traffic | Default-deny ingress: nothing lets it in | Write a NetworkPolicy for it, as `deploy/kind/network-policies.yaml` does for Postgres |
+| A new workload in `shortly-staging` or `shortly-prod` gets no traffic | Default-deny ingress: nothing lets it in | Write a NetworkPolicy for it, as `deploy/kind/network-policies.yaml` does for Postgres |
 | The app or a Job can't reach Postgres after a relabel | Postgres accepts pods labelled `app.kubernetes.io/part-of: shortly` only | The chart sets it from `app.partOf` in its values (default `shortly`). Keep it on every pod template, or change it in both places at once: add the new one, deploy, then remove the old one (expand/contract) |
 
 Don't delete a policy to "see if it helps" in prod. Check labels first: almost every case is a selector that no longer matches.
@@ -601,7 +601,7 @@ Don't delete a policy to "see if it helps" in prod. Check labels first: almost e
 ### 5xx rate rising
 
 ```bash
-kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=1000 | jq -c 'select(.status>=500)' | tail -20
+kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --tail=1000 | jq -c 'select(.status>=500)' | tail -20
 ```
 
 - 503 with `Retry-After`, and `load_shed_total` rising: the pod or the database is saturated. Its `reason` label says which. See Saturation.
@@ -610,7 +610,7 @@ kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=1000 | jq -c 'sele
 
 ### Latency up
 
-Check p99 by route, then `kubectl -n prod get hpa shortly`.
+Check p99 by route, then `kubectl -n shortly-prod get hpa shortly`.
 
 - **CPU above target and replicas rising:** the HPA is catching up with a spike. Latency should recover within about a minute.
 - **Pinned at `maxReplicas`:** out of capacity; see Saturation.
@@ -626,14 +626,14 @@ Check p99 by route, then `kubectl -n prod get hpa shortly`.
 | `load_shed_total{reason="db_timeout"}` rising | Queries ran past `dbStatementTimeoutMs` (2 s) or waited past `dbLockTimeoutMs` (1 s) on a lock | Postgres: `pg_stat_activity` (long-running queries, `wait_event_type = Lock`), `pg_locks`, disk and CPU. Raising the timeouts only makes requests wait longer |
 | `load_shed_total{reason="pool"}` rising; `db_pool_in_use` = `db_pool_size`; CPU low | Database slow or frozen: queries hold connections | Database first (`pg_stat_activity`, locks, disk). Don't raise the pool: more connections to a struggling DB make it worse |
 | HPA `REPLICAS` = max; CPU above target; p99 up; concurrency shedding | Traffic above provisioned capacity | Raise `autoscaling.maxReplicas` and keep `maxReplicas × dbPoolSize` within `maxDbConnections` and Postgres `max_connections`; add nodes if pods go Pending |
-| HPA `TARGETS` shows `<unknown>` | No CPU metrics: metrics-server down, or no CPU request | `kubectl -n kube-system get deploy metrics-server`; `kubectl top pods -n prod`; `kubectl -n prod describe hpa shortly` |
+| HPA `TARGETS` shows `<unknown>` | No CPU metrics: metrics-server down, or no CPU request | `kubectl -n kube-system get deploy metrics-server`; `kubectl top pods -n shortly-prod`; `kubectl -n shortly-prod describe hpa shortly` |
 
 ```bash
-kubectl -n prod describe hpa shortly | sed -n '/Conditions/,$p'    # why it did or didn't scale
-kubectl top pods -n prod -l app.kubernetes.io/name=shortly
-kubectl -n prod exec postgres-0 -- psql -U shortly shortly -c \
+kubectl -n shortly-prod describe hpa shortly | sed -n '/Conditions/,$p'    # why it did or didn't scale
+kubectl top pods -n shortly-prod -l app.kubernetes.io/name=shortly
+kubectl -n shortly-prod exec postgres-0 -- psql -U shortly shortly -c \
   "select state, wait_event_type, count(*) from pg_stat_activity group by 1,2"
-kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=500 | jq -c 'select(.status==503) | .route' | sort | uniq -c
+kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --tail=500 | jq -c 'select(.status==503) | .route' | sort | uniq -c
 ```
 
 ### Cleanup job not running
@@ -641,31 +641,31 @@ kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=500 | jq -c 'selec
 `ShortlyCleanupNotRunning` (ticket) means the `shortly-cleanup` CronJob hasn't succeeded for over 3 hours, or never has. Nothing user-facing breaks: expired links keep answering 410 Gone. But expired rows pile up, and the longer it stays broken, the bigger the backlog the next runs must work through (at most 100,000 rows per run).
 
 ```bash
-kubectl -n prod get cronjob shortly-cleanup               # SUSPEND, LAST SCHEDULE, LAST SUCCESSFUL
-kubectl -n prod get jobs -l app.kubernetes.io/name=shortly-cleanup
-kubectl -n prod logs job/<the latest one> --tail=30        # one JSON line per run, or the error
+kubectl -n shortly-prod get cronjob shortly-cleanup               # SUSPEND, LAST SCHEDULE, LAST SUCCESSFUL
+kubectl -n shortly-prod get jobs -l app.kubernetes.io/name=shortly-cleanup
+kubectl -n shortly-prod logs job/<the latest one> --tail=30        # one JSON line per run, or the error
 ```
 
 | What you see | Cause | Fix |
 | --- | --- | --- |
 | Jobs fail with `cleanup failed` and a connection error | Postgres unreachable, or the network policy doesn't admit the Job (labels changed) | Database first (Pods not Ready playbook); else compare the pod's labels with the `postgres` NetworkPolicy |
 | Jobs fail with a timeout (`DeadlineExceeded`) | A huge backlog, or a slow database: 900 s wasn't enough | Check the DB; the next runs continue where it stopped. To catch up faster, run it by hand (below) |
-| No Jobs at all; `SUSPEND` is `True` | Someone suspended it | `kubectl -n prod patch cronjob shortly-cleanup -p '{"spec":{"suspend":false}}'` |
+| No Jobs at all; `SUSPEND` is `True` | Someone suspended it | `kubectl -n shortly-prod patch cronjob shortly-cleanup -p '{"spec":{"suspend":false}}'` |
 | No failed Jobs; `LAST SCHEDULE` hours old; on the laptop | The Mac slept: the CronJob controller's timers stall while Docker's VM is paused | `scripts/cluster.sh wake` (below) |
-| No Jobs, not suspended | Created by Kyverno? Check events: an image without release provenance is refused | `kubectl -n prod get events --sort-by=.lastTimestamp \| grep -i cleanup`; see Admission policy refuses pods |
+| No Jobs, not suspended | Created by Kyverno? Check events: an image without release provenance is refused | `kubectl -n shortly-prod get events --sort-by=.lastTimestamp \| grep -i cleanup`; see Admission policy refuses pods |
 | Jobs succeed but the alert fires | kube-state-metrics down or not scraping | `kubectl -n monitoring get pods`; the alert can't see successes without it |
 
 **Run it now**, for example after fixing the cause, or to work off a backlog. It's safe while a scheduled run is going: the two split the work.
 
 ```bash
-kubectl -n prod create job cleanup-manual-$(date +%s) --from=cronjob/shortly-cleanup
-kubectl -n prod logs -f job/cleanup-manual-<that number>   # "cleanup finished", deleted=…, complete=…
+kubectl -n shortly-prod create job cleanup-manual-$(date +%s) --from=cronjob/shortly-cleanup
+kubectl -n shortly-prod logs -f job/cleanup-manual-<that number>   # "cleanup finished", deleted=…, complete=…
 ```
 
 **How big is the backlog?**
 
 ```bash
-kubectl -n prod exec postgres-0 -- psql -U shortly shortly -c \
+kubectl -n shortly-prod exec postgres-0 -- psql -U shortly shortly -c \
   "select count(*) from links where expires_at < now() - interval '7 days'"
 ```
 
@@ -674,9 +674,9 @@ kubectl -n prod exec postgres-0 -- psql -U shortly shortly -c \
 `ShortlyFaultInjectionOn` (ticket) means `faults_injected_total` has been rising for 15 minutes: requests are failing **on purpose**. Fault injection is for canary drills, which last minutes, so either a drill was abandoned or `config.faultErrorRatio` leaked into a release.
 
 ```bash
-kubectl -n prod get deploy,rollout -o yaml 2>/dev/null | grep -A1 SHORTLY_FAULT_ERROR_RATIO   # which release has it (prod: a canary drill that wasn't rolled back?)
-kubectl -n prod logs -l app.kubernetes.io/name=shortly --tail=500 | grep 'FAULT INJECTION IS ON'
-helm -n prod get values shortly | grep -i fault
+kubectl -n shortly-prod get deploy,rollout -o yaml 2>/dev/null | grep -A1 SHORTLY_FAULT_ERROR_RATIO   # which release has it (prod: a canary drill that wasn't rolled back?)
+kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --tail=500 | grep 'FAULT INJECTION IS ON'
+helm -n shortly-prod get values shortly | grep -i fault
 ```
 
 Fix: if it is in `deploy/envs/`, revert that change (a PR); Argo CD removes it within a minute. If someone set it by hand, Argo CD's self-heal has already removed it, unless auto-sync is off: turn it back on (`kubectl apply -f deploy/argocd/applications.yaml`). Then find out how it got there: it must never be in `deploy/envs/`.
@@ -686,10 +686,10 @@ Fix: if it is in `deploy/envs/`, revert that change (a PR); Argo CD removes it w
 `ShortlyBackupNotRunning` (ticket) means the `postgres-backup` CronJob hasn't succeeded for over 2 hours, or never has. Nothing user-facing breaks, but every hour without a backup is an hour of links that a database loss would take with it.
 
 ```bash
-kubectl -n prod get cronjob postgres-backup               # SUSPEND, LAST SCHEDULE, LAST SUCCESSFUL
-kubectl -n prod get jobs -l app.kubernetes.io/name=postgres-backup
-kubectl -n prod logs job/<the latest one> -c dump --tail=20      # pg_dump
-kubectl -n prod logs job/<the latest one> -c upload --tail=20    # rclone
+kubectl -n shortly-prod get cronjob postgres-backup               # SUSPEND, LAST SCHEDULE, LAST SUCCESSFUL
+kubectl -n shortly-prod get jobs -l app.kubernetes.io/name=postgres-backup
+kubectl -n shortly-prod logs job/<the latest one> -c dump --tail=20      # pg_dump
+kubectl -n shortly-prod logs job/<the latest one> -c upload --tail=20    # rclone
 ```
 
 | What you see | Cause | Fix |
@@ -698,17 +698,17 @@ kubectl -n prod logs job/<the latest one> -c upload --tail=20    # rclone
 | `dump` fails in `pg_restore --list` | The archive is corrupt (disk full in the `work` volume, killed mid-write) | Re-run; if it repeats, check the volume's `sizeLimit` against the database size |
 | `upload` times out or is refused | The bucket is down, or the `seaweedfs` NetworkPolicy no longer admits the Job | `kubectl -n backups get pods`; `kubectl -n backups logs statefulset/seaweedfs --tail=50` |
 | `upload` gets 403 | Credentials differ between `backup-s3` (app namespace) and `seaweedfs-s3` (backups) | Delete `backup-s3` in the namespace and re-run `scripts/cluster.sh up`, which copies them again |
-| No Jobs; `SUSPEND` is `True` | Suspended, perhaps by a restore that didn't finish | `kubectl -n prod patch cronjob postgres-backup -p '{"spec":{"suspend":false}}'` |
+| No Jobs; `SUSPEND` is `True` | Suspended, perhaps by a restore that didn't finish | `kubectl -n shortly-prod patch cronjob postgres-backup -p '{"spec":{"suspend":false}}'` |
 | No failed Jobs; `LAST SCHEDULE` hours old; on the laptop | The Mac slept: the CronJob controller's timers stall while Docker's VM is paused (runs come hours apart) | `scripts/cluster.sh wake`: restarts the controller and backs up every environment whose last backup is over an hour old |
 
-**Take one now**, after fixing the cause: `kubectl -n prod create job backup-manual-$(date +%s) --from=cronjob/postgres-backup`. Then prove it: `SOURCE=prod scripts/restore-drill.sh`.
+**Take one now**, after fixing the cause: `kubectl -n shortly-prod create job backup-manual-$(date +%s) --from=cronjob/postgres-backup`. Then prove it: `SOURCE=shortly-prod scripts/restore-drill.sh`.
 
 ### Rate limiting: 429 on POST /links
 
 Each client (IP address, IPv6 by /64) may create `config.rateLimit.burst` links at once (default 20), then `createsPerMinute` per minute (default 60). Beyond that it gets **429 + `Retry-After`**. Redirects are never limited, and a 429 is a client error, so it doesn't burn the availability SLO. `ShortlyRateLimiting` (ticket) means more than 10% of creates were refused for 30 minutes. Find out who:
 
 ```bash
-kubectl -n prod logs -l app.kubernetes.io/name=shortly --since=1h | grep '"rate limited"' \
+kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --since=1h | grep '"rate limited"' \
   | python3 -c 'import json,sys,collections; c=collections.Counter(json.loads(l)["client"] for l in sys.stdin); print(c.most_common(10))'
 ```
 
@@ -770,13 +770,13 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 | test → `test_ratelimit.py` | The limiter's semantics changed (burst, sustained rate, retry time), or the in-memory and Postgres limiters disagree | `uv run pytest tests/test_ratelimit.py -v`; the contract tests run both limiters on the same fake clock |
 | test → other `test_deploy_gate.py` tests | `deploy.sh` or `verify-image.sh` lost a check | Read the failing case: each one names the image that must be refused |
 | k8s → Lint and schema-validate | A chart manifest or a policy in `deploy/policies/` fails its schema | Run the step's `kubeconform` command locally; the error names the field |
-| k8s → backup and restore | `backup: the Job did not complete` (its logs print above: database, bucket, credentials), `a pod that isn't a backup pod reached the backup bucket` (the `seaweedfs` NetworkPolicy), `the scratch database never became ready` (the download failed: the `fetch` log prints above), `restored schema at revision …` or `restored N links, expected M` (the dump is incomplete or stale), `canary link … is not in the restored database` | `SOURCE=prod KEEP=1 scripts/restore-drill.sh` against kind; see Backup job not running |
-| k8s → expired-link cleanup | `index … missing or invalid` (the concurrent index build failed: see the migrate Job's logs), `the Job did not complete` (its logs print above: DB access, provenance, Pod Security), `left …, want e2efut1,e2enew1` (the cutoff or grace period changed) | `kubectl -n staging logs job/cleanup-e2e`; `uv run pytest tests/test_cleanup.py -v` |
-| k8s → gateway | `prod /readyz via sho.rt.localhost` or `staging …` (the route isn't attached or the proxy isn't ready), `create through sho.rt.localhost failed`, `a prod link resolved through staging's hostname` (two routes claim one hostname), `an unknown hostname was routed somewhere` (a route without `hostnames`) | `kubectl -n gateway get gateway shortly`; `kubectl -n prod get httproute shortly -o yaml` (status: `Accepted`, `ResolvedRefs`); `kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50` |
-| k8s → network policies | `a non-Prometheus pod scraped prod's metrics port` or `a pod that isn't shortly reached Postgres` (a policy missing, or the CNI not enforcing NetworkPolicy), or a `control:` line (the allowed path broke: check labels and `networkPolicy` values) | `kubectl -n prod get networkpolicy`; the step's commands in `scripts/k8s-e2e.sh` |
+| k8s → backup and restore | `backup: the Job did not complete` (its logs print above: database, bucket, credentials), `a pod that isn't a backup pod reached the backup bucket` (the `seaweedfs` NetworkPolicy), `the scratch database never became ready` (the download failed: the `fetch` log prints above), `restored schema at revision …` or `restored N links, expected M` (the dump is incomplete or stale), `canary link … is not in the restored database` | `SOURCE=shortly-prod KEEP=1 scripts/restore-drill.sh` against kind; see Backup job not running |
+| k8s → expired-link cleanup | `index … missing or invalid` (the concurrent index build failed: see the migrate Job's logs), `the Job did not complete` (its logs print above: DB access, provenance, Pod Security), `left …, want e2efut1,e2enew1` (the cutoff or grace period changed) | `kubectl -n shortly-staging logs job/cleanup-e2e`; `uv run pytest tests/test_cleanup.py -v` |
+| k8s → gateway | `prod /readyz via sho.rt.localhost` or `staging …` (the route isn't attached or the proxy isn't ready), `create through sho.rt.localhost failed`, `a prod link resolved through staging's hostname` (two routes claim one hostname), `an unknown hostname was routed somewhere` (a route without `hostnames`) | `kubectl -n gateway get gateway shortly`; `kubectl -n shortly-prod get httproute shortly -o yaml` (status: `Accepted`, `ResolvedRefs`); `kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50` |
+| k8s → network policies | `a non-Prometheus pod scraped prod's metrics port` or `a pod that isn't shortly reached Postgres` (a policy missing, or the CNI not enforcing NetworkPolicy), or a `control:` line (the allowed path broke: check labels and `networkPolicy` values) | `kubectl -n shortly-prod get networkpolicy`; the step's commands in `scripts/k8s-e2e.sh` |
 | k8s → admission checks | `was ADMITTED, expected refused` (the policy isn't enforcing), `was refused, expected admitted` (the release no longer verifies in-cluster: often no network to Sigstore), `not by the provenance policy` (Pod Security or a manifest error), or no allowlist reports | `scripts/admission-check.sh` against kind; `kubectl -n kyverno logs deploy/kyverno-admission-controller` |
 | k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready); `load too light` (CPU never got 10% past the target: raise the drill's `RATE`); or no scale-up despite high CPU (a real HPA problem) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
-| k8s → rate limit | `only N creates succeeded, the burst is 20` (limit lower than the chart says, or DB errors), `at most N allowed` or `none refused` (limit missing, or counted per pod instead of shared; the check allows for the tokens that refill while it runs), `another client was refused` (the limit isn't per client: check `forwardedAllowIps`) | `kubectl -n prod logs -l app.kubernetes.io/name=shortly \| grep 'rate limited'`; the step's `wget` command from `postgres-0` |
+| k8s → rate limit | `only N creates succeeded, the burst is 20` (limit lower than the chart says, or DB errors), `at most N allowed` or `none refused` (limit missing, or counted per pod instead of shared; the check allows for the tokens that refill while it runs), `another client was refused` (the limit isn't per client: check `forwardedAllowIps`) | `kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly \| grep 'rate limited'`; the step's `wget` command from `postgres-0` |
 | k8s → drill | Deploy, promotion or rollback broke | `scripts/cluster.sh up && docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh`; diagnostics print on failure |
 
 A test that fails with warnings as errors (`filterwarnings = error`) usually means a dependency deprecated something. Fix the call site; don't silence the warning globally.
@@ -791,12 +791,12 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | --- | --- |
 | Create (idempotent) | `scripts/cluster.sh up` |
 | Tear down everything | `scripts/cluster.sh down` |
-| Reset one environment's data (then redeploy so migrations recreate the schema) | `kubectl -n staging delete statefulset postgres && kubectl -n staging delete pvc data-postgres-0 && scripts/cluster.sh up` |
+| Reset one environment's data (then redeploy so migrations recreate the schema) | `kubectl -n shortly-staging delete statefulset postgres && kubectl -n shortly-staging delete pvc data-postgres-0 && scripts/cluster.sh up` |
 | Deploy a local build (kind only; tags are refused elsewhere) | `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev` |
 | Check an image's provenance | `scripts/verify-image.sh ghcr.io/statsguy/shortly@sha256:…` |
 | Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step; `E2E_SUITE=platform` or `delivery` runs one CI half) |
 | Autoscaling drill only | `scripts/hpa-drill.sh` (stops once the HPA adds a ready pod; `RATE=1500 DURATION=240s FULL=1` for a longer push to the end, with k6's summary) |
-| Watch autoscaling | `kubectl -n prod get hpa shortly -w` |
+| Watch autoscaling | `kubectl -n shortly-prod get hpa shortly -w` |
 | Platform state | `kubectl -n argocd get applications -l app.kubernetes.io/part-of=platform`, or the Argo CD UI |
 | Try a platform change before merging it | Push the branch, then `PLATFORM_REVISION=$(git rev-parse HEAD) scripts/cluster.sh up`; `scripts/cluster.sh up` (back to `main`) when done |
 | Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 scripts/cluster.sh up` (on a fresh cluster: switching it off later removes the Application but leaves its resources running, by design) |
@@ -815,22 +815,22 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Grafana (dashboard "shortly / SLOs") | http://grafana.localhost:8090, user `admin` |
 | Argo CD UI | http://argocd.localhost:8090, user `admin`; password: `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' \| base64 -d` |
 | Grafana password | `kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' \| base64 -d` |
-| Back up a database now | `kubectl -n prod create job backup-manual-$(date +%s) --from=cronjob/postgres-backup` |
-| List backups / prove the newest restores | `LIST=1 SOURCE=prod scripts/restore-drill.sh` / `SOURCE=prod scripts/restore-drill.sh` (`KEEP=1` keeps the scratch DB) |
-| Run the expired-link cleanup now | `kubectl -n prod create job cleanup-manual-$(date +%s) --from=cronjob/shortly-cleanup` |
-| Read a pod's metrics (port 9100) | `kubectl -n prod port-forward svc/shortly 9100` → http://localhost:9100/metrics |
+| Back up a database now | `kubectl -n shortly-prod create job backup-manual-$(date +%s) --from=cronjob/postgres-backup` |
+| List backups / prove the newest restores | `LIST=1 SOURCE=shortly-prod scripts/restore-drill.sh` / `SOURCE=shortly-prod scripts/restore-drill.sh` (`KEEP=1` keeps the scratch DB) |
+| Run the expired-link cleanup now | `kubectl -n shortly-prod create job cleanup-manual-$(date +%s) --from=cronjob/shortly-cleanup` |
+| Read a pod's metrics (port 9100) | `kubectl -n shortly-prod port-forward svc/shortly 9100` → http://localhost:9100/metrics |
 | Monitoring checks only | `scripts/monitoring-check.sh` (includes the alert drill; `ALERT_DRILL=0` skips it) |
 | Alert drill only | `scripts/alert-drill.sh` (scales staging to 0 for about 90 s, then restores it) |
-| Open psql | `kubectl -n prod exec -it postgres-0 -- psql -U shortly shortly` |
-| Show the generated DB URL | `kubectl -n prod get secret shortly-db -o jsonpath='{.data.url}' \| base64 -d` |
-| Which image is running | `kubectl -n prod get rollout shortly -o jsonpath='{.spec.template.spec.containers[0].image}'` (staging: `deploy`) |
-| Uninstall the app only | `helm -n prod uninstall shortly` (data stays in the PVC) |
+| Open psql | `kubectl -n shortly-prod exec -it postgres-0 -- psql -U shortly shortly` |
+| Show the generated DB URL | `kubectl -n shortly-prod get secret shortly-db -o jsonpath='{.data.url}' \| base64 -d` |
+| Which image is running | `kubectl -n shortly-prod get rollout shortly -o jsonpath='{.spec.template.spec.containers[0].image}'` (staging: `deploy`) |
+| Uninstall the app only | `helm -n shortly-prod uninstall shortly` (data stays in the PVC) |
 
 `cluster.sh up` bootstraps Argo CD with Helm (pinned by version and digest, values in `deploy/kind/argocd-values.yaml`) and creates the two secrets the platform needs, which git never holds (`grafana-admin` in `monitoring`, the S3 identity `seaweedfs-s3` in `backups`). It then applies the platform's root Application (`deploy/argocd/platform-root.yaml`, with the node's architecture and `PLATFORM_REVISION`, default `main`) and waits until every platform Application is Synced and Healthy. Argo CD installs the rest from `deploy/argocd/platform/`, in two sync waves:
 - **Wave 0:** metrics-server, Envoy Gateway with the Gateway and the tool routes, Argo Rollouts with the Gateway API plugin for that architecture, kube-prometheus-stack, Kyverno, and the backup bucket.
 - **Wave 1:** the Kyverno policies, and the alerts on Argo CD.
 
-`cluster.sh up` then creates the `staging` and `prod` namespaces, which enforce the restricted Pod Security Standard. In each it generates a random password into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`, the network policies and the backup CronJob (`deploy/kind/postgres-backup.yaml`, with the bucket credentials copied into Secret `backup-s3`). It never overwrites existing Secrets.
+`cluster.sh up` then creates the `shortly-staging` and `shortly-prod` namespaces (one per app and environment; `scripts/lib/namespaces.sh`), which enforce the restricted Pod Security Standard. In each it generates a random password into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`, the network policies and the backup CronJob (`deploy/kind/postgres-backup.yaml`, with the bucket credentials copied into Secret `backup-s3`). It never overwrites existing Secrets.
 
 **On a cluster built before the platform moved under Argo CD** (PR #60), run `cluster.sh up` once. Argo CD adopts the running resources: each chart keeps its old Helm release name, so nothing is recreated. Once it has, `cluster.sh` deletes the old Helm records (`helm list -A` then shows no platform releases). Expect a minute or two of syncing, and `monitoring` restarting its pods once.
 
@@ -883,7 +883,7 @@ Mitigate first (usually a rollback), then communicate, then find the root cause,
 
 **During the incident**
 
-- [ ] Note the start time and the current revision (`helm -n prod history shortly`).
+- [ ] Note the start time and the current revision (`helm -n shortly-prod history shortly`).
 - [ ] Mitigate: roll back if a release is involved; restore the DB if not.
 - [ ] Capture evidence before it rotates: logs (`kubectl logs --previous`), events, a failing `request_id` and its trace.
 - [ ] Post status updates at the cadence above: what's affected, what you're doing, next update time.

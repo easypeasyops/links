@@ -7,6 +7,10 @@ app:
   name: shortly
   partOf: shortly
 
+# The environment's name (staging, prod), set by deploy/envs/<env>.yaml. Empty: the
+# namespace's name, which was the same word before namespaces became <app>-<env>.
+environment: ""
+
 image:
   repository: ghcr.io/statsguy/shortly
   # Deploy by digest (sha256:...) whenever possible: a digest is immutable, so the bits
@@ -114,7 +118,7 @@ env:
     value: "{{ .Values.otel.endpoint }}"
     when: "{{ .Values.otel.endpoint }}"
   - name: OTEL_RESOURCE_ATTRIBUTES
-    value: "deployment.environment.name={{ .Release.Namespace }}"
+    value: "deployment.environment.name={{ .Values.environment | default .Release.Namespace }}"
     when: "{{ .Values.otel.endpoint }}"
 
 migrations:
