@@ -600,7 +600,7 @@ Building a container is a different product from "pytest passed." This job build
 
 #### Job `k8s` — “Will Kubernetes actually run and recover this?”
 
-This is the expensive rehearsal. `scripts/k8s-e2e.sh` runs the same steps CI and a laptop use. Each step exists because a real incident or near-miss taught that unit tests are not enough. CI runs it as **two kind clusters in parallel** (`E2E_SUITE`): both deploy staging and prod (steps 0–3a), then *platform* runs 3b, 3c and 6–12 and *delivery* runs 4, 5 and 5b. A small job named `deploy to kind, rollback drill` reports both results as the one required check, so the ruleset doesn't change when the split does. A laptop runs everything in one cluster (`E2E_SUITE=all`, the default).
+This is the expensive rehearsal. `scripts/k8s-e2e.sh` runs the same steps CI and a laptop use. Each step exists because a real incident or near-miss taught that unit tests are not enough. CI runs it as **two kind clusters in parallel** (`E2E_SUITE`): both deploy staging and prod (steps 0–3a), then *platform* runs 3b, 3c and 6–12 and *delivery* runs 4, 5 and 5b. A small job named `deploy to kind, rollback drill` reports both results, so the ruleset doesn't change when the split does. Since PR 1.2a of the platform plan the same idea covers the whole workflow: one job named `ci` needs every other job and is the only required check, so jobs can be split, renamed or moved into reusable workflows without a ruleset change (a new job must be added to its `needs`, or it gates nothing; `tests/test_ci_gate.py` checks that). A laptop runs everything in one cluster (`E2E_SUITE=all`, the default).
 
 | Step (in `k8s-e2e.sh`) | What it proves | Why it is needed |
 | --- | --- | --- |
