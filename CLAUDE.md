@@ -35,7 +35,7 @@ the one reviewed with the code.
 - **One problem per PR, small enough to review in one sitting**: aim for about 200 changed
   lines (a sweet spot, not a hard limit). Tests and the docs updates the change needs ride
   in the same PR; vendored or generated files (`deploy/platform/metrics-server/components.yaml`,
-  `deploy/helm/shortly/rules/slo.yaml`) don't count, but say so in the description.
+  `deploy/helm/shortly/rules/slo.yaml`, `tests/golden/`) don't count, but say so in the description.
 - A bigger change goes in as a stack: each PR leaves `main` working and CI green on its own
   (dormant pieces first, for example a chart nothing applies yet, then the switch that uses
   it), and its description says where it sits in the stack.
