@@ -7,13 +7,13 @@
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: {{ include "shortly.fullname" . }}
+  name: {{ include "service.fullname" . }}
   labels:
-    {{- include "shortly.labels" . | nindent 4 }}
+    {{- include "service.labels" . | nindent 4 }}
 spec:
   selector:
     matchLabels:
-      {{- include "shortly.selectorLabels" . | nindent 6 }}
+      {{- include "service.selectorLabels" . | nindent 6 }}
   # Copied from each pod onto its series: tells a canary's metrics from the stable pods'
   # (templates/analysistemplate.yaml). Pods without it (no Rollout) just don't get it.
   podTargetLabels: [rollouts-pod-template-hash]

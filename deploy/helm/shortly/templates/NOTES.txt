@@ -1,9 +1,9 @@
-shortly {{ include "shortly.version" . }} → namespace {{ .Release.Namespace }} (revision {{ .Release.Revision }})
+shortly {{ include "service.version" . }} → namespace {{ .Release.Namespace }} (revision {{ .Release.Revision }})
 {{ if .Values.canary.enabled }}
-  kubectl -n {{ .Release.Namespace }} get rollout {{ include "shortly.fullname" . }} -w   # canary: phase, step, weights
+  kubectl -n {{ .Release.Namespace }} get rollout {{ include "service.fullname" . }} -w   # canary: phase, step, weights
   kubectl -n {{ .Release.Namespace }} get analysisrun                 # one per analysis step
 {{- else }}
-  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "shortly.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "service.fullname" . }}
 {{- end }}
-  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "shortly.fullname" . }} 8080:{{ .Values.service.port }}
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "service.fullname" . }} 8080:{{ .Values.service.port }}
   helm -n {{ .Release.Namespace }} history {{ .Release.Name }}      # releases you can roll back to

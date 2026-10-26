@@ -1,10 +1,10 @@
 {{/* The app's pod template, shared by the Deployment and (canary.enabled) the Rollout, so
      the two can never drift. The Rollout adds rollouts-pod-template-hash itself. */}}
-{{- define "shortly.podTemplate" -}}
+{{- define "service.podTemplate" -}}
 metadata:
   labels:
-    {{- include "shortly.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/version: {{ include "shortly.version" . | quote }}
+    {{- include "service.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/version: {{ include "service.version" . | quote }}
     app.kubernetes.io/part-of: {{ .Values.app.partOf }}
   annotations:
     prometheus.io/scrape: "true"
@@ -18,7 +18,7 @@ spec:
   automountServiceAccountToken: false # the app never talks to the Kubernetes API
   terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
   securityContext:
-    {{- include "shortly.podSecurityContext" . | nindent 4 }}
+    {{- include "service.podSecurityContext" . | nindent 4 }}
   # Spread replicas across nodes so one node failure isn't an outage.
   topologySpreadConstraints:
     - maxSkew: 1
@@ -26,10 +26,10 @@ spec:
       whenUnsatisfiable: ScheduleAnyway
       labelSelector:
         matchLabels:
-          {{- include "shortly.selectorLabels" . | nindent 10 }}
+          {{- include "service.selectorLabels" . | nindent 10 }}
   containers:
     - name: app
-      image: {{ include "shortly.image" . }}
+      image: {{ include "service.image" . }}
       imagePullPolicy: {{ .Values.image.pullPolicy }}
       ports:
         - name: http
@@ -37,9 +37,9 @@ spec:
         - name: metrics
           containerPort: {{ .Values.config.metricsPort }}
       env:
-        {{- include "shortly.env" . | nindent 8 }}
+        {{- include "service.env" . | nindent 8 }}
       securityContext:
-        {{- include "shortly.containerSecurityContext" . | nindent 8 }}
+        {{- include "service.containerSecurityContext" . | nindent 8 }}
       # startupProbe gates the other two, so a slow start isn't killed by liveness.
       startupProbe:
         httpGet: { path: /healthz, port: http }

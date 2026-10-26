@@ -4,9 +4,9 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "shortly.fullname" . }}
+  name: {{ include "service.fullname" . }}
   labels:
-    {{- include "shortly.labels" . | nindent 4 }}
+    {{- include "service.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
@@ -21,7 +21,7 @@ spec:
       maxSurge: 1
   selector:
     matchLabels:
-      {{- include "shortly.selectorLabels" . | nindent 6 }}
+      {{- include "service.selectorLabels" . | nindent 6 }}
   template:
-    {{- include "shortly.podTemplate" . | nindent 4 }}
+    {{- include "service.podTemplate" . | nindent 4 }}
 {{- end }}

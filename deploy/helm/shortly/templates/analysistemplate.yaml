@@ -1,4 +1,4 @@
-{{- if include "shortly.canaryAnalysis" . }}
+{{- if include "service.canaryAnalysis" . }}
 {{- $a := .Values.canary.analysis }}
 {{- /* Argo's own placeholders, kept away from Helm's template engine. */}}
 {{- $hash := "{{args.canary-hash}}" }}
@@ -11,9 +11,9 @@
 apiVersion: argoproj.io/v1alpha1
 kind: AnalysisTemplate
 metadata:
-  name: {{ include "shortly.fullname" . }}-canary
+  name: {{ include "service.fullname" . }}-canary
   labels:
-    {{- include "shortly.labels" . | nindent 4 }}
+    {{- include "service.labels" . | nindent 4 }}
 spec:
   args:
     - name: canary-hash
@@ -97,7 +97,7 @@ spec:
                       - { name: tmp, mountPath: /tmp }
                 volumes:
                   - name: scripts
-                    configMap: { name: {{ include "shortly.fullname" $ }}-canary-traffic }
+                    configMap: { name: {{ include "service.fullname" $ }}-canary-traffic }
                   - name: tmp
                     emptyDir: { sizeLimit: 64Mi }
 {{- end }}{{ end }}
@@ -117,9 +117,9 @@ spec:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "shortly.fullname" . }}-canary-traffic
+  name: {{ include "service.fullname" . }}-canary-traffic
   labels:
-    {{- include "shortly.labels" . | nindent 4 }}
+    {{- include "service.labels" . | nindent 4 }}
 data:
   canary-traffic.js: |
     {{- .Files.Get "files/canary-traffic.js" | nindent 4 }}

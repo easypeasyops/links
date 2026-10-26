@@ -6,13 +6,13 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "shortly.fullname" . }}
+  name: {{ include "service.fullname" . }}
   labels:
-    {{- include "shortly.labels" . | nindent 4 }}
+    {{- include "service.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "shortly.selectorLabels" . | nindent 6 }}
+      {{- include "service.selectorLabels" . | nindent 6 }}
   policyTypes: [Ingress, Egress]
   ingress:
     - ports:
@@ -26,22 +26,22 @@ spec:
       from:
         {{- required "networkPolicy.metricsFrom must name the scraper" .Values.networkPolicy.metricsFrom | toYaml | nindent 8 }}
   egress:
-    {{- include "shortly.egress" . | nindent 4 }}
+    {{- include "service.egress" . | nindent 4 }}
 {{- if .Values.cleanup.enabled }}
 ---
 # The cleanup Job's pods: nothing may connect to them; they may reach DNS and the database.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "shortly.fullname" . }}-cleanup
+  name: {{ include "service.fullname" . }}-cleanup
   labels:
-    {{- include "shortly.labels" . | nindent 4 }}
+    {{- include "service.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "shortly.cleanupSelectorLabels" . | nindent 6 }}
+      {{- include "service.cleanupSelectorLabels" . | nindent 6 }}
   policyTypes: [Ingress, Egress]
   egress:
-    {{- include "shortly.egress" . | nindent 4 }}
+    {{- include "service.egress" . | nindent 4 }}
 {{- end }}
 {{- end }}
