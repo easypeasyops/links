@@ -161,3 +161,31 @@ def test_real_release_is_refused_for_the_wrong_signer() -> None:
     )
     assert result.returncode != 0
     assert "REFUSED" in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("ref", "reason"),
+    [
+        ("docker.io/statsguy/shortly@sha256:" + "a" * 64, "is not a ghcr.io/<owner>/<repo> image"),
+        ("ghcr.io/evil/shortly@sha256:" + "a" * 64, "is not one of statsguy's images"),
+        ("ghcr.io/statsguy/a/b@sha256:" + "a" * 64, "is not a ghcr.io/<owner>/<repo> image"),
+    ],
+)
+def test_verify_refuses_images_no_repo_of_ours_can_vouch_for(ref: str, reason: str) -> None:
+    """Keyed by identity (platform plan 1.5): the image's name says which repo must have
+    built it, and that repo must be one of ours. Refused before any network call."""
+    result = subprocess.run([str(VERIFY), ref], capture_output=True, text=True)
+    assert result.returncode == 1
+    assert reason in result.stderr
+
+
+@pytest.mark.integration
+def test_real_release_is_refused_as_another_repos_image() -> None:
+    """The release's provenance names statsguy/shortly: claimed for another repo, it fails."""
+    _real_gh()
+    env = {**os.environ, "VERIFY_REPO": "statsguy/pager"}
+    result = subprocess.run(
+        [str(VERIFY), _documented_release()], capture_output=True, text=True, env=env
+    )
+    assert result.returncode != 0
+    assert "REFUSED" in result.stderr
