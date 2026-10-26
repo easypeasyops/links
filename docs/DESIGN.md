@@ -574,6 +574,8 @@ flowchart TB
 
 #### Job `check` — “Is the code correct?”
 
+The generic jobs live in reusable workflows that any app's CI calls with its own inputs (platform plan, Phase 1): `reusable-python-check.yml` (`check`) and `reusable-image.yml` (`image`). `ci.yml` keeps what is shortly's own: the change scope, the kind e2e drills and the `ci` gate. Their checks are named `<caller> / <job>` (`check / lint, type-check, test`); only `ci` is required. The release workflow stays in `release.yml` for now: a reusable workflow becomes the signer of the provenance, so moving it waits for the identity-based admission policy (plan PR 1.5).
+
 | Piece | Catches | If missing |
 | --- | --- | --- |
 | `uv sync --locked` | Someone edited `pyproject.toml` without refreshing `uv.lock` | CI and laptops resolve different dependency graphs; "works on my machine" |
@@ -631,7 +633,7 @@ Chart lint + kubeconform run *before* kind starts, so a template typo fails in s
 - The staging alert drill runs alongside the prod drills.
 - Argo CD installs the platform's charts side by side (one sync wave), and each kind job installs only what its half uses (the delivery cluster skips Kyverno and backups).
 - The two halves run on two runners at once.
-- A PR that changes only Markdown skips the work in **all three jobs**, not just the cluster: `scripts/ci-scope.sh` runs first in each and the other steps run only if it says so, so a docs PR is mergeable in under a minute instead of eight (PR #50; a pure-docs PR was blocked by `check` and `image` for about 75 s and by the kind jobs before that). The jobs still report success, because they are required checks. A workflow-level paths filter would leave those checks pending forever and block the merge. `docs/RUNBOOK.md` doesn't count as Markdown-only, because the tests, the admission checks and the e2e read the release digest from it, so a record-digest PR runs everything. Pushes to main always run everything. `tests/test_ci_scope.py` pins which changes skip.
+- A PR that changes only Markdown skips the work in **all three jobs**, not just the cluster: a `change scope` job runs `scripts/ci-scope.sh` once and passes its answer to every job, whose steps run only if it says so, so a docs PR is mergeable in under a minute instead of eight (PR #50; a pure-docs PR was blocked by `check` and `image` for about 75 s and by the kind jobs before that). The jobs still report success, because they are required checks. A workflow-level paths filter would leave those checks pending forever and block the merge. `docs/RUNBOOK.md` doesn't count as Markdown-only, because the tests, the admission checks and the e2e read the release digest from it, so a record-digest PR runs everything. Pushes to main always run everything. `tests/test_ci_scope.py` pins which changes skip.
 
 Together these cut the job from 9m24s to **5m07s** (PR #27): cluster setup 117 s → 62 s, the e2e 364 s → 166 s. The alert drill took 101 s and finished entirely behind the prod drills, and the HPA drill stopped at +58 s instead of running its full 100 s. A further split into two parallel kind clusters would save about another minute, at double the CI minutes and duplicated setup.
 

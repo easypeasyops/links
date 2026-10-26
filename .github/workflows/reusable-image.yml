@@ -1,0 +1,65 @@
+name: Image checks (reusable)
+
+# Build the image, scan it, and run the app's smoke test against it: the `image` job any
+# app's CI calls (platform plan, Phase 1). With `run: false` (a docs-only change) the job
+# reports success without doing the work.
+on:
+  workflow_call:
+    inputs:
+      run:
+        description: "false: report success without doing the work (docs-only change)"
+        type: boolean
+        default: true
+      context:
+        type: string
+        default: .
+      smoke-command:
+        description: "Smoke test to run; the built image's local tag is in $IMAGE"
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    name: build, scan, smoke-test image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      IMAGE: app:ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.run
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: inputs.run
+
+      - name: Build
+        if: inputs.run
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ${{ inputs.context }}
+          load: true # into the local daemon, so the next steps can use it
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Fail on HIGH/CRITICAL vulns that have a fix available. Unfixed ones can't be
+      # acted on yet, and failing on them just trains people to ignore the scanner.
+      - name: Scan image
+        if: inputs.run
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE }}
+          version: v0.70.0
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Smoke test
+        if: inputs.run
+        run: ${{ inputs.smoke-command }}
