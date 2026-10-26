@@ -114,8 +114,9 @@ wait_synced() {
     [[ "$state" == Synced/Healthy ]] && return 0
     if ((SECONDS - last >= 30)); then # progress, so a slow sync shows where it is
       last=$SECONDS
+      # Each Application's state, and for one that isn't healthy, what holds it back.
       echo "  ... $app is ${state:-not there yet} after $((SECONDS - t0))s; $(kubectl -n argocd get applications \
-        -o jsonpath='{range .items[*]}{.metadata.name}={.status.sync.status}/{.status.health.status} {end}' 2>/dev/null)"
+        -o jsonpath='{range .items[*]}{.metadata.name}={.status.sync.status}/{.status.health.status}{range .status.resources[?(@.health.status=="Degraded")]} [Degraded {.kind}/{.name}: {.health.message}]{end}{range .status.resources[?(@.health.status=="Progressing")]} [Progressing {.kind}/{.name}]{end} {end}' 2>/dev/null)"
     fi
     sleep 3
   done

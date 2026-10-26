@@ -733,6 +733,8 @@ Every CI step can be reproduced locally with the same command; reproduce before 
 
 The kind e2e runs as two jobs in parallel, `kind e2e (platform)` and `kind e2e (delivery)`; the check `deploy to kind, rollback drill` fails if either does, so open the failing one. The one required check is `ci`: it lists every job's result in its log and fails if any job failed, so start from the job it names. Platform covers steps 3b, 3c and 6–12 (rate limit, front door, HPA, monitoring, admission, network policies, cleanup, backups, GitOps); delivery covers 4, 5 and 5b (rollbacks and canaries). To rerun just one half locally: `E2E_SUITE=delivery IMAGE=shortly:e2e scripts/k8s-e2e.sh`.
 
+A slow or stuck platform install: the kind job's progress lines name what holds each Application back (`[Degraded Deployment/…: message]`), and the step "Platform start-up report" lists image pulls and the slowest pods to become Ready.
+
 Checks from the reusable workflows are named `<job> / <step job>`: `check / lint, type-check, test` and `image / build, scan, smoke-test image`; their steps are in `.github/workflows/reusable-*.yml`.
 
 A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the work in every CI job (`scripts/ci-scope.sh`): every check passes in under a minute with the notice "Docs-only change". If a PR you expected to be tested shows that notice, check its file list. A RUNBOOK change always runs everything, because the tests and the e2e read the current release digest from it.
