@@ -9,9 +9,9 @@
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: {{ include "shortly.fullname" . }}-migrate-{{ .Release.Revision }}
+  name: {{ include "service.fullname" . }}-migrate-{{ .Release.Revision }}
   labels:
-    {{- include "shortly.labels" . | nindent 4 }}
+    {{- include "service.labels" . | nindent 4 }}
     app.kubernetes.io/component: migrate
   annotations:
     "helm.sh/hook": pre-install,pre-upgrade
@@ -25,17 +25,17 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "shortly.selectorLabels" . | nindent 8 }}
+        {{- include "service.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: migrate
         app.kubernetes.io/part-of: {{ .Values.app.partOf }}
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false
       securityContext:
-        {{- include "shortly.podSecurityContext" . | nindent 8 }}
+        {{- include "service.podSecurityContext" . | nindent 8 }}
       containers:
         - name: migrate
-          image: {{ include "shortly.image" . }}
+          image: {{ include "service.image" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           # `alembic upgrade head`, except when the database is AHEAD of this image: its
           # revision is one this release doesn't know, which happens exactly on a rollback
@@ -54,9 +54,9 @@ spec:
               fi
               exit "$rc"
           env:
-            {{- include "shortly.env" . | nindent 12 }}
+            {{- include "service.env" . | nindent 12 }}
           securityContext:
-            {{- include "shortly.containerSecurityContext" . | nindent 12 }}
+            {{- include "service.containerSecurityContext" . | nindent 12 }}
           resources:
             requests: { cpu: 50m, memory: 128Mi }
             limits: { memory: 256Mi }

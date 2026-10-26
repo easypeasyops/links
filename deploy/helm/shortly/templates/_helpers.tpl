@@ -1,16 +1,16 @@
-{{- define "shortly.fullname" -}}
+{{- define "service.fullname" -}}
 {{- .Release.Name | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
-{{- define "shortly.labels" -}}
+{{- define "service.labels" -}}
 app.kubernetes.io/name: {{ .Values.app.name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
-app.kubernetes.io/version: {{ include "shortly.version" . | quote }}
+app.kubernetes.io/version: {{ include "service.version" . | quote }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
 helm.sh/chart: {{ printf "%s-%s" .Chart.Name .Chart.Version }}
 {{- end -}}
 
-{{- define "shortly.selectorLabels" -}}
+{{- define "service.selectorLabels" -}}
 app.kubernetes.io/name: {{ .Values.app.name }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
@@ -18,14 +18,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/* Labels of the cleanup Job's pods. Deliberately NOT the selector labels: a pod matching
      those is counted by the HPA (its CPU skews the average) and the PodDisruptionBudget.
      part-of ties every pod of the chart together for the Postgres network policy. */}}
-{{- define "shortly.cleanupSelectorLabels" -}}
+{{- define "service.cleanupSelectorLabels" -}}
 app.kubernetes.io/name: {{ .Values.app.name }}-cleanup
 app.kubernetes.io/instance: {{ .Release.Name }}
 app.kubernetes.io/part-of: {{ .Values.app.partOf }}
 {{- end -}}
 
 {{/* Egress every pod of the chart needs: DNS, and the database. Nothing else. */}}
-{{- define "shortly.egress" -}}
+{{- define "service.egress" -}}
 - to:
     - namespaceSelector:
         matchLabels: { kubernetes.io/metadata.name: kube-system }
@@ -44,7 +44,7 @@ app.kubernetes.io/part-of: {{ .Values.app.partOf }}
 {{- end -}}
 
 {{/* Image reference: digest wins over tag. Fails the render if neither is set. */}}
-{{- define "shortly.image" -}}
+{{- define "service.image" -}}
 {{- if .Values.image.digest -}}
 {{ .Values.image.repository }}@{{ .Values.image.digest }}
 {{- else if .Values.image.tag -}}
@@ -58,7 +58,7 @@ app.kubernetes.io/part-of: {{ .Values.app.partOf }}
 Version for the app.kubernetes.io/version label. Label values allow only [A-Za-z0-9_.-],
 max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
 */}}
-{{- define "shortly.version" -}}
+{{- define "service.version" -}}
 {{- if .Values.image.tag -}}
 {{- .Values.image.tag | trunc 63 | trimSuffix "-" | trimSuffix "." -}}
 {{- else -}}
@@ -67,7 +67,7 @@ max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
 {{- end -}}
 
 {{/* Env shared by the app and the migration Job — one source of truth. */}}
-{{- define "shortly.env" -}}
+{{- define "service.env" -}}
 - name: SHORTLY_DATABASE_URL
   valueFrom:
     secretKeyRef:
@@ -108,7 +108,7 @@ max 63 chars — so a digest must lose its "sha256:" prefix (":" is illegal).
 {{- end -}}
 
 {{/* Restricted Pod Security Standard: what every container in this chart runs with. */}}
-{{- define "shortly.podSecurityContext" -}}
+{{- define "service.podSecurityContext" -}}
 runAsNonRoot: true
 runAsUser: 10001
 runAsGroup: 10001
@@ -117,7 +117,7 @@ seccompProfile:
   type: RuntimeDefault
 {{- end -}}
 
-{{- define "shortly.containerSecurityContext" -}}
+{{- define "service.containerSecurityContext" -}}
 allowPrivilegeEscalation: false
 readOnlyRootFilesystem: true
 capabilities:
@@ -125,12 +125,12 @@ capabilities:
 {{- end -}}
 
 {{/* The fewest replicas that can be running: the HPA floor, or the fixed count. */}}
-{{- define "shortly.minReplicas" -}}
+{{- define "service.minReplicas" -}}
 {{- if .Values.autoscaling.enabled }}{{ .Values.autoscaling.minReplicas }}{{ else }}{{ .Values.replicaCount }}{{ end }}
 {{- end -}}
 
 {{/* "true" when a canary is judged by Prometheus analysis: only where Prometheus scrapes
      the app (the ServiceMonitor's condition). Empty otherwise: no metrics, no analysis. */}}
-{{- define "shortly.canaryAnalysis" -}}
+{{- define "service.canaryAnalysis" -}}
 {{- if and .Values.canary.enabled .Values.monitoring.enabled (.Capabilities.APIVersions.Has "monitoring.coreos.com/v1/ServiceMonitor") }}true{{ end -}}
 {{- end -}}

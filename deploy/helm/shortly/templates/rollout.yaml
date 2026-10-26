@@ -2,7 +2,7 @@
 {{- if not .Values.gateway.enabled }}
 {{- fail "canary.enabled needs gateway.enabled: the canary's share of traffic is set on the HTTPRoute" }}
 {{- end }}
-{{- $analysis := include "shortly.canaryAnalysis" . }}
+{{- $analysis := include "service.canaryAnalysis" . }}
 # Argo Rollouts canary (docs/DESIGN.md, Canary releases). Same pods as the Deployment it
 # replaces (templates/_podtemplate.tpl); what differs is how a new version takes over:
 #   setWeight 10 → analysis → setWeight 50 → analysis → 100%
@@ -12,9 +12,9 @@
 apiVersion: argoproj.io/v1alpha1
 kind: Rollout
 metadata:
-  name: {{ include "shortly.fullname" . }}
+  name: {{ include "service.fullname" . }}
   labels:
-    {{- include "shortly.labels" . | nindent 4 }}
+    {{- include "service.labels" . | nindent 4 }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
@@ -29,17 +29,17 @@ spec:
     revisions: {{ .Values.canary.rollbackWindow }}
   selector:
     matchLabels:
-      {{- include "shortly.selectorLabels" . | nindent 6 }}
+      {{- include "service.selectorLabels" . | nindent 6 }}
   template:
-    {{- include "shortly.podTemplate" . | nindent 4 }}
+    {{- include "service.podTemplate" . | nindent 4 }}
   strategy:
     canary:
-      stableService: {{ include "shortly.fullname" . }}-stable
-      canaryService: {{ include "shortly.fullname" . }}-canary
+      stableService: {{ include "service.fullname" . }}-stable
+      canaryService: {{ include "service.fullname" . }}-canary
       trafficRouting:
         plugins:
           argoproj-labs/gatewayAPI:
-            httpRoute: {{ include "shortly.fullname" . }}
+            httpRoute: {{ include "service.fullname" . }}
             namespace: {{ .Release.Namespace }}
       steps:
         {{- range .Values.canary.weights }}
@@ -47,7 +47,7 @@ spec:
         {{- if $analysis }}
         - analysis:
             templates:
-              - templateName: {{ include "shortly.fullname" $ }}-canary
+              - templateName: {{ include "service.fullname" $ }}-canary
             args:
               - name: canary-hash
                 valueFrom:
@@ -67,14 +67,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "shortly.fullname" $ }}-{{ $role }}
+  name: {{ include "service.fullname" $ }}-{{ $role }}
   labels:
-    {{- include "shortly.labels" $ | nindent 4 }}
+    {{- include "service.labels" $ | nindent 4 }}
     app.kubernetes.io/component: {{ $role }}
 spec:
   type: ClusterIP
   selector:
-    {{- include "shortly.selectorLabels" $ | nindent 4 }}
+    {{- include "service.selectorLabels" $ | nindent 4 }}
   ports:
     - name: http
       port: {{ $.Values.service.port }}

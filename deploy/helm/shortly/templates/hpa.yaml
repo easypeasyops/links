@@ -12,9 +12,9 @@
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "shortly.fullname" . }}
+  name: {{ include "service.fullname" . }}
   labels:
-    {{- include "shortly.labels" . | nindent 4 }}
+    {{- include "service.labels" . | nindent 4 }}
 spec:
   scaleTargetRef: # the Rollout when canary.enabled: it has the same scale subresource
     {{- if .Values.canary.enabled }}
@@ -24,7 +24,7 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     {{- end }}
-    name: {{ include "shortly.fullname" . }}
+    name: {{ include "service.fullname" . }}
   minReplicas: {{ .Values.autoscaling.minReplicas }}
   maxReplicas: {{ .Values.autoscaling.maxReplicas }}
   metrics:

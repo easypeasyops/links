@@ -1,15 +1,15 @@
-{{- if and .Values.podDisruptionBudget.enabled (gt (int (include "shortly.minReplicas" .)) 1) }}
+{{- if and .Values.podDisruptionBudget.enabled (gt (int (include "service.minReplicas" .)) 1) }}
 # Voluntary disruptions (node drains, cluster upgrades) may evict pods only while at least
 # minAvailable stay up. Skipped for a single replica, where it would block every drain.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
-  name: {{ include "shortly.fullname" . }}
+  name: {{ include "service.fullname" . }}
   labels:
-    {{- include "shortly.labels" . | nindent 4 }}
+    {{- include "service.labels" . | nindent 4 }}
 spec:
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
   selector:
     matchLabels:
-      {{- include "shortly.selectorLabels" . | nindent 6 }}
+      {{- include "service.selectorLabels" . | nindent 6 }}
 {{- end }}

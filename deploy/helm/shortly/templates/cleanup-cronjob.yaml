@@ -7,9 +7,9 @@
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ include "shortly.fullname" . }}-cleanup
+  name: {{ include "service.fullname" . }}-cleanup
   labels:
-    {{- include "shortly.labels" . | nindent 4 }}
+    {{- include "service.labels" . | nindent 4 }}
     app.kubernetes.io/component: cleanup
 spec:
   schedule: {{ .Values.cleanup.schedule | quote }}
@@ -29,19 +29,19 @@ spec:
       template:
         metadata:
           labels:
-            {{- include "shortly.cleanupSelectorLabels" . | nindent 12 }}
+            {{- include "service.cleanupSelectorLabels" . | nindent 12 }}
         spec:
           restartPolicy: Never
           automountServiceAccountToken: false
           securityContext:
-            {{- include "shortly.podSecurityContext" . | nindent 12 }}
+            {{- include "service.podSecurityContext" . | nindent 12 }}
           containers:
             - name: cleanup
-              image: {{ include "shortly.image" . }}
+              image: {{ include "service.image" . }}
               imagePullPolicy: {{ .Values.image.pullPolicy }}
               command: ["python", "-m", "shortly.cleanup"]
               env:
-                {{- include "shortly.env" . | nindent 16 }}
+                {{- include "service.env" . | nindent 16 }}
                 - name: SHORTLY_CLEANUP_GRACE_DAYS
                   value: {{ .Values.cleanup.graceDays | quote }}
                 - name: SHORTLY_CLEANUP_BATCH_SIZE
@@ -49,7 +49,7 @@ spec:
                 - name: SHORTLY_CLEANUP_MAX_BATCHES
                   value: {{ .Values.cleanup.maxBatches | quote }}
               securityContext:
-                {{- include "shortly.containerSecurityContext" . | nindent 16 }}
+                {{- include "service.containerSecurityContext" . | nindent 16 }}
               resources:
                 requests: { cpu: 50m, memory: 96Mi }
                 limits: { memory: 192Mi }
