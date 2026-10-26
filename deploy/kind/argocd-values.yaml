@@ -11,6 +11,11 @@ configs:
     # No TLS between the browser and the server: the front door listens on 127.0.0.1 only
     # (scripts/cluster.sh). Never on a cluster where the server is exposed.
     server.insecure: true
+    # Keep each resource's health in the Application (.status.resources[].health): Argo CD
+    # 3 stopped writing it there by default. scripts/cluster.sh's progress lines, its
+    # failure output and CI's "Argo CD state" step read it to say what is Degraded and why.
+    # Costs more Application updates; nothing at this size.
+    controller.resource.health.persist: "true"
   cm:
     # Check the repository for changes every 60 s instead of 180 s: a merged promotion PR
     # reaches the cluster within a minute. (A webhook from GitHub would make it instant;
