@@ -27,7 +27,7 @@ spec:
       labels:
         {{- include "shortly.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: migrate
-        app.kubernetes.io/part-of: shortly
+        app.kubernetes.io/part-of: {{ .Values.app.partOf }}
     spec:
       restartPolicy: Never
       automountServiceAccountToken: false

@@ -592,7 +592,7 @@ kubectl -n prod get pods --show-labels                    # policies select by l
 | The app can't reach a new service (collector, external API) | The app's egress allows DNS and Postgres only | Add a rule to `networkPolicy.extraEgress` in the env values and redeploy |
 | Prometheus shows shortly targets down | Scraper pods don't match `networkPolicy.metricsFrom` (a namespace or label change) | Compare its labels with the policy; fix the values |
 | A new workload in `staging` or `prod` gets no traffic | Default-deny ingress: nothing lets it in | Write a NetworkPolicy for it, as `deploy/kind/network-policies.yaml` does for Postgres |
-| The app or a Job can't reach Postgres after a relabel | Postgres accepts pods labelled `app.kubernetes.io/part-of: shortly` only | Keep the label on every pod template, or change the label in both places at once: add the new one, deploy, then remove the old one (expand/contract) |
+| The app or a Job can't reach Postgres after a relabel | Postgres accepts pods labelled `app.kubernetes.io/part-of: shortly` only | The chart sets it from `app.partOf` in its values (default `shortly`). Keep it on every pod template, or change it in both places at once: add the new one, deploy, then remove the old one (expand/contract) |
 
 Don't delete a policy to "see if it helps" in prod. Check labels first: almost every case is a selector that no longer matches.
 
