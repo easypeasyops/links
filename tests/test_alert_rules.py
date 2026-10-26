@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -252,3 +253,29 @@ def test_alerts_route_to_the_right_receiver(
         f"--verify.receivers={receiver}", *labels,
     )  # fmt: skip
     assert result.returncode == 0, f"{labels} -> {result.stdout.strip()}, want {receiver}"
+
+
+def test_slo_generator_serves_any_app(tmp_path: Path) -> None:
+    """Platform plan 1.4: the spec, the output and the runbook link are the app's inputs."""
+    spec = tmp_path / "slos.yaml"
+    spec.write_text(
+        "window: 30d\n"
+        "runbook_url: https://example.test/pager/RUNBOOK.md#slo\n"
+        "slos:\n"
+        "  - name: ack-availability\n"
+        "    description: POST /ack answers without a server error\n"
+        "    objective: 0.999\n"
+        '    sli: { type: availability, selector: \'method="POST", route="/ack"\' }\n'
+    )
+    out = tmp_path / "chart/rules/slo.yaml"
+    script = [sys.executable, str(ROOT / "scripts/gen_slo_rules.py"), "--spec", str(spec)]
+    subprocess.run([*script, "--out", str(out)], check=True, capture_output=True)
+    rules = yaml.safe_load(out.read_text())
+    alerts = [r for g in rules["groups"] for r in g["rules"] if "alert" in r]
+    assert alerts
+    assert {a["annotations"]["runbook_url"] for a in alerts} == {
+        "https://example.test/pager/RUNBOOK.md#slo"
+    }
+    assert f"from {spec.resolve()}" in out.read_text().splitlines()[0]
+    check = subprocess.run([*script, "--out", str(out), "--check"], capture_output=True)
+    assert check.returncode == 0
