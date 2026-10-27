@@ -86,8 +86,8 @@ spec:
           from: Selector
           selector:
             matchExpressions:
-              # Old and per-app namespace names, during the move (platform plan, Phase 2).
-              - { key: kubernetes.io/metadata.name, operator: In, values: [staging, prod, shortly-staging, shortly-prod] }
+              # The app's namespaces: <app>-<env> (platform plan, Phase 2).
+              - { key: kubernetes.io/metadata.name, operator: In, values: [shortly-staging, shortly-prod] }
     # The dev tools (Argo CD, Grafana, Prometheus, Alertmanager). Its own port, so nothing on
     # the users' listener can reach them, and its own namespace allowlist.
     - name: tools

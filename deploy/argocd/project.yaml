@@ -12,9 +12,7 @@ spec:
   sourceRepos:
     - https://github.com/statsguy/shortly.git
   destinations:
-    - { server: https://kubernetes.default.svc, namespace: staging }
-    - { server: https://kubernetes.default.svc, namespace: prod }
-    # The per-app namespaces the environments move to (platform plan, Phase 2).
+    # One namespace per app and environment (platform plan, Phase 2).
     - { server: https://kubernetes.default.svc, namespace: shortly-staging }
     - { server: https://kubernetes.default.svc, namespace: shortly-prod }
   clusterResourceWhitelist: [] # nothing cluster-scoped

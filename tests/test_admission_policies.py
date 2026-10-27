@@ -41,7 +41,9 @@ def _docker() -> None:
     pytest.skip("Docker not available")
 
 
-def _pod(name: str, *images: str, init: tuple[str, ...] = (), ns: str = "prod") -> dict[str, Any]:
+def _pod(
+    name: str, *images: str, init: tuple[str, ...] = (), ns: str = "shortly-prod"
+) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "containers": [{"name": f"c{i}", "image": im} for i, im in enumerate(images)]
     }
@@ -158,8 +160,7 @@ def test_policies_cover_the_app_namespaces_only() -> None:
     for name in ("require-release-provenance.yaml", "allowed-images.yaml"):
         selector = _load(name)["spec"]["matchConstraints"]["namespaceSelector"]
         values = selector["matchExpressions"][0]["values"]
-        # The environment-named namespaces and the per-app ones, during the move (Phase 2).
-        assert sorted(values) == ["prod", "shortly-prod", "shortly-staging", "staging"], name
+        assert sorted(values) == ["shortly-prod", "shortly-staging"], name  # <app>-<env>
 
 
 # ------------------------------------------------------------------ Kyverno CLI cases

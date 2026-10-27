@@ -28,7 +28,6 @@ def _mapping(prefix: str | None) -> str:
     ("prefix", "want"),
     [
         (None, "staging prod|shortly-staging|shortly-prod|shortly-prod"),  # <app>-<env>
-        ("", "staging prod|staging|prod|prod"),  # a cluster from before the move
     ],
 )
 def test_environments_map_to_namespaces(prefix: str | None, want: str) -> None:
@@ -43,14 +42,13 @@ def test_scripts_name_no_namespace_directly() -> None:
         assert not hits, (path.name, hits)
 
 
-def test_project_and_backups_admit_both_namespace_names() -> None:
-    """Expand step (platform plan 2.1b): what selects the app's namespaces by name accepts the
-    environment-named ones and the per-app ones, so moving an environment breaks nothing."""
-    want = {"staging", "prod", "shortly-staging", "shortly-prod"}
+def test_project_and_backups_admit_the_apps_namespaces() -> None:
+    """What selects the app's namespaces by name lists <app>-<env> (platform plan, Phase 2)."""
+    want = {"shortly-staging", "shortly-prod"}
     project = yaml.safe_load((ROOT / "deploy/argocd/project.yaml").read_text())
     assert {d["namespace"] for d in project["spec"]["destinations"]} == want
     backups = (ROOT / "deploy/kind/backups.yaml").read_text()
-    assert "values: [staging, prod, shortly-staging, shortly-prod, restore-drill]" in backups
+    assert "values: [shortly-staging, shortly-prod, restore-drill]" in backups
     monitoring = yaml.safe_load((ROOT / "deploy/kind/monitoring-values.yaml").read_text())
     routes = monitoring["alertmanager"]["config"]["route"]["routes"]
-    assert ['namespace =~ "(.+-)?staging"'] in [r["matchers"] for r in routes]
+    assert ['namespace =~ ".+-staging"'] in [r["matchers"] for r in routes]
