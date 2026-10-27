@@ -45,7 +45,7 @@ dex:
 notifications:
   enabled: false
 applicationSet:
-  replicas: 0 # two Applications, written out: no generator needed (the chart has no off switch)
+  replicas: 1 # generates every app's Applications from the platform repo's apps/ (platform plan 3.3)
 
 controller:
   replicas: 1
