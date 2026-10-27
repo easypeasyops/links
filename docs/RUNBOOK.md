@@ -783,7 +783,7 @@ A test that fails with warnings as errors (`filterwarnings = error`) usually mea
 
 ## Local cluster operations
 
-The local environments are disposable: `scripts/cluster.sh up` rebuilds them from nothing in a few minutes.
+The local environments are disposable: `scripts/cluster.sh up` rebuilds them from nothing in a few minutes. The scripts take an environment (`staging`, `prod`) and look up its namespace in `scripts/lib/namespaces.sh`; a namespace argument (`NS=`, `SOURCE=`) is the namespace itself.
 
 **Prerequisites:** Docker Desktop running, plus `brew install kind kubectl helm` (Helm 4 or newer).
 

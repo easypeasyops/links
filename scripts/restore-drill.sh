@@ -18,7 +18,9 @@
 # Run by scripts/k8s-e2e.sh (step 11), so CI restores a fresh backup on every PR.
 set -euo pipefail
 
-SOURCE="${SOURCE:-prod}"
+# shellcheck source=scripts/lib/namespaces.sh
+source "$(dirname "$0")/lib/namespaces.sh"
+SOURCE="${SOURCE:-$PROD_NS}" # a namespace
 NS=restore-drill
 POD=restore
 RCLONE_IMAGE=rclone/rclone@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5

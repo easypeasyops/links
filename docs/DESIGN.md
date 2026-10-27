@@ -688,6 +688,8 @@ They must agree: `tests/test_admission_policies.py` asserts the policy and `veri
 
 One Helm chart (`deploy/helm/shortly`, Helm 4) deploys the same image digest to `staging`, then `prod`; per-environment differences live only in `deploy/envs/<env>.yaml`.
 
+An environment and the namespace it runs in are two things: `scripts/lib/namespaces.sh` maps one to the other for every script (today `staging` and `prod`; with `NAMESPACE_PREFIX=shortly-`, `shortly-staging` and `shortly-prod`, so apps can share a cluster: platform plan, Phase 2). `tests/test_namespaces.py` keeps scripts from writing a namespace directly.
+
 | | staging | prod |
 | --- | --- | --- |
 | Replicas | 1, fixed | HPA, 2–4 on CPU (chart default 2–10) |

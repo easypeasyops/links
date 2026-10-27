@@ -25,6 +25,9 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TIMEOUT="${DEPLOY_TIMEOUT:-3m}"
 
 case "$ENV" in staging | prod) ;; *) echo "unknown env: $ENV" >&2; exit 2 ;; esac
+# shellcheck source=scripts/lib/namespaces.sh
+source "$(dirname "$0")/lib/namespaces.sh"
+NS=$(ns_of "$ENV") # the namespace this environment runs in
 
 context=$(kubectl config current-context 2>/dev/null || true)
 
@@ -67,7 +70,7 @@ fi
 # clocks, deploy/kind/e2e-values.yaml). Not for real deploys.
 extra_values=()
 [[ -n "${DEPLOY_EXTRA_VALUES:-}" ]] && extra_values=(--values "$DEPLOY_EXTRA_VALUES")
-helm_args=(--namespace "$ENV" --values "$ROOT/deploy/envs/$ENV.yaml" "${image_args[@]}" \
+helm_args=(--namespace "$NS" --values "$ROOT/deploy/envs/$ENV.yaml" "${image_args[@]}" \
   ${extra_values[@]+"${extra_values[@]}"} "$@")
 canary=0
 if helm template shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
@@ -79,8 +82,8 @@ echo "deploying $REF → $ENV$( ((canary)) && echo ' (canary)')"
 if ((!canary)); then
   helm upgrade --install shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
     --rollback-on-failure --wait --timeout "$TIMEOUT"
-  kubectl -n "$ENV" rollout status deploy/shortly --timeout=60s
-  helm -n "$ENV" history shortly --max 5
+  kubectl -n "$NS" rollout status deploy/shortly --timeout=60s
+  helm -n "$NS" history shortly --max 5
   exit 0
 fi
 
@@ -93,16 +96,16 @@ fi
 # Knobs: CANARY_TIMEOUT (default 15m). The canary's synthetic traffic is a chart value
 # (canary.analysis.syntheticTraffic.enabled), e.g. --set ...enabled=false with real users.
 CANARY_TIMEOUT="${CANARY_TIMEOUT:-15m}"
-ro() { kubectl -n "$ENV" get rollout shortly -o jsonpath="$1" 2>/dev/null; }
+ro() { kubectl -n "$NS" get rollout shortly -o jsonpath="$1" 2>/dev/null; }
 seconds() { local d=$1; case "$d" in *m) echo $((${d%m} * 60)) ;; *s) echo "${d%s}" ;; *) echo "$d" ;; esac; }
 
 # One-time move from the Deployment to the Rollout without a gap: helm would delete the
 # Deployment as soon as the Rollout exists, before its pods are ready. "keep" makes helm
 # leave it serving; it is deleted below once the Rollout is Healthy.
 migrating=0
-if kubectl -n "$ENV" get deploy shortly >/dev/null 2>&1 && ! kubectl -n "$ENV" get rollout shortly >/dev/null 2>&1; then
+if kubectl -n "$NS" get deploy shortly >/dev/null 2>&1 && ! kubectl -n "$NS" get rollout shortly >/dev/null 2>&1; then
   echo "     migrating: the Deployment keeps serving until the Rollout is Healthy"
-  kubectl -n "$ENV" annotate deploy shortly helm.sh/resource-policy=keep --overwrite >/dev/null
+  kubectl -n "$NS" annotate deploy shortly helm.sh/resource-policy=keep --overwrite >/dev/null
   migrating=1
 fi
 
@@ -117,7 +120,7 @@ helm upgrade --install shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
   --rollback-on-failure --force-conflicts --wait=legacy --timeout "$TIMEOUT"
 
 # Let the controller see the new spec before reading its status.
-gen=$(kubectl -n "$ENV" get rollout shortly -o jsonpath='{.metadata.generation}')
+gen=$(kubectl -n "$NS" get rollout shortly -o jsonpath='{.metadata.generation}')
 for _ in $(seq 1 30); do [[ "$(ro '{.status.observedGeneration}')" == "$gen" ]] && break; sleep 1; done
 
 # The canary's traffic is part of its analysis (chart: canary.analysis.syntheticTraffic),
@@ -133,7 +136,7 @@ while :; do
   if [[ "$phase" == Degraded || "$(ro '{.status.abort}')" == true ]]; then result=aborted; break; fi
   if ((SECONDS > deadline)); then
     echo "     out of time after $CANARY_TIMEOUT: aborting the canary" >&2
-    kubectl -n "$ENV" patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}' >/dev/null
+    kubectl -n "$NS" patch rollout shortly --subresource=status --type=merge -p '{"status":{"abort":true}}' >/dev/null
     result=timeout; break
   fi
   if [[ -z "$first_stable" ]]; then # first install or migration: no steps, every pod is new
@@ -149,34 +152,34 @@ done
 if [[ "$result" == ok ]]; then
   # A new Rollout starts at 1 replica until the HPA raises it to its floor (the chart leaves
   # `replicas` to the HPA). Don't call it done, or remove the old Deployment, before then.
-  min=$(kubectl -n "$ENV" get hpa shortly -o jsonpath='{.spec.minReplicas}' 2>/dev/null || true)
+  min=$(kubectl -n "$NS" get hpa shortly -o jsonpath='{.spec.minReplicas}' 2>/dev/null || true)
   for _ in $(seq 1 60); do
     r=$(ro '{.status.readyReplicas}')
     ((${r:-0} >= ${min:-1})) && break
     sleep 2
   done
   if ((migrating)); then
-    kubectl -n "$ENV" delete deploy shortly --wait=false >/dev/null
+    kubectl -n "$NS" delete deploy shortly --wait=false >/dev/null
     echo "     migrated: the Rollout is Healthy; the old Deployment is deleted"
   fi
   echo "     Healthy: all traffic on the new version ($hash)"
-  helm -n "$ENV" history shortly --max 5
+  helm -n "$NS" history shortly --max 5
   exit 0
 fi
 
 # Aborted: the stable pods have kept (or got back) all traffic already. Roll helm back too,
 # so the release history and the Rollout's spec say what is actually running.
 echo "FAILED: canary $result: $(ro '{.status.message}')" >&2
-run=$(kubectl -n "$ENV" get analysisrun -l rollouts-pod-template-hash="$hash" \
+run=$(kubectl -n "$NS" get analysisrun -l rollouts-pod-template-hash="$hash" \
   --sort-by=.metadata.creationTimestamp -o name 2>/dev/null | tail -n 1)
 if [[ -n "$run" ]]; then
-  kubectl -n "$ENV" get "$run" -o jsonpath='{range .status.metricResults[*]}{"     "}{.name}{": "}{.phase}{" (last value "}{.measurements[-1:].value}{")"}{"\n"}{end}' >&2 || true
+  kubectl -n "$NS" get "$run" -o jsonpath='{range .status.metricResults[*]}{"     "}{.name}{": "}{.phase}{" (last value "}{.measurements[-1:].value}{")"}{"\n"}{end}' >&2 || true
 fi
-helm -n "$ENV" rollback shortly --force-conflicts --wait=legacy --timeout "$TIMEOUT" >&2
+helm -n "$NS" rollback shortly --force-conflicts --wait=legacy --timeout "$TIMEOUT" >&2
 # A rollback inside rollbackWindow skips the steps: back on stable within seconds.
 for _ in $(seq 1 60); do
   [[ "$(ro '{.status.phase}')" == Healthy ]] && break
   sleep 2
 done
-echo "     rolled back to helm revision $(helm -n "$ENV" history shortly --max 1 -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["revision"])'), Rollout $(ro '{.status.phase}')" >&2
+echo "     rolled back to helm revision $(helm -n "$NS" history shortly --max 1 -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)[-1]["revision"])'), Rollout $(ro '{.status.phase}')" >&2
 exit 1
