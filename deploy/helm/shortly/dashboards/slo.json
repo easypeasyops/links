@@ -39,8 +39,8 @@
         "definition": "label_values(slo:sli_error:ratio_rate5m, namespace)",
         "refresh": 2,
         "current": {
-          "text": "prod",
-          "value": "prod"
+          "text": "shortly-prod",
+          "value": "shortly-prod"
         }
       }
     ]

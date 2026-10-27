@@ -107,8 +107,8 @@ Requires Docker, [kind](https://kind.sigs.k8s.io), kubectl, and Helm 4.
 scripts/cluster.sh up                                          # kind + metrics-server + monitoring + Kyverno + staging/prod + Postgres
 scripts/deploy.sh staging ghcr.io/statsguy/shortly@sha256:<digest>
 scripts/deploy.sh prod    ghcr.io/statsguy/shortly@sha256:<digest>   # same digest: build once, deploy many
-helm -n prod history shortly                                   # what can I roll back to?
-helm -n prod rollback shortly <revision>
+helm -n shortly-prod history shortly                                   # what can I roll back to?
+helm -n shortly-prod rollback shortly <revision>
 ```
 
 `deploy.sh` refuses a digest unless its signed provenance shows it was built by this repo's

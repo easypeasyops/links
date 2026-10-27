@@ -27,8 +27,8 @@ def _mapping(prefix: str | None) -> str:
 @pytest.mark.parametrize(
     ("prefix", "want"),
     [
-        (None, "staging prod|staging|prod|prod"),
-        ("shortly-", "staging prod|shortly-staging|shortly-prod|shortly-prod"),
+        (None, "staging prod|shortly-staging|shortly-prod|shortly-prod"),  # <app>-<env>
+        ("", "staging prod|staging|prod|prod"),  # a cluster from before the move
     ],
 )
 def test_environments_map_to_namespaces(prefix: str | None, want: str) -> None:

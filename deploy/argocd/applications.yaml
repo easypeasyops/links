@@ -26,7 +26,7 @@ spec:
       valueFiles: [../../envs/staging.yaml]
   destination:
     server: https://kubernetes.default.svc
-    namespace: staging
+    namespace: shortly-staging # <app>-<env> (platform plan, Phase 2)
   syncPolicy:
     automated:
       prune: true # a resource removed from the chart is removed from the cluster
@@ -73,7 +73,7 @@ spec:
       valueFiles: [../../envs/prod.yaml]
   destination:
     server: https://kubernetes.default.svc
-    namespace: prod
+    namespace: shortly-prod # <app>-<env> (platform plan, Phase 2)
   syncPolicy:
     automated:
       prune: true # a resource removed from the chart is removed from the cluster

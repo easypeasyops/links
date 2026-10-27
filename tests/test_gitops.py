@@ -73,7 +73,7 @@ def test_applications_differ_only_by_environment() -> None:
     normalised = []
     for app, env in zip(apps, ENVS, strict=True):
         spec = app["spec"]
-        assert spec["destination"]["namespace"] == env
+        assert spec["destination"]["namespace"] == f"shortly-{env}"  # <app>-<env>
         assert spec["source"]["helm"]["valueFiles"] == [f"../../envs/{env}.yaml"]
         assert spec["source"]["targetRevision"] == "main"
         assert spec["syncPolicy"]["automated"] == {"prune": True, "selfHeal": True}

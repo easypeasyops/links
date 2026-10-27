@@ -234,8 +234,8 @@ data:
             "definition": "label_values(slo:sli_error:ratio_rate5m, namespace)",
             "refresh": 2,
             "current": {
-              "text": "prod",
-              "value": "prod"
+              "text": "shortly-prod",
+              "value": "shortly-prod"
             }
           }
         ]
@@ -985,7 +985,7 @@ spec:
         prometheus:
           address: http://kps-prometheus.monitoring.svc:9090
           query: |
-            sum(rate(http_requests_total{namespace="prod", rollouts_pod_template_hash="{{args.canary-hash}}", route!~"/healthz|/readyz"}[1m])) or vector(0)
+            sum(rate(http_requests_total{namespace="shortly-prod", rollouts_pod_template_hash="{{args.canary-hash}}", route!~"/healthz|/readyz"}[1m])) or vector(0)
     # Server errors, including 503 from load shedding: what the availability SLOs count.
     - name: error-ratio
       initialDelay: 60s
@@ -997,9 +997,9 @@ spec:
         prometheus:
           address: http://kps-prometheus.monitoring.svc:9090
           query: |
-            (sum(rate(http_requests_total{namespace="prod", rollouts_pod_template_hash="{{args.canary-hash}}", route!~"/healthz|/readyz", status=~"5.."}[1m])) or vector(0))
+            (sum(rate(http_requests_total{namespace="shortly-prod", rollouts_pod_template_hash="{{args.canary-hash}}", route!~"/healthz|/readyz", status=~"5.."}[1m])) or vector(0))
             /
-            sum(rate(http_requests_total{namespace="prod", rollouts_pod_template_hash="{{args.canary-hash}}", route!~"/healthz|/readyz"}[1m]))
+            sum(rate(http_requests_total{namespace="shortly-prod", rollouts_pod_template_hash="{{args.canary-hash}}", route!~"/healthz|/readyz"}[1m]))
     # Not a check: the traffic the checks above judge. Lasts as long as the step's analysis.
     - name: synthetic-traffic
       provider:
@@ -1054,7 +1054,7 @@ spec:
         prometheus:
           address: http://kps-prometheus.monitoring.svc:9090
           query: |
-            histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace="prod", rollouts_pod_template_hash="{{args.canary-hash}}", method="GET", route="/{code}"}[1m])))
+            histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{namespace="shortly-prod", rollouts_pod_template_hash="{{args.canary-hash}}", method="GET", route="/{code}"}[1m])))
 
 ---
 # Source: shortly/templates/httproute.yaml
@@ -1771,7 +1771,7 @@ spec:
         plugins:
           argoproj-labs/gatewayAPI:
             httpRoute: shortly
-            namespace: prod
+            namespace: shortly-prod
       steps:
         - setWeight: 10
         - analysis:
