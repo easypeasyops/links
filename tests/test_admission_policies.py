@@ -41,7 +41,7 @@ def _docker() -> None:
     pytest.skip("Docker not available")
 
 
-def _pod(name: str, *images: str, init: tuple[str, ...] = (), ns: str = "prod") -> dict[str, Any]:
+def _pod(name: str, *images: str, init: tuple[str, ...] = (), ns: str = "shortly-prod") -> dict[str, Any]:
     spec: dict[str, Any] = {
         "containers": [{"name": f"c{i}", "image": im} for i, im in enumerate(images)]
     }
