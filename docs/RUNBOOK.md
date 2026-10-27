@@ -219,8 +219,10 @@ Steps and thresholds are chart values (`canary:` in `values.yaml`). An aborted c
 ```bash
 kubectl -n argocd patch application shortly-prod --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
 ARGOCD_OVERRIDE=1 scripts/deploy.sh prod ghcr.io/statsguy/shortly@$D
-# afterwards: put the same digest in deploy/envs/prod.yaml via a PR, merge, then restore auto-sync:
-kubectl apply -f deploy/argocd/applications.yaml
+# afterwards: put the same digest in deploy/envs/prod.yaml via a PR, merge, then restore
+# auto-sync: delete the Application; the platform's ApplicationSet recreates it from git
+# within seconds (no finalizer, so shortly keeps running while it does)
+kubectl -n argocd delete application shortly-prod
 ```
 
 Say so in the incident channel. If verification itself is broken (Sigstore down), add `INSECURE_SKIP_VERIFY=1` too; it prints a warning, and the cluster's admission policy still applies (see "Admission policy refuses pods").
@@ -264,7 +266,7 @@ Roll back first, investigate second: when a release is bad, restore the last goo
 3. Roll back staging the same way if the bad release is there, so the environments don't diverge.
 4. Open an incident note (see Incident process) with the bad digest and the revert PR.
 
-**Faster than a PR**, when every minute counts: Argo CD can sync the Application to the previous git revision (UI: History and rollback; it turns auto-sync off while you're there). Merge the revert anyway, then turn auto-sync back on (`kubectl apply -f deploy/argocd/applications.yaml`): until then, git and the cluster disagree.
+**Faster than a PR**, when every minute counts: Argo CD can sync the Application to the previous git revision (UI: History and rollback; it turns auto-sync off while you're there). Merge the revert anyway, then turn auto-sync back on (`kubectl -n argocd delete application shortly-prod`: the platform's ApplicationSet recreates it from git): until then, git and the cluster disagree.
 
 **Schema is not rolled back.** A rollback runs the migration Job too (Argo CD runs it on every sync), but with the older image it finds the database at a revision it doesn't know and leaves the schema as it is (`migrate: the database is at a newer revision than this release (a rollback)` in its log). It never downgrades. That is safe because every migration must be backward compatible with the previous version (expand/contract).
 
@@ -517,8 +519,31 @@ kubectl -n argocd logs deploy/argocd-repo-server --tail=50
 | OutOfSync, sync failed, `PreSync` hook failed | The migration Job failed | `kubectl -n shortly-prod logs job/shortly-migrate-1`; fix in a new release or revert. The old version keeps serving |
 | Synced, Degraded, Rollout aborted | The canary was refused | "Canary aborted" above, then revert the promotion |
 | Synced, Progressing for minutes | A canary in progress (about 7 minutes), or pods not becoming ready | `kubectl -n shortly-prod get rollout shortly`; "Deploy stuck or failed" |
-| OutOfSync, auto-sync not running | Someone turned auto-sync off (break glass) and didn't turn it back on | `kubectl apply -f deploy/argocd/applications.yaml` after checking git says what should run |
-| OutOfSync on the HTTPRoute or the `shortly-stable`/`shortly-canary` Services only | The Application lost its `ignoreDifferences` for what Argo Rollouts owns (an edited Application) | `kubectl apply -f deploy/argocd/applications.yaml` |
+| OutOfSync, auto-sync not running | Someone turned auto-sync off (break glass) and didn't turn it back on | After checking git says what should run: `kubectl -n argocd delete application shortly-prod`; the platform's ApplicationSet recreates it from git |
+| `shortly-<env>` missing, or `ComparisonError` naming the service chart or `deploy/service/` | The platform's env file (`apps/shortly/envs/<env>.yaml`) or this repo's values don't render; or the ApplicationSet isn't running | `kubectl -n argocd get applicationset apps -o jsonpath='{.status.conditions}'`; the platform's CI (`apps` job) renders every env file, so a merged break is rare: revert the last change to either |
+| OutOfSync on the HTTPRoute or the `shortly-stable`/`shortly-canary` Services only | The Application lost its `ignoreDifferences` for what Argo Rollouts owns (an edited Application) | The ApplicationSet restores it within seconds; if not, delete the Application to have it recreated |
+
+### Handing shortly to the platform's ApplicationSet
+
+Once per cluster set up before platform plan 3.3, when `deploy/argocd/applications.yaml` still made `shortly-staging` and `shortly-prod`. `scripts/cluster.sh up` does it (`take_over_apps`), and you run it as for any other change:
+
+1. It upgrades Argo CD with the ApplicationSet controller on (`deploy/kind/argocd-values.yaml`).
+2. For each `shortly-<env>` the ApplicationSet doesn't own, it **deletes the Application**: it has no finalizer, so its resources keep running, unmanaged, for a few seconds.
+3. It applies the platform's `apps` root. Its ApplicationSet generates `shortly-staging` and `shortly-prod` under the **same names**, so Argo CD's tracking matches and they adopt what runs.
+4. It waits for both to be Synced and Healthy.
+
+Nothing restarts: the service chart renders the same pods (the platform's goldens). What changes is the chart label on objects, and in prod the dashboards: two panels move from "shortly / SLOs" to "shortly / Causes".
+
+Check afterwards:
+
+```bash
+kubectl -n argocd get applicationset apps
+kubectl -n argocd get applications shortly-staging shortly-prod \
+  -o custom-columns='NAME:.metadata.name,OWNER:.metadata.ownerReferences[0].name,SYNC:.status.sync.status,HEALTH:.status.health.status'
+kubectl -n shortly-prod get pods      # AGE: from before the handover
+```
+
+If it stops with "has finalizers": someone added `resources-finalizer.argocd.argoproj.io`, and deleting that Application would delete shortly. Remove it first (`kubectl -n argocd patch application shortly-prod --type json -p '[{"op":"remove","path":"/metadata/finalizers"}]'`), then run `cluster.sh up` again.
 
 ### Argo CD alerts
 
@@ -679,7 +704,7 @@ kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --tail=500 | grep
 helm -n shortly-prod get values shortly | grep -i fault
 ```
 
-Fix: if it is in `deploy/envs/`, revert that change (a PR); Argo CD removes it within a minute. If someone set it by hand, Argo CD's self-heal has already removed it, unless auto-sync is off: turn it back on (`kubectl apply -f deploy/argocd/applications.yaml`). Then find out how it got there: it must never be in `deploy/envs/`.
+Fix: if it is in `deploy/envs/`, revert that change (a PR); Argo CD removes it within a minute. If someone set it by hand, Argo CD's self-heal has already removed it, unless auto-sync is off: turn it back on (`kubectl -n argocd delete application shortly-prod`; the platform's ApplicationSet recreates it from git). Then find out how it got there: it must never be in `deploy/envs/`.
 
 ### Backup job not running
 
