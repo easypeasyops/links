@@ -121,6 +121,18 @@ jobs:
           cluster_name: shortly
           config: deploy/kind/cluster.yaml
 
+      # The canary's synthetic traffic and the HPA drill run k6 from Docker Hub. A kind node
+      # pulling it anonymously once timed out on Docker Hub's token endpoint: no traffic, so
+      # analysis aborted a healthy canary (PR #81's first run). Pull it on the runner, with
+      # retries, and load it into the node; pods use it as is (IfNotPresent).
+      - name: Preload k6 into kind
+        if: needs.scope.outputs.full == 'true'
+        run: |
+          image=$(sed -nE 's/^ +image: (grafana\/k6:[^ ]+).*/\1/p' deploy/helm/shortly/values.yaml)
+          [[ -n "$image" ]] || { echo "no k6 image in deploy/helm/shortly/values.yaml"; exit 1; }
+          for attempt in 1 2 3; do docker pull -q "$image" && break; sleep $((attempt * 15)); done
+          kind load docker-image "$image" --name shortly
+
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         if: needs.scope.outputs.full == 'true'
 
