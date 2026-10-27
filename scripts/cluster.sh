@@ -177,6 +177,11 @@ platform() {
     | REVISION="$revision" PARAMS="$params" python3 -c '
 import json, os, sys
 app = json.load(sys.stdin)
+# On a re-run the dry-run merges in the live object; its server fields make the
+# apply an update that the API server refuses (metadata.resourceVersion).
+for field in ("resourceVersion", "uid", "generation", "creationTimestamp", "managedFields"):
+    app["metadata"].pop(field, None)
+app.pop("status", None)
 app["spec"]["source"]["targetRevision"] = os.environ["REVISION"]
 app["spec"]["source"]["helm"]["parameters"] = json.loads(os.environ["PARAMS"])
 json.dump(app, sys.stdout)' | kubectl apply -f - >/dev/null
