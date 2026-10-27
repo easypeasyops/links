@@ -12,6 +12,9 @@
 #   FRONT_DOOR=0 scripts/cluster.sh up  # no forwarders on the laptop's ports 8080 and 8090
 #   scripts/cluster.sh wake            # after the laptop slept: restart the CronJob
 #                                       # scheduler, back up any environment that's overdue
+#   scripts/cluster.sh move-namespaces # once, on a cluster from before platform plan 2.2:
+#                                       # copy staging and prod into shortly-staging and
+#                                       # shortly-prod (the old ones keep serving)
 #   scripts/cluster.sh down
 #
 # What runs where:
@@ -61,37 +64,7 @@ up() {
   take_over_from_helm
   if on FRONT_DOOR; then front_door; fi
 
-  for env in "${ENVS[@]}"; do
-    ns=$(ns_of "$env")
-    kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-    # Enforce the "restricted" Pod Security Standard: the API server itself rejects any pod
-    # that runs as root, keeps capabilities, or allows privilege escalation.
-    kubectl label namespace "$ns" --overwrite \
-      pod-security.kubernetes.io/enforce=restricted \
-      pod-security.kubernetes.io/warn=restricted >/dev/null
-
-    # Secrets are generated here, once, and never written to git. In a real cluster they'd
-    # come from a secret manager (External Secrets, Vault, Sealed Secrets).
-    if ! kubectl -n "$ns" get secret postgres-auth >/dev/null 2>&1; then
-      pw=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 || true)
-      kubectl -n "$ns" create secret generic postgres-auth --from-literal=password="$pw" >/dev/null
-      kubectl -n "$ns" create secret generic shortly-db \
-        --from-literal=url="postgresql://shortly:${pw}@postgres:5432/shortly" >/dev/null
-    fi
-    kubectl -n "$ns" apply -f "$ROOT/deploy/kind/postgres.yaml" >/dev/null
-    # Default-deny ingress, and Postgres open to shortly's pods only. The chart adds the
-    # app's own policy (deploy/helm/shortly/templates/networkpolicy.yaml).
-    kubectl -n "$ns" apply -f "$ROOT/deploy/kind/network-policies.yaml" >/dev/null
-    if on BACKUPS; then
-      # Each environment gets the bucket credentials and an hourly backup CronJob.
-      if ! kubectl -n "$ns" get secret backup-s3 >/dev/null 2>&1; then
-        kubectl -n "$ns" create secret generic backup-s3 \
-          --from-literal=access-key="$(kubectl -n backups get secret seaweedfs-s3 -o jsonpath='{.data.access-key}' | base64 -d)" \
-          --from-literal=secret-key="$(kubectl -n backups get secret seaweedfs-s3 -o jsonpath='{.data.secret-key}' | base64 -d)" >/dev/null
-      fi
-      kubectl -n "$ns" apply -f "$ROOT/deploy/kind/postgres-backup.yaml" >/dev/null
-    fi
-  done
+  for env in "${ENVS[@]}"; do app_namespace "$(ns_of "$env")"; done
 
   for env in "${ENVS[@]}"; do
     ns=$(ns_of "$env")
@@ -104,6 +77,40 @@ up() {
     kubectl apply -f "$ROOT/deploy/argocd/project.yaml" -f "$ROOT/deploy/argocd/applications.yaml" >/dev/null
     for env in "${ENVS[@]}"; do wait_synced "shortly-$env" 300; done
     kubectl -n argocd get applications
+  fi
+}
+
+# One environment's namespace: restricted Pod Security, its database and secrets, network
+# policies and backups. Idempotent; never overwrites a Secret. (up, move-namespaces)
+app_namespace() {
+  local ns=$1 pw
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  # Enforce the "restricted" Pod Security Standard: the API server itself rejects any pod
+  # that runs as root, keeps capabilities, or allows privilege escalation.
+  kubectl label namespace "$ns" --overwrite \
+    pod-security.kubernetes.io/enforce=restricted \
+    pod-security.kubernetes.io/warn=restricted >/dev/null
+
+  # Secrets are generated here, once, and never written to git. In a real cluster they'd
+  # come from a secret manager (External Secrets, Vault, Sealed Secrets).
+  if ! kubectl -n "$ns" get secret postgres-auth >/dev/null 2>&1; then
+    pw=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 || true)
+    kubectl -n "$ns" create secret generic postgres-auth --from-literal=password="$pw" >/dev/null
+    kubectl -n "$ns" create secret generic shortly-db \
+      --from-literal=url="postgresql://shortly:${pw}@postgres:5432/shortly" >/dev/null
+  fi
+  kubectl -n "$ns" apply -f "$ROOT/deploy/kind/postgres.yaml" >/dev/null
+  # Default-deny ingress, and Postgres open to shortly's pods only. The chart adds the
+  # app's own policy (deploy/helm/shortly/templates/networkpolicy.yaml).
+  kubectl -n "$ns" apply -f "$ROOT/deploy/kind/network-policies.yaml" >/dev/null
+  if on BACKUPS; then
+    # Each environment gets the bucket credentials and an hourly backup CronJob.
+    if ! kubectl -n "$ns" get secret backup-s3 >/dev/null 2>&1; then
+      kubectl -n "$ns" create secret generic backup-s3 \
+        --from-literal=access-key="$(kubectl -n backups get secret seaweedfs-s3 -o jsonpath='{.data.access-key}' | base64 -d)" \
+        --from-literal=secret-key="$(kubectl -n backups get secret seaweedfs-s3 -o jsonpath='{.data.secret-key}' | base64 -d)" >/dev/null
+    fi
+    kubectl -n "$ns" apply -f "$ROOT/deploy/kind/postgres-backup.yaml" >/dev/null
   fi
 }
 
@@ -277,6 +284,36 @@ wake() {
   done
 }
 
+# Platform plan 2.2: each environment moves from a namespace named after it (prod) to one
+# per app and environment (shortly-prod). Run once on a cluster built before the move,
+# BEFORE the switch merges: it sets up the new namespaces (app_namespace) and copies each
+# database into them with pg_dump | pg_restore. The old namespaces keep serving until Argo
+# CD moves the app; links created after the copy stay behind (a laptop: acceptable). It
+# never copies over a database that already has tables.
+move_namespaces() {
+  local env old new tables links
+  kubectl config use-context "kind-$CLUSTER" >/dev/null
+  for env in "${ENVS[@]}"; do
+    old=$env new=${MOVE_TO_PREFIX:-shortly-}$env
+    if ! kubectl -n "$old" get statefulset postgres >/dev/null 2>&1; then
+      echo "$old: no database here, nothing to move"
+      continue
+    fi
+    app_namespace "$new"
+    kubectl -n "$new" rollout status statefulset/postgres --timeout=180s >/dev/null
+    tables=$(kubectl -n "$new" exec postgres-0 -- psql -U shortly -d shortly -tAc \
+      "select count(*) from pg_tables where schemaname = 'public'")
+    if [[ "$tables" != 0 ]]; then
+      echo "$new: already has $tables tables; not copying over them"
+      continue
+    fi
+    kubectl -n "$old" exec postgres-0 -- pg_dump -U shortly -d shortly --format=custom \
+      | kubectl -n "$new" exec -i postgres-0 -- pg_restore -U shortly -d shortly --no-owner --exit-on-error
+    links=$(kubectl -n "$new" exec postgres-0 -- psql -U shortly -d shortly -tAc "select count(*) from links")
+    echo "$old -> $new: database copied ($links links); $old keeps serving until the switch"
+  done
+}
+
 down() {
   local mapping
   for mapping in "${FRONT_DOOR_PORTS[@]}"; do
@@ -288,6 +325,7 @@ down() {
 case "${1:-}" in
   up) up ;;
   wake) wake ;;
+  move-namespaces) move_namespaces ;;
   down) down ;;
-  *) echo "usage: $0 up|wake|down" >&2; exit 2 ;;
+  *) echo "usage: $0 up|wake|move-namespaces|down" >&2; exit 2 ;;
 esac

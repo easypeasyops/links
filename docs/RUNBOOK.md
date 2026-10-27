@@ -802,6 +802,7 @@ The local environments are disposable: `scripts/cluster.sh up` rebuilds them fro
 | Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 scripts/cluster.sh up` (on a fresh cluster: switching it off later removes the Application but leaves its resources running, by design) |
 | Create without Kyverno and the admission policies | `POLICIES=0 scripts/cluster.sh up` |
 | Create without the backup bucket and backup CronJobs | `BACKUPS=0 scripts/cluster.sh up` |
+| Move the environments to per-app namespaces (once, before platform plan 2.2b merges) | `scripts/cluster.sh move-namespaces`: creates `shortly-staging` and `shortly-prod` (database, secrets, network policies, backups) and copies each database into them; `staging` and `prod` keep serving until Argo CD moves the app. It never copies over a database that has tables. Links created after the copy stay behind |
 | After the laptop slept (backup or cleanup alerts, gaps in Grafana) | `scripts/cluster.sh wake`. To stop it happening while plugged in: `caffeinate -s` in a spare terminal, or System Settings → Battery → prevent sleep on power adapter |
 | Create without the front door (ports 8080 and 8090 left free) | `FRONT_DOOR=0 scripts/cluster.sh up`; then port-forward by hand, e.g. `kubectl -n monitoring port-forward svc/grafana 3000:80` |
 | Open the app through the Gateway | http://sho.rt.localhost:8080 (prod) or http://staging.sho.rt.localhost:8080, always on (the front door, below) |

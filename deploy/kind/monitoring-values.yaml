@@ -63,7 +63,8 @@ alertmanager:
         - receiver: "null" # always-firing heartbeat from the stack: proves the pipeline works
           matchers: ['alertname = "Watchdog"']
         - receiver: staging # staging never pages anyone, whatever its severity
-          matchers: ['namespace = "staging"']
+          # Any app's staging: `staging`, and `<app>-staging` (platform plan, Phase 2).
+          matchers: ['namespace =~ "(.+-)?staging"']
         - receiver: pager
           matchers: ['severity = "page"']
         - receiver: tickets

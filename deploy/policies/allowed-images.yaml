@@ -19,7 +19,8 @@ spec:
   matchConstraints:
     namespaceSelector:
       matchExpressions:
-        - { key: kubernetes.io/metadata.name, operator: In, values: [staging, prod] }
+        # Old and per-app namespace names, during the move (platform plan, Phase 2).
+        - { key: kubernetes.io/metadata.name, operator: In, values: [staging, prod, shortly-staging, shortly-prod] }
     resourceRules:
       - apiGroups: [""]
         apiVersions: [v1]

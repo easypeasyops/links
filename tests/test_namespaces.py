@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 LIB = ROOT / "scripts/lib/namespaces.sh"
@@ -40,3 +41,16 @@ def test_scripts_name_no_namespace_directly() -> None:
     for path in sorted((ROOT / "scripts").glob("*.sh")):
         hits = [line for line in path.read_text().splitlines() if literal.search(line)]
         assert not hits, (path.name, hits)
+
+
+def test_project_and_backups_admit_both_namespace_names() -> None:
+    """Expand step (platform plan 2.1b): what selects the app's namespaces by name accepts the
+    environment-named ones and the per-app ones, so moving an environment breaks nothing."""
+    want = {"staging", "prod", "shortly-staging", "shortly-prod"}
+    project = yaml.safe_load((ROOT / "deploy/argocd/project.yaml").read_text())
+    assert {d["namespace"] for d in project["spec"]["destinations"]} == want
+    backups = (ROOT / "deploy/kind/backups.yaml").read_text()
+    assert "values: [staging, prod, shortly-staging, shortly-prod, restore-drill]" in backups
+    monitoring = yaml.safe_load((ROOT / "deploy/kind/monitoring-values.yaml").read_text())
+    routes = monitoring["alertmanager"]["config"]["route"]["routes"]
+    assert ['namespace =~ "(.+-)?staging"'] in [r["matchers"] for r in routes]
