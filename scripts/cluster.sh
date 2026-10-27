@@ -173,18 +173,18 @@ platform() {
   kubectl apply -f "$ROOT/deploy/argocd/platform-project.yaml" >/dev/null
   # One apply with the parameters already set: applying the file as it is, then patching,
   # would first sync main on the wrong architecture.
-  kubectl apply -f "$ROOT/deploy/argocd/platform-root.yaml" --dry-run=client -o json \
+  # Rendered from the file alone (create, not apply: no live object merged in), and applied
+  # server-side: a client-side apply diffs against the last-applied annotation, which an
+  # earlier version of this function filled with server fields, so every re-run asked to
+  # delete metadata.resourceVersion and was refused.
+  kubectl create -f "$ROOT/deploy/argocd/platform-root.yaml" --dry-run=client -o json \
     | REVISION="$revision" PARAMS="$params" python3 -c '
 import json, os, sys
 app = json.load(sys.stdin)
-# On a re-run the dry-run merges in the live object; its server fields make the
-# apply an update that the API server refuses (metadata.resourceVersion).
-for field in ("resourceVersion", "uid", "generation", "creationTimestamp", "managedFields"):
-    app["metadata"].pop(field, None)
-app.pop("status", None)
 app["spec"]["source"]["targetRevision"] = os.environ["REVISION"]
 app["spec"]["source"]["helm"]["parameters"] = json.loads(os.environ["PARAMS"])
-json.dump(app, sys.stdout)' | kubectl apply -f - >/dev/null
+json.dump(app, sys.stdout)' \
+    | kubectl apply --server-side --field-manager=cluster-sh --force-conflicts -f - >/dev/null
   echo "platform: syncing deploy/argocd/platform at $revision ($arch) through Argo CD"
   # The root is Healthy once every wave is: Argo CD reports each child's health
   # (argocd-cm, deploy/kind/argocd-values.yaml) and syncs wave 1 only after wave 0.
