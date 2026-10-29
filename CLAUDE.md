@@ -32,6 +32,10 @@ the one reviewed with the code.
 
 ## Pull requests opened by Claude
 
+- **No tool attribution in PR descriptions** (Emrah, 2026-10-29): no "Generated with/by
+  Claude Code" line, no claude.ai session link, no `---` separator for one. The description
+  ends with its last point. (The session's GitHub connection may append its own footer when
+  it writes a PR; that one is outside the session's control.)
 - **One problem per PR, small enough to review in one sitting**: aim for about 200 changed
   lines (a sweet spot, not a hard limit). Tests and the docs updates the change needs ride
   in the same PR; vendored or generated files (`deploy/platform/metrics-server/components.yaml`,
