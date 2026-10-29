@@ -2,7 +2,7 @@
 # End-to-end on Kubernetes, including the rollback drill. Runs in CI on every PR and the
 # same way on your laptop:
 #
-#   scripts/cluster.sh up
+#   ../platform/scripts/cluster.sh up        # the platform repo, beside this one
 #   docker build -t shortly:e2e .
 #   IMAGE=shortly:e2e scripts/k8s-e2e.sh
 #
@@ -40,20 +40,21 @@
 #   delivery: 4, 5, 5b (automatic and manual rollback, both canaries)
 # (GitOps runs with the platform half: that half was about 4 minutes shorter without it.)
 #   all:      everything in one cluster (the default; what a laptop runs)
-# Every deploy also gets deploy/kind/e2e-values.yaml: faster scrapes and canary analysis.
+# Every deploy also gets the platform's deploy/kind/e2e-values.yaml: faster scrapes and
+# canary analysis.
 set -euo pipefail
 
 IMAGE="${IMAGE:?set IMAGE, e.g. IMAGE=shortly:e2e}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # ENVS, and the namespace each runs in: helpers below take an environment (staging, prod)
-# shellcheck source=scripts/lib/namespaces.sh
-source "$ROOT/scripts/lib/namespaces.sh"
+# shellcheck source=scripts/lib/platform.sh
+source "$(dirname "$0")/lib/platform.sh"
 PF_PIDS=()
 ALERT_PID="" ALERT_LOG=$(mktemp)
 SUITE="${E2E_SUITE:-all}"
 case "$SUITE" in all | platform | delivery) ;; *) echo "E2E_SUITE must be all, platform or delivery" >&2; exit 2 ;; esac
 suite() { [[ "$SUITE" == all || "$SUITE" == "$1" ]]; }
-export DEPLOY_EXTRA_VALUES="${DEPLOY_EXTRA_VALUES-$ROOT/deploy/kind/e2e-values.yaml}"
+export DEPLOY_EXTRA_VALUES="${DEPLOY_EXTRA_VALUES-$PLATFORM_DIR/deploy/kind/e2e-values.yaml}"
 
 pass() { echo "ok   $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -500,7 +501,7 @@ if kubectl -n "$PROD_NS" get cronjob postgres-backup >/dev/null 2>&1; then
   restarts() { kubectl -n kube-system get pod -l component=kube-controller-manager \
     -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'; }
   before=$(restarts)
-  WAKE_BACKUP_MAX_AGE=0 "$ROOT/scripts/cluster.sh" wake
+  WAKE_BACKUP_MAX_AGE=0 "$PLATFORM_DIR/scripts/cluster.sh" wake
   (($(restarts) == before + 1)) || fail "wake: kube-controller-manager was not restarted"
   wake_job=$(kubectl -n "$PROD_NS" get jobs -o name | grep -m1 'job.batch/backup-wake-' || true)
   [[ -n "$wake_job" ]] || fail "wake: no backup-wake Job in prod"

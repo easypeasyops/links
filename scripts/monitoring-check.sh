@@ -13,8 +13,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=scripts/lib/namespaces.sh
-source "$(dirname "$0")/lib/namespaces.sh"
+# shellcheck source=scripts/lib/platform.sh
+source "$(dirname "$0")/lib/platform.sh"
 export PROD_NS
 pass() { echo "ok   $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }

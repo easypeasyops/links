@@ -15,8 +15,8 @@
 # asserted. Capacity itself is measured with scripts/loadtest.sh, not here.
 set -euo pipefail
 
-# shellcheck source=scripts/lib/namespaces.sh
-source "$(dirname "$0")/lib/namespaces.sh"
+# shellcheck source=scripts/lib/platform.sh
+source "$(dirname "$0")/lib/platform.sh"
 NS="${NS:-$PROD_NS}"
 # Must push CPU clearly past the target: the HPA ignores ratios within 10% of it (its
 # tolerance), and per-request CPU varies by hardware. 600 req/s gave 75% vs a 70% target on

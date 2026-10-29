@@ -9,8 +9,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=scripts/lib/namespaces.sh
-source "$(dirname "$0")/lib/namespaces.sh"
+# shellcheck source=scripts/lib/platform.sh
+source "$(dirname "$0")/lib/platform.sh"
 NS="${NS:-$STAGING_NS}"
 REPO=ghcr.io/statsguy/shortly
 # The release the runbook documents (also checked by tests/test_deploy_gate.py).

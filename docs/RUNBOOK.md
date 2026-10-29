@@ -760,6 +760,8 @@ Every CI step can be reproduced locally with the same command; reproduce before 
 
 The kind e2e runs as two jobs in parallel, `kind e2e (platform)` and `kind e2e (delivery)`; the one required check, `ci`, fails if either does (or any other job): its log lists every job's result, so open the one it names. Platform covers steps 3b, 3c and 6–12 (rate limit, front door, HPA, monitoring, admission, network policies, cleanup, backups, GitOps); delivery covers 4, 5 and 5b (rollbacks and canaries). To rerun just one half locally: `E2E_SUITE=delivery IMAGE=shortly:e2e scripts/k8s-e2e.sh`.
 
+Both jobs install the platform from `easypeasyops/platform` at the commit in `platform.lock` (step "Which platform"). A failure that appears right after a PR moved the lock is the new platform's: compare with the PR before it, and fix in the platform repo or move the lock back. Locally the scripts use the platform clone beside this repo (`../platform`, or `PLATFORM_DIR`) and print a note when it isn't at the locked commit.
+
 A slow or stuck platform install: the kind job's progress lines name what holds each Application back (`[Degraded Deployment/…: message]`), and the step "Platform start-up report" lists image pulls and the slowest pods to become Ready.
 
 Checks from the reusable workflows are named `<job> / <step job>`: `check / lint, type-check, test` and `image / build, scan, smoke-test image`; their steps are in `.github/workflows/reusable-*.yml`.

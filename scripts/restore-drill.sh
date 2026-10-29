@@ -18,8 +18,8 @@
 # Run by scripts/k8s-e2e.sh (step 11), so CI restores a fresh backup on every PR.
 set -euo pipefail
 
-# shellcheck source=scripts/lib/namespaces.sh
-source "$(dirname "$0")/lib/namespaces.sh"
+# shellcheck source=scripts/lib/platform.sh
+source "$(dirname "$0")/lib/platform.sh"
 SOURCE="${SOURCE:-$PROD_NS}" # a namespace
 NS=restore-drill
 POD=restore

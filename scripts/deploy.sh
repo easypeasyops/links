@@ -25,8 +25,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TIMEOUT="${DEPLOY_TIMEOUT:-3m}"
 
 case "$ENV" in staging | prod) ;; *) echo "unknown env: $ENV" >&2; exit 2 ;; esac
-# shellcheck source=scripts/lib/namespaces.sh
-source "$(dirname "$0")/lib/namespaces.sh"
+# shellcheck source=scripts/lib/platform.sh
+source "$(dirname "$0")/lib/platform.sh"
 NS=$(ns_of "$ENV") # the namespace this environment runs in
 
 context=$(kubectl config current-context 2>/dev/null || true)
