@@ -119,7 +119,8 @@ release_digest=$(sed -nE 's/^\| Current release \| v[0-9.]+, `(sha256:[0-9a-f]{6
 [[ -n "$release_digest" ]] || fail "no 'Current release' digest in docs/RUNBOOK.md"
 for env in "${ENVS[@]}"; do
   ns=$(ns_of "$env")
-  helm template shortly "$ROOT/deploy/helm/shortly" -n "$ns" -f "$ROOT/deploy/envs/$env.yaml" \
+  mapfile -t values < <(values_args "$env")
+  helm template shortly "$(chart_ref "$env")" -n "$ns" "${values[@]}" \
     --set image.repository=ghcr.io/statsguy/shortly --set "image.digest=$release_digest" \
     | kubectl -n "$ns" apply --dry-run=server -f - >/dev/null \
     || fail "API server rejected the digest-mode render for $ns"

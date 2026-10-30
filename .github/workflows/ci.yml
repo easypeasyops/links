@@ -150,8 +150,8 @@ jobs:
       - name: Preload k6 into kind
         if: needs.scope.outputs.full == 'true'
         run: |
-          image=$(sed -nE 's/^ +image: (grafana\/k6:[^ ]+).*/\1/p' deploy/helm/shortly/values.yaml)
-          [[ -n "$image" ]] || { echo "no k6 image in deploy/helm/shortly/values.yaml"; exit 1; }
+          image=$(sed -nE 's/^ +image: (grafana\/k6:[^ ]+).*/\1/p' .platform/charts/service/values.yaml)
+          [[ -n "$image" ]] || { echo "no k6 image in the platform's charts/service/values.yaml"; exit 1; }
           for attempt in 1 2 3; do docker pull -q "$image" && break; sleep $((attempt * 15)); done
           kind load docker-image "$image" --name shortly
 

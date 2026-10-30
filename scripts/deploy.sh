@@ -70,17 +70,22 @@ fi
 # clocks, deploy/kind/e2e-values.yaml). Not for real deploys.
 extra_values=()
 [[ -n "${DEPLOY_EXTRA_VALUES:-}" ]] && extra_values=(--values "$DEPLOY_EXTRA_VALUES")
-helm_args=(--namespace "$NS" --values "$ROOT/deploy/envs/$ENV.yaml" "${image_args[@]}" \
+# The chart and values Argo CD renders for this environment (platform plan 3.4): the
+# platform's service chart at the digest its env file pins, with this repo's values files
+# in the same order (scripts/lib/platform.sh).
+CHART=$(chart_ref "$ENV")
+mapfile -t values < <(values_args "$ENV")
+helm_args=(--namespace "$NS" "${values[@]}" "${image_args[@]}" \
   ${extra_values[@]+"${extra_values[@]}"} "$@")
 canary=0
-if helm template shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
+if helm template shortly "$CHART" "${helm_args[@]}" \
   --show-only templates/rollout.yaml >/dev/null 2>&1; then
   canary=1
 fi
 
 echo "deploying $REF → $ENV$( ((canary)) && echo ' (canary)')"
 if ((!canary)); then
-  helm upgrade --install shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
+  helm upgrade --install shortly "$CHART" "${helm_args[@]}" \
     --rollback-on-failure --wait --timeout "$TIMEOUT"
   kubectl -n "$NS" rollout status deploy/shortly --timeout=60s
   helm -n "$NS" history shortly --max 5
@@ -116,7 +121,7 @@ fi
 # and refuses. Forcing gives Helm back only the fields it declares; the controller keeps
 # the ones only it sets (the pod-template-hash selector), and resets the rest when it next
 # acts. Safe because nothing upgrades in the middle of a canary: this script waits for it.
-helm upgrade --install shortly "$ROOT/deploy/helm/shortly" "${helm_args[@]}" \
+helm upgrade --install shortly "$CHART" "${helm_args[@]}" \
   --rollback-on-failure --force-conflicts --wait=legacy --timeout "$TIMEOUT"
 
 # Let the controller see the new spec before reading its status.

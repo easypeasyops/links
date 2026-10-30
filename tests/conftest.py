@@ -53,12 +53,23 @@ def scripted_codes(*codes: str) -> Callable[[], str]:
 
 @pytest.fixture
 def stub_platform(tmp_path: Path) -> Path:
-    """A stand-in platform checkout for scripts that load it (scripts/lib/platform.sh): only
-    the namespace map they source. Set PLATFORM_DIR to it; CI's check job has no checkout."""
+    """A stand-in platform checkout for scripts that load it (scripts/lib/platform.sh): the
+    namespace map they source and shortly's env files. Set PLATFORM_DIR to it; CI's check job
+    has no checkout."""
     namespaces = tmp_path / "platform/scripts/lib/namespaces.sh"
     namespaces.parent.mkdir(parents=True)
     namespaces.write_text('ENVS=(staging prod)\nns_of() { echo "shortly-$1"; }\n')
-    return namespaces.parents[2]
+    root = namespaces.parents[2]
+    # shortly's env files, which name the chart digest and values files deploy.sh renders.
+    for env in ("staging", "prod"):
+        env_file = root / f"apps/shortly/envs/{env}.yaml"
+        env_file.parent.mkdir(parents=True, exist_ok=True)
+        env_file.write_text(
+            f"app: shortly\nenv: {env}\nchart:\n  version: 0.1.0\n  digest: sha256:{'b' * 64}\n"
+            "values:\n  files:\n    - deploy/service/values.yaml\n"
+            f"    - deploy/envs/{env}.yaml\n"
+        )
+    return root
 
 
 @pytest.fixture

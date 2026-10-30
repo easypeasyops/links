@@ -73,19 +73,22 @@ remaining=$(query "slo:error_budget_remaining:ratio{namespace=\"$PROD_NS\", slo=
 pass "SLO recording rules evaluate for prod (redirect budget remaining: $remaining)"
 
 # ---------------------------------------------------------------- 4. dashboard queries
-python3 - "$ROOT/deploy/helm/shortly/dashboards" <<'PY' || fail "a dashboard query is invalid"
-import json, os, pathlib, subprocess, sys, urllib.parse
+# The dashboards prod's release ships (the ConfigMap Grafana loads), read from the cluster.
+dashboards=$(kubectl -n "$PROD_NS" get configmap shortly-dashboards -o json) \
+  || fail "no shortly-dashboards ConfigMap in $PROD_NS"
+python3 - <<'PY' "$dashboards" || fail "a dashboard query is invalid"
+import json, os, subprocess, sys, urllib.parse
 
-for path in sorted(pathlib.Path(sys.argv[1]).glob("*.json")):
-    exprs = [t["expr"] for p in json.loads(path.read_text())["panels"] for t in p.get("targets", [])]
+for name, text in sorted(json.loads(sys.argv[1])["data"].items()):
+    exprs = [t["expr"] for p in json.loads(text)["panels"] for t in p.get("targets", [])]
     for expr in exprs:
         q = expr.replace("$namespace", os.environ["PROD_NS"]).replace("$__rate_interval", "5m")
         url = "/api/v1/namespaces/monitoring/services/http:kps-prometheus:9090/proxy/api/v1/query?query="
         out = subprocess.run(["kubectl", "get", "--raw", url + urllib.parse.quote(q)],
                              capture_output=True, text=True)
         if out.returncode != 0 or json.loads(out.stdout).get("status") != "success":
-            sys.exit(f"{path.name}: {q}\n{out.stdout}{out.stderr}")
-    print(f"ok   {path.name}: all {len(exprs)} dashboard queries are valid PromQL")
+            sys.exit(f"{name}: {q}\n{out.stdout}{out.stderr}")
+    print(f"ok   {name}: all {len(exprs)} dashboard queries are valid PromQL")
 PY
 
 # ---------------------------------------------------------------- 5. alert end to end
