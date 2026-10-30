@@ -175,7 +175,7 @@ def test_promote_allows_prod_with_a_long_staging_history(repo: Path) -> None:
 
 
 # ------------------------------------------------------------------- deploy.sh vs Argo CD
-def test_deploy_refuses_an_environment_argo_cd_manages(tmp_path: Path) -> None:
+def test_deploy_refuses_an_environment_argo_cd_manages(tmp_path: Path, stub_platform: Path) -> None:
     bin_dir, log = tmp_path / "bin", tmp_path / "calls.log"
     bin_dir.mkdir()
     stubs = {
@@ -194,7 +194,11 @@ def test_deploy_refuses_an_environment_argo_cd_manages(tmp_path: Path) -> None:
         [str(ROOT / "scripts/deploy.sh"), "prod", "shortly:dev"],
         capture_output=True,
         text=True,
-        env={**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"},
+        env={
+            **os.environ,
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "PLATFORM_DIR": str(stub_platform),
+        },
         check=False,
     )
     assert result.returncode == 1

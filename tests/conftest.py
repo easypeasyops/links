@@ -52,6 +52,16 @@ def scripted_codes(*codes: str) -> Callable[[], str]:
 
 
 @pytest.fixture
+def stub_platform(tmp_path: Path) -> Path:
+    """A stand-in platform checkout for scripts that load it (scripts/lib/platform.sh): only
+    the namespace map they source. Set PLATFORM_DIR to it; CI's check job has no checkout."""
+    namespaces = tmp_path / "platform/scripts/lib/namespaces.sh"
+    namespaces.parent.mkdir(parents=True)
+    namespaces.write_text('ENVS=(staging prod)\nns_of() { echo "shortly-$1"; }\n')
+    return namespaces.parents[2]
+
+
+@pytest.fixture
 def clock() -> FakeClock:
     return FakeClock()
 
