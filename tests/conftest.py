@@ -1,6 +1,9 @@
 import gc
 import logging
 import os
+import re
+import shutil
+import subprocess
 import warnings
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
@@ -70,6 +73,34 @@ def stub_platform(tmp_path: Path) -> Path:
             f"    - deploy/envs/{env}.yaml\n"
         )
     return root
+
+
+@pytest.fixture(scope="session")
+def locked_verify_image(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The platform's deploy gate (scripts/verify-image.sh) at the commit platform.lock names,
+    fetched with gh: the one deploy.sh and promote.sh run. For integration tests (they need gh
+    and the network anyway); CI's check job has no platform checkout."""
+    if shutil.which("gh") is None:
+        if os.environ.get("CI"):
+            pytest.fail("gh is required for the provenance tests in CI")
+        pytest.skip("gh not installed")
+    lock = re.search(
+        r"^easypeasyops/platform@([0-9a-f]{40})$",
+        (Path(__file__).resolve().parent.parent / "platform.lock").read_text(),
+        re.M,
+    )
+    assert lock, "platform.lock names no easypeasyops/platform@<sha>"
+    script = tmp_path_factory.mktemp("platform") / "verify-image.sh"
+    script.write_bytes(
+        subprocess.run(
+            ["gh", "api", "-H", "Accept: application/vnd.github.raw",
+             f"repos/easypeasyops/platform/contents/scripts/verify-image.sh?ref={lock[1]}"],
+            capture_output=True,
+            check=True,
+        ).stdout
+    )  # fmt: skip
+    script.chmod(0o755)
+    return script
 
 
 @pytest.fixture

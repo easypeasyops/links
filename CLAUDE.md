@@ -30,9 +30,9 @@ the one reviewed with the code.
   easypeasyops/platform; this repo runs it at the commit `platform.lock` names, from a
   checkout beside this one (`../platform`, or `PLATFORM_DIR`). A platform change lands there,
   then reaches shortly in a PR here that moves the lock.
-- `scripts/verify-image.sh` is a copy of the platform's deploy gate, which enforces the same
-  provenance rules as its admission policy (the platform's tests check they agree). Don't
-  change it here: it goes once `deploy.sh` runs the platform's.
+- `deploy.sh` and `promote.sh` run the platform's deploy gate (`scripts/verify-image.sh` at
+  `platform.lock`), which enforces the same provenance rules as its admission policy (the
+  platform's tests check they agree).
 - Migrations follow expand / deploy / contract; every revision has a working `downgrade()`.
 
 ## Pull requests opened by Claude

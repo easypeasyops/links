@@ -194,13 +194,7 @@ def test_deploy_refuses_an_environment_argo_cd_manages(tmp_path: Path, stub_plat
 # ------------------------------------------------------------------- real provenance
 @pytest.mark.integration
 @pytest.mark.parametrize("env", ENVS)
-def test_env_digests_have_release_provenance(env: str) -> None:
-    if shutil.which("gh") is None:
-        if os.environ.get("CI"):
-            pytest.fail("gh is required in CI")
-        pytest.skip("gh not installed")
+def test_env_digests_have_release_provenance(env: str, locked_verify_image: Path) -> None:
     ref = f"ghcr.io/statsguy/shortly@{_env_digest(env)}"
-    result = subprocess.run(
-        [str(ROOT / "scripts/verify-image.sh"), ref], capture_output=True, text=True
-    )
+    result = subprocess.run([str(locked_verify_image), ref], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr

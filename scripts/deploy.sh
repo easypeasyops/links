@@ -6,7 +6,7 @@
 #   scripts/deploy.sh prod    ghcr.io/statsguy/shortly@sha256:...
 #   scripts/deploy.sh staging shortly:dev                            # local image, kind only
 #
-# A digest is deployed only after scripts/verify-image.sh proves it was built by this repo's
+# A digest is deployed only after the platform's scripts/verify-image.sh proves it was built by this repo's
 # release workflow from a release tag. A tag is accepted only on a kind-* kube context.
 #
 # Where Argo CD manages an environment (the platform's ApplicationSet, apps/shortly/envs/), releases
@@ -21,7 +21,6 @@ set -euo pipefail
 ENV="${1:?usage: $0 <staging|prod> <image-ref> [helm args...]}"
 REF="${2:?usage: $0 <staging|prod> <image-ref> [helm args...]}"
 shift 2
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TIMEOUT="${DEPLOY_TIMEOUT:-3m}"
 
 case "$ENV" in staging | prod) ;; *) echo "unknown env: $ENV" >&2; exit 2 ;; esac
@@ -43,12 +42,13 @@ fi
 
 if [[ "$REF" == *@sha256:* ]]; then
   # Released images deploy only if their provenance proves they came from this repo's
-  # release workflow at a release tag (scripts/verify-image.sh). Break glass, loudly:
+  # release workflow at a release tag (the platform's deploy gate, scripts/verify-image.sh,
+  # at platform.lock). Break glass, loudly:
   # INSECURE_SKIP_VERIFY=1, e.g. when the registry or Sigstore is unreachable mid-incident.
   if [[ "${INSECURE_SKIP_VERIFY:-}" == 1 ]]; then
     echo "WARNING: provenance verification SKIPPED for $REF (INSECURE_SKIP_VERIFY=1)" >&2
   else
-    "$ROOT/scripts/verify-image.sh" "$REF"
+    "$PLATFORM_DIR/scripts/verify-image.sh" "$REF"
   fi
   image_args=(--set "image.repository=${REF%@*}" --set "image.digest=${REF#*@}")
 else
