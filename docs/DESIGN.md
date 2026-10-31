@@ -6,8 +6,8 @@
 
 > **Platform files live in [easypeasyops/platform](https://github.com/easypeasyops/platform)**
 > (platform plan 3.4). Paths below under `deploy/argocd/platform`, `deploy/kind/`,
-> `deploy/platform/`, `deploy/policies/`, `scripts/cluster.sh` and `scripts/lib/namespaces.sh`
-> are in that repo, at the commit `platform.lock` names; so are the tests that check them.
+> `deploy/platform/`, `deploy/policies/`, `scripts/cluster.sh`, `scripts/lib/namespaces.sh` and
+> `scripts/verify-image.sh` (the deploy gate) are in that repo, at the commit `platform.lock` names; so are the tests that check them.
 > Run `cluster.sh` from a platform checkout beside this one (`../platform/scripts/cluster.sh`).
 
 ## Overview
@@ -686,7 +686,7 @@ gh attestation verify oci://ghcr.io/statsguy/shortly@<digest> --owner statsguy \
 
 Defense in depth on the path into the cluster:
 
-1. **`scripts/verify-image.sh`** (called by `deploy.sh`) — fast, clear error *before* Helm changes anything. Fails closed if `gh`, the registry, or the attestation is missing. Break-glass: `INSECURE_SKIP_VERIFY=1` (loud warning) for registry/Sigstore outages.
+1. **The platform's `scripts/verify-image.sh`** (called by `deploy.sh` and `promote.sh`, at `platform.lock`) — fast, clear error *before* Helm changes anything. Fails closed if `gh`, the registry, or the attestation is missing. Break-glass: `INSECURE_SKIP_VERIFY=1` (loud warning) for registry/Sigstore outages.
 2. **Kyverno `ImageValidatingPolicy`** — same rules at the API server for *every* create path (`kubectl`, CI, a compromised laptop). Tags are refused (`mutateDigest: false`): what was verified is what runs. Fail-closed webhook: if Kyverno cannot verify, new pods are refused rather than admitted unchecked.
 
 They must agree: the platform's `tests/test_admission_policies.py` asserts the policy and `verify-image.sh` name the same signer workflow. The image allowlist policy closes the bypass of "run a different image that has no provenance check"; in kind it is Audit-only so local `shortly:e2e` tags still work.
@@ -730,7 +730,7 @@ The `shortly` Service still exists and still serves in-cluster callers (probes, 
 
 **Build once, deploy many.** `scripts/deploy.sh <env> <image-ref>` deploys exactly what Argo CD would render for that environment (since platform plan 3.4): the platform's service chart at the digest pinned in its `apps/shortly/envs/<env>.yaml`, with the values files listed there. So CI's e2e tests the chart that runs, not a copy. It takes a digest reference (`repo@sha256:…`) for released images; the bits tested in staging are the bits promoted to prod. A tag reference is accepted only on a `kind-*` context, for local images, which are loaded into kind first. The chart refuses to render with neither digest nor tag.
 
-**Provenance gate.** Before deploying a digest, `deploy.sh` runs `scripts/verify-image.sh`, which checks the image's signed SLSA provenance with `gh attestation verify`. The deploy is refused unless:
+**Provenance gate.** Before deploying a digest, `deploy.sh` runs the platform's `scripts/verify-image.sh`, which checks the image's signed SLSA provenance with `gh attestation verify`. The deploy is refused unless:
 
 - the signature chains to Sigstore and the GitHub Actions OIDC issuer;
 - the signer is this repo's `release.yml`, not CI and not a fork;

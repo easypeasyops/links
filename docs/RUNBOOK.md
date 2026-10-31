@@ -6,8 +6,8 @@
 
 > **Platform files live in [easypeasyops/platform](https://github.com/easypeasyops/platform)**
 > (platform plan 3.4). Paths below under `deploy/argocd/platform`, `deploy/kind/`,
-> `deploy/platform/`, `deploy/policies/`, `scripts/cluster.sh` and `scripts/lib/namespaces.sh`
-> are in that repo, at the commit `platform.lock` names; so are the tests that check them.
+> `deploy/platform/`, `deploy/policies/`, `scripts/cluster.sh`, `scripts/lib/namespaces.sh` and
+> `scripts/verify-image.sh` (the deploy gate) are in that repo, at the commit `platform.lock` names; so are the tests that check them.
 > Run `cluster.sh` from a platform checkout beside this one (`../platform/scripts/cluster.sh`).
 
 Operational procedures for shortly. Commands assume you are in the repo root with `kubectl` pointed at `kind-shortly`. Design rationale lives in [DESIGN.md](DESIGN.md).
@@ -111,7 +111,7 @@ A release is a pushed `vX.Y.Z` tag on a `main` commit whose `pyproject.toml` ver
 
    ```bash
    D=sha256:<digest from the release notes>
-   scripts/verify-image.sh ghcr.io/statsguy/shortly@$D
+   ../platform/scripts/verify-image.sh ghcr.io/statsguy/shortly@$D
    # verified: built by …/release.yml@refs/tags/v0.3.0, from … refs/tags/v0.3.0 @ <commit>
    ```
 
@@ -208,7 +208,7 @@ Steps and thresholds are chart values (`canary:` in `values.yaml`). An aborted c
 
 **First upgrade onto chart 0.2.0** (the HPA arrives): the chart stops setting `replicas`, so Kubernetes may briefly set an existing prod Deployment to 1 replica until the HPA restores its minimum of 2, typically within 15 s. Do this upgrade at a quiet time, then check `kubectl -n shortly-prod get hpa,deploy shortly`. Fresh installs are not affected.
 
-**`deploy.sh` (CI's e2e and break glass only).** It refuses an environment that Argo CD manages (`REFUSED: … deployed by Argo CD from git`). For a digest, it first verifies the image's provenance (`scripts/verify-image.sh`) and stops if that fails; a tag is accepted only on a `kind-*` context. Then it runs `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the chart and values Argo CD uses for that environment: the platform's service chart at the digest its `apps/shortly/envs/<env>.yaml` pins, and the values files listed there (`deploy/service/values.yaml`, `deploy/service/slo-rules.values.yaml`, then the environment's file). It reads both from the platform checkout (`../platform` or `PLATFORM_DIR`), so it needs network access to `ghcr.io` for the chart (prod: `--wait=legacy`, then it follows the canary). Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
+**`deploy.sh` (CI's e2e and break glass only).** It refuses an environment that Argo CD manages (`REFUSED: … deployed by Argo CD from git`). For a digest, it first verifies the image's provenance (`../platform/scripts/verify-image.sh`) and stops if that fails; a tag is accepted only on a `kind-*` context. Then it runs `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the chart and values Argo CD uses for that environment: the platform's service chart at the digest its `apps/shortly/envs/<env>.yaml` pins, and the values files listed there (`deploy/service/values.yaml`, `deploy/service/slo-rules.values.yaml`, then the environment's file). It reads both from the platform checkout (`../platform` or `PLATFORM_DIR`), so it needs network access to `ghcr.io` for the chart (prod: `--wait=legacy`, then it follows the canary). Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
 
 **If `deploy.sh` says REFUSED**, nothing was deployed:
 
@@ -583,7 +583,7 @@ kubectl get imagevalidatingpolicy,validatingpolicy     # READY must be true
 
 | Message | Cause | Fix |
 | --- | --- | --- |
-| `ghcr.io/statsguy images must be a release digest with provenance…` | An unreleased or unattested image: a CI build, a fork, or a per-platform child digest instead of the release's index digest | Deploy the digest from the GitHub Release notes. `scripts/verify-image.sh <ref>` tells you why it fails |
+| `ghcr.io/statsguy images must be a release digest with provenance…` | An unreleased or unattested image: a CI build, a fork, or a per-platform child digest instead of the release's index digest | Deploy the digest from the GitHub Release notes. `../platform/scripts/verify-image.sh <ref>` tells you why it fails |
 | `image ghcr.io/statsguy/shortly:… does not have a digest` | A tag was used | Use `@sha256:…`; tags are never verified |
 | `provenance names a different repository than the image's` | The image was built and signed by another of our repos' release workflows (`ghcr.io/statsguy/<repo>` must come from `statsguy/<repo>`) | Treat as suspicious: an image pushed under another repo's name. Find who pushed it |
 | `provenance is not from a GitHub Actions workflow build` | The attestation exists but describes a different build | Treat as suspicious: who produced this image? |
@@ -601,7 +601,7 @@ kubectl delete validatingwebhookconfiguration <name>      # each kyverno one lis
 ../platform/scripts/cluster.sh up
 ```
 
-Afterwards, check that everything running is a release: `scripts/verify-image.sh` on each image from `kubectl -n shortly-prod get pods -o jsonpath='{..image}'`.
+Afterwards, check that everything running is a release: `../platform/scripts/verify-image.sh` on each image from `kubectl -n shortly-prod get pods -o jsonpath='{..image}'`.
 
 **Allowlist reports** (Audit in kind, so nothing is refused):
 
@@ -795,9 +795,9 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 | k8s → monitoring checks | `scrapes 0 healthy prod pods` (ServiceMonitor or labels), `rule groups loaded` (PrometheusRule missing: is `monitoring.clusterWide` on for prod?), `rules not evaluating cleanly` (a PromQL error), or `a dashboard query is invalid` | `ALERT_DRILL=0 scripts/monitoring-check.sh` against kind |
 | k8s → alert drill | `alert drill (scripts/alert-drill.sh)` with its output indented above it: the staging alert never reached Alertmanager, or went to the wrong receiver. It ran in the background from step 3a, so it's reported at step 7 | `scripts/alert-drill.sh` against kind; check Prometheus → Alerts, then Alertmanager → Status → Config |
 | test → `test_every_dashboard_query_matches_something_the_app_exports` | A dashboard query selects a metric or label the app doesn't export | Fix the query in `monitoring.dashboards` in `deploy/service/values.yaml` |
-| test → `test_documented_release_verifies` | The Quick reference digest is wrong, or the registry or Sigstore is unreachable from CI | `scripts/verify-image.sh <that digest>`; fix the digest in the Quick reference, or re-run if it was a network blip |
+| test → `test_documented_release_verifies` | The Quick reference digest is wrong, or the registry or Sigstore is unreachable from CI | `../platform/scripts/verify-image.sh <that digest>`; fix the digest in the Quick reference, or re-run if it was a network blip |
 | test → `test_ratelimit.py` | The limiter's semantics changed (burst, sustained rate, retry time), or the in-memory and Postgres limiters disagree | `uv run pytest tests/test_ratelimit.py -v`; the contract tests run both limiters on the same fake clock |
-| test → other `test_deploy_gate.py` tests | `deploy.sh` or `verify-image.sh` lost a check | Read the failing case: each one names the image that must be refused |
+| test → other `test_deploy_gate.py` tests | `deploy.sh` stopped calling the platform's gate, or deployed what it refused | Read the failing case: each one names the image that must be refused |
 | k8s → Lint and schema-validate | A chart manifest fails its schema | Run the step's `kubeconform` command locally; the error names the field |
 | k8s → backup and restore | `backup: the Job did not complete` (its logs print above: database, bucket, credentials), `a pod that isn't a backup pod reached the backup bucket` (the `seaweedfs` NetworkPolicy), `the scratch database never became ready` (the download failed: the `fetch` log prints above), `restored schema at revision …` or `restored N links, expected M` (the dump is incomplete or stale), `canary link … is not in the restored database` | `SOURCE=shortly-prod KEEP=1 scripts/restore-drill.sh` against kind; see Backup job not running |
 | k8s → expired-link cleanup | `index … missing or invalid` (the concurrent index build failed: see the migrate Job's logs), `the Job did not complete` (its logs print above: DB access, provenance, Pod Security), `left …, want e2efut1,e2enew1` (the cutoff or grace period changed) | `kubectl -n shortly-staging logs job/cleanup-e2e`; `uv run pytest tests/test_cleanup.py -v` |
@@ -824,7 +824,7 @@ The local environments are disposable: `../platform/scripts/cluster.sh up` rebui
 | Tear down everything | `../platform/scripts/cluster.sh down` |
 | Reset one environment's data (then redeploy so migrations recreate the schema) | `kubectl -n shortly-staging delete statefulset postgres && kubectl -n shortly-staging delete pvc data-postgres-0 && ../platform/scripts/cluster.sh up` |
 | Deploy a local build (kind only; tags are refused elsewhere) | `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev` |
-| Check an image's provenance | `scripts/verify-image.sh ghcr.io/statsguy/shortly@sha256:…` |
+| Check an image's provenance | `../platform/scripts/verify-image.sh ghcr.io/statsguy/shortly@sha256:…` |
 | Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step; `E2E_SUITE=platform` or `delivery` runs one CI half) |
 | Autoscaling drill only | `scripts/hpa-drill.sh` (stops once the HPA adds a ready pod; `RATE=1500 DURATION=240s FULL=1` for a longer push to the end, with k6's summary) |
 | Watch autoscaling | `kubectl -n shortly-prod get hpa shortly -w` |

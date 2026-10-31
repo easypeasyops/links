@@ -112,7 +112,7 @@ helm -n shortly-prod rollback shortly <revision>
 ```
 
 `deploy.sh` refuses a digest unless its signed provenance shows it was built by this repo's
-`release.yml` from a release tag (`scripts/verify-image.sh`); tags deploy only to kind.
+`release.yml` from a release tag (`../platform/scripts/verify-image.sh`); tags deploy only to kind.
 The cluster enforces the same rule at admission (Kyverno, `deploy/policies/`), so a
 hand-run `helm` or `kubectl` can't start an unverified shortly image either.
 A failed rollout rolls back automatically (`--rollback-on-failure`); `maxUnavailable: 0`

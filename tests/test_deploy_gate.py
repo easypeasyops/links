@@ -1,14 +1,13 @@
 """The deploy gate: scripts/deploy.sh must refuse anything whose provenance doesn't verify.
 
-Unit tests run deploy.sh against stub kubectl/helm/kind/docker/gh on PATH and check that
-helm is (or is never) called. Integration tests run scripts/verify-image.sh against the real
-registry and Sigstore, on the release digest the runbook documents.
+The check itself is the platform's scripts/verify-image.sh (tested in easypeasyops/platform).
+Unit tests run deploy.sh against a stub verifier and stub kubectl/helm/kind/docker on PATH,
+and check that helm is (or is never) called. The integration test runs the platform's real
+verifier, at platform.lock's commit, on the release digest the runbook documents.
 """
 
-import json
 import os
 import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -16,28 +15,14 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 DEPLOY = ROOT / "scripts/deploy.sh"
-VERIFY = ROOT / "scripts/verify-image.sh"
 DIGEST = "a" * 64
 IMAGE = f"ghcr.io/statsguy/shortly@sha256:{DIGEST}"
 
 
-def _attestation(ref: str, digest: str = DIGEST) -> str:
-    """What `gh attestation verify --format json` prints, trimmed to what we check."""
-    cert = {
-        "sourceRepositoryRef": ref,
-        "buildSignerURI": f"https://github.com/statsguy/shortly/.github/workflows/release.yml@{ref}",
-        "sourceRepositoryURI": "https://github.com/statsguy/shortly",
-        "sourceRepositoryDigest": "0123456789abcdef",
-    }
-    statement = {"subject": [{"digest": {"sha256": digest}}]}
-    return json.dumps(
-        [{"verificationResult": {"signature": {"certificate": cert}, "statement": statement}}]
-    )
-
-
 @pytest.fixture
 def stubs(tmp_path: Path, stub_platform: Path) -> tuple[Path, Path]:
-    """A bin dir of fake tools that log their calls, and that log."""
+    """A bin dir of fake tools that log their calls, and that log. The platform's verifier
+    is a stub too: it passes when FAKE_VERIFY is set, and refuses otherwise."""
     bin_dir, log = tmp_path / "bin", tmp_path / "calls.log"
     bin_dir.mkdir()
     scripts = {
@@ -47,12 +32,16 @@ def stubs(tmp_path: Path, stub_platform: Path) -> tuple[Path, Path]:
         "helm": 'if [ "$1" = template ]; then exit 1; fi',
         "kind": "",
         "docker": "exit 1",  # `docker image inspect`: the image isn't local
-        "gh": 'if [ -n "$FAKE_GH_OUTPUT" ]; then echo "$FAKE_GH_OUTPUT"; '
-        "else echo denied >&2; exit 1; fi",
     }
-    for name, body in scripts.items():
-        path = bin_dir / name
-        path.write_text(f'#!/usr/bin/env bash\necho "{name} $*" >> "{log}"\n{body}\n')
+    verify = stub_platform / "scripts/verify-image.sh"
+    for path, body in [(bin_dir / name, body) for name, body in scripts.items()] + [
+        (
+            verify,
+            'if [ -n "$FAKE_VERIFY" ]; then echo "verified: built by release.yml"; '
+            'else echo "REFUSED: no valid provenance for $1" >&2; exit 1; fi',
+        )
+    ]:
+        path.write_text(f'#!/usr/bin/env bash\necho "{path.name} $*" >> "{log}"\n{body}\n')
         path.chmod(0o755)
     return bin_dir, log
 
@@ -74,37 +63,18 @@ def _deploy(stubs: tuple[Path, Path], ref: str, **env: str) -> tuple[int, str, s
 
 
 def test_verified_release_digest_is_deployed(stubs: tuple[Path, Path]) -> None:
-    code, out, calls = _deploy(
-        stubs, IMAGE, FAKE_CONTEXT="prod-cluster", FAKE_GH_OUTPUT=_attestation("refs/tags/v0.2.0")
-    )
+    code, out, calls = _deploy(stubs, IMAGE, FAKE_CONTEXT="prod-cluster", FAKE_VERIFY="1")
     assert code == 0, out
-    assert "verified: built by" in out
+    assert f"verify-image.sh {IMAGE}" in calls  # the platform's gate, on this exact digest
     assert "helm upgrade --install shortly" in calls
     assert f"image.digest=sha256:{DIGEST}" in calls
 
 
-def test_digest_without_valid_provenance_is_refused(stubs: tuple[Path, Path]) -> None:
-    code, out, calls = _deploy(stubs, IMAGE, FAKE_CONTEXT="kind-shortly", FAKE_GH_OUTPUT="")
+def test_digest_the_gate_refuses_is_not_deployed(stubs: tuple[Path, Path]) -> None:
+    code, out, calls = _deploy(stubs, IMAGE, FAKE_CONTEXT="kind-shortly", FAKE_VERIFY="")
     assert code != 0
     assert "REFUSED: no valid provenance" in out
     assert "helm " not in calls  # nothing was deployed
-
-
-def test_digest_built_from_a_branch_is_refused(stubs: tuple[Path, Path]) -> None:
-    # Signed by release.yml, but from refs/heads/...: not a release.
-    code, out, calls = _deploy(
-        stubs, IMAGE, FAKE_CONTEXT="kind-shortly", FAKE_GH_OUTPUT=_attestation("refs/heads/main")
-    )
-    assert code != 0
-    assert "not from a release tag" in out
-    assert "helm " not in calls
-
-
-def test_attestation_for_a_different_digest_is_refused(stubs: tuple[Path, Path]) -> None:
-    output = _attestation("refs/tags/v0.2.0", digest="b" * 64)
-    code, _, calls = _deploy(stubs, IMAGE, FAKE_CONTEXT="kind-shortly", FAKE_GH_OUTPUT=output)
-    assert code != 0
-    assert "helm " not in calls
 
 
 def test_tag_outside_kind_is_refused(stubs: tuple[Path, Path]) -> None:
@@ -119,27 +89,21 @@ def test_tag_outside_kind_is_refused(stubs: tuple[Path, Path]) -> None:
 def test_local_tag_on_kind_is_deployed_without_verification(stubs: tuple[Path, Path]) -> None:
     code, out, calls = _deploy(stubs, "shortly:dev", FAKE_CONTEXT="kind-shortly")
     assert code == 0, out
-    assert "gh " not in calls
+    assert "verify-image.sh" not in calls
     assert "image.tag=dev" in calls
 
 
 def test_break_glass_skips_verification_loudly(stubs: tuple[Path, Path]) -> None:
     code, out, calls = _deploy(
-        stubs, IMAGE, FAKE_CONTEXT="prod-cluster", FAKE_GH_OUTPUT="", INSECURE_SKIP_VERIFY="1"
+        stubs, IMAGE, FAKE_CONTEXT="prod-cluster", FAKE_VERIFY="", INSECURE_SKIP_VERIFY="1"
     )
     assert code == 0, out
     assert "WARNING: provenance verification SKIPPED" in out
+    assert "verify-image.sh" not in calls
     assert "helm upgrade" in calls
 
 
 # ------------------------------------------------------------------- real registry
-
-
-def _real_gh() -> None:
-    if shutil.which("gh") is None:
-        if os.environ.get("CI"):
-            pytest.fail("gh is required for the provenance tests in CI")
-        pytest.skip("gh not installed")
 
 
 def _documented_release() -> str:
@@ -151,47 +115,9 @@ def _documented_release() -> str:
 
 
 @pytest.mark.integration
-def test_documented_release_verifies() -> None:
-    _real_gh()
-    result = subprocess.run([str(VERIFY), _documented_release()], capture_output=True, text=True)
+def test_documented_release_verifies(locked_verify_image: Path) -> None:
+    result = subprocess.run(
+        [str(locked_verify_image), _documented_release()], capture_output=True, text=True
+    )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "refs/tags/v" in result.stdout
-
-
-@pytest.mark.integration
-def test_real_release_is_refused_for_the_wrong_signer() -> None:
-    _real_gh()
-    env = {**os.environ, "VERIFY_SIGNER": "statsguy/shortly/.github/workflows/ci.yml"}
-    result = subprocess.run(
-        [str(VERIFY), _documented_release()], capture_output=True, text=True, env=env
-    )
-    assert result.returncode != 0
-    assert "REFUSED" in result.stderr
-
-
-@pytest.mark.parametrize(
-    ("ref", "reason"),
-    [
-        ("docker.io/statsguy/shortly@sha256:" + "a" * 64, "is not a ghcr.io/<owner>/<repo> image"),
-        ("ghcr.io/evil/shortly@sha256:" + "a" * 64, "is not one of statsguy's images"),
-        ("ghcr.io/statsguy/a/b@sha256:" + "a" * 64, "is not a ghcr.io/<owner>/<repo> image"),
-    ],
-)
-def test_verify_refuses_images_no_repo_of_ours_can_vouch_for(ref: str, reason: str) -> None:
-    """Keyed by identity (platform plan 1.5): the image's name says which repo must have
-    built it, and that repo must be one of ours. Refused before any network call."""
-    result = subprocess.run([str(VERIFY), ref], capture_output=True, text=True)
-    assert result.returncode == 1
-    assert reason in result.stderr
-
-
-@pytest.mark.integration
-def test_real_release_is_refused_as_another_repos_image() -> None:
-    """The release's provenance names statsguy/shortly: claimed for another repo, it fails."""
-    _real_gh()
-    env = {**os.environ, "VERIFY_REPO": "statsguy/pager"}
-    result = subprocess.run(
-        [str(VERIFY), _documented_release()], capture_output=True, text=True, env=env
-    )
-    assert result.returncode != 0
-    assert "REFUSED" in result.stderr

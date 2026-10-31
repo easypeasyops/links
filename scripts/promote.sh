@@ -7,7 +7,7 @@
 #   scripts/promote.sh prod sha256:... --pr     # also branch, commit, push and open the PR
 #
 # Refuses, before touching the file:
-#   - a digest without release provenance (scripts/verify-image.sh, the same check as deploy.sh)
+#   - a digest without release provenance (the platform's scripts/verify-image.sh, as deploy.sh)
 #   - for prod, a digest that staging hasn't run: it must be staging's digest on origin/main
 #     now or earlier (tests/test_gitops.py checks the same in CI, so a hand edit can't skip it)
 set -euo pipefail
@@ -28,7 +28,8 @@ cd "$ROOT"
 current=$(sed -nE 's/^  digest: "(sha256:[0-9a-f]{64})".*/\1/p' "$FILE")
 [[ "$current" != "$DIGEST" ]] || { echo "$ENV already runs $DIGEST"; exit 0; }
 
-verified=$("${VERIFY:-$ROOT/scripts/verify-image.sh}" "$REPO@$DIGEST") # VERIFY: tests only
+# The platform checkout beside this one, as scripts/lib/platform.sh finds it. VERIFY: tests only.
+verified=$("${VERIFY:-${PLATFORM_DIR:-$ROOT/../platform}/scripts/verify-image.sh}" "$REPO@$DIGEST")
 echo "$verified"
 version=$(sed -nE 's|.*refs/tags/(v[0-9][^ ]*).*|\1|p' <<<"$verified" | head -n 1)
 [[ -n "$version" ]] || { echo "could not read the release tag from verify-image.sh" >&2; exit 1; }
