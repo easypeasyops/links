@@ -4,7 +4,9 @@ CI checks out easypeasyops/platform at that commit for the kind e2e; scripts/lib
 reads it too. A malformed lock would fail CI only in the kind jobs, minutes in: catch it here.
 """
 
+import os
 import re
+import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,3 +33,21 @@ def test_reusable_workflows_are_the_locked_platform() -> None:
     )
     assert {name for name, _ in uses} == {"reusable-python-check.yml", "reusable-image.yml"}
     assert {ref for _, ref in uses} == {lock}
+
+
+def test_k6_image_is_the_platform_charts(stub_platform: Path) -> None:
+    """k6_image (scripts/lib/platform.sh) reads the k6 the service chart runs: the image CI
+    preloads into kind and the HPA drill uses."""
+    values = stub_platform / "charts/service/values.yaml"
+    values.parent.mkdir(parents=True)
+    values.write_text(
+        "canary:\n  analysis:\n    syntheticTraffic:\n      image: grafana/k6:9.9.9\n"
+    )
+    out = subprocess.run(
+        ["bash", "-c", f'source "{ROOT}/scripts/lib/platform.sh" && k6_image'],
+        env={**os.environ, "PLATFORM_DIR": str(stub_platform)},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert out == "grafana/k6:9.9.9\n"

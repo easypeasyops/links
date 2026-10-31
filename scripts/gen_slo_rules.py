@@ -1,6 +1,6 @@
 """Generate Prometheus SLO rules from an app's SLO spec (shortly's: deploy/prometheus/slos.yaml).
 
-    uv run python scripts/gen_slo_rules.py           # (re)write deploy/helm/shortly/rules/slo.yaml
+    uv run python scripts/gen_slo_rules.py           # (re)write deploy/prometheus/rules/slo.yaml
     uv run python scripts/gen_slo_rules.py --check   # exit 1 if the committed file is stale
     uv run python scripts/gen_slo_rules.py --spec <app>/slos.yaml --out <chart>/rules/slo.yaml
 
@@ -27,7 +27,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 # shortly's spec, and the rules file its chart ships (PrometheusRule): the defaults.
 SPEC = ROOT / "deploy/prometheus/slos.yaml"
-OUT = ROOT / "deploy/helm/shortly/rules/slo.yaml"
+OUT = ROOT / "deploy/prometheus/rules/slo.yaml"
 
 WINDOWS = ["5m", "30m", "1h", "2h", "6h", "1d", "3d", "30d"]
 

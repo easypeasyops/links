@@ -4,8 +4,8 @@
 # Run in CI by tests/test_alert_rules.py. Each scenario proves an alert fires when it should
 # AND stays quiet when it shouldn't: an alert that is never tested is assumed broken.
 rule_files:
-  - ../../helm/shortly/rules/slo.yaml
-  - ../../helm/shortly/rules/shortly.yaml
+  - ../rules/slo.yaml
+  - ../rules/shortly.yaml
 
 evaluation_interval: 1m
 

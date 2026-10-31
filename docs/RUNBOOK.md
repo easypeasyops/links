@@ -21,7 +21,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Current release | v0.7.1, `sha256:f8e4982b3a4197e0d68b83ef7bd06f0213bd54afffd65f4a088c21fd0852e046` (previous: v0.7.0, `sha256:9df4c29bd25d9f69b0ce2f7776a0affeab4d2bca18c859668927e398f4a21670`) |
 | Environments | kind cluster `shortly`; staging in namespace `shortly-staging` (Deployment, 1 replica), prod in `shortly-prod` (Argo Rollout, canary releases, HPA 2–4 replicas). Scripts take the environment (`staging`, `prod`); `scripts/lib/namespaces.sh` maps it to the namespace |
 | Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
-| Helm release | `shortly` in each namespace; chart `deploy/helm/shortly` |
+| Helm release | `shortly` in each namespace; the platform's service chart (digest in its `apps/shortly/envs/<env>.yaml`), values in `deploy/service/` and `deploy/envs/` |
 | Database | `postgres` StatefulSet per namespace; URL in Secret `shortly-db` key `url` |
 | Canary (prod) | New versions get 10%, then 50% of the Gateway's traffic, each step judged by Prometheus (traffic, 5xx ≤ 1%, redirect p99 ≤ 250 ms), then 100%: about 7 min. A failed step aborts and `deploy.sh` rolls back. Rollbacks to the last 3 revisions are immediate. See Deploy |
 | Deploys | GitOps: Argo CD (namespace `argocd`) syncs each environment from `deploy/envs/<env>.yaml` on `main` within 60 s. Promote with `scripts/promote.sh`; roll back by reverting the promotion PR. UI: http://argocd.localhost:8090 (front door) |
@@ -32,7 +32,7 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Network | Default-deny ingress per namespace; Postgres accepts shortly only; the app may reach DNS and Postgres only (`networkPolicy` values, `deploy/kind/network-policies.yaml`) |
 | Logs | JSON on stdout; `request_id` and `trace_id` on every line |
 | SLOs | redirects 99.9% available and 99% < 50 ms; creates 99.5% and 99% < 100 ms; 30-day window (`deploy/prometheus/slos.yaml`) |
-| Alerts | Rules in `deploy/helm/shortly/rules/` (shipped by the prod release). kind: Prometheus, Alertmanager and Grafana in namespace `monitoring` (see Local cluster operations). Compose: `http://localhost:9090/alerts` |
+| Alerts | Rules in `deploy/prometheus/rules/`, carried as text in `deploy/service/` (shipped by the prod release). kind: Prometheus, Alertmanager and Grafana in namespace `monitoring` (see Local cluster operations). Compose: `http://localhost:9090/alerts` |
 | Admission | Kyverno (namespace `kyverno`) refuses shortly images without release provenance in `staging` and `prod`, and reports images outside the allowlist (`deploy/policies/`) |
 | Rate limit | `POST /links`: per client IP (IPv6 /64), burst 20 then 60 per minute → 429 + `Retry-After`; state in Postgres, shared by all pods (`config.rateLimit`) |
 | Alert routing | anything in `staging` → `staging`; `severity=page` → `pager`; `severity=ticket` → `tickets` (`deploy/kind/monitoring-values.yaml`) |
@@ -777,8 +777,8 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 | Job → step | Usual cause | Reproduce and fix |
 | --- | --- | --- |
 | k8s → "a healthy canary was not promoted", events show `ErrImagePull` for `grafana/k6` | Docker Hub was slow or refused the pull (the canary's synthetic traffic never ran) | Re-run the job. CI preloads k6 (step "Preload k6 into kind"); if that step failed, Docker Hub is down: wait |
-| test → `test_chart_golden.py` | The chart now renders different manifests for an environment (a template, values default or env file changed) | Read the diff in the failure. If it's intended: `UPDATE_GOLDEN=1 uv run pytest tests/test_chart_golden.py`, commit `tests/golden/`. If not, the change has a side effect: fix it. The image digest and chart version are normalised, so promotions and release bumps never trip it |
-| test → `test_generated_slo_rules_are_current` | `slos.yaml` or the generator changed without regenerating | `uv run python scripts/gen_slo_rules.py`, commit `deploy/helm/shortly/rules/slo.yaml` |
+| test → `test_service_values.py` | `deploy/prometheus/rules/` and the rule text in `deploy/service/` differ | Copy the rule file's text into `monitoring.rules` (cause alerts), or regenerate `slo-rules.values.yaml` (SLO rules) |
+| test → `test_generated_slo_rules_are_current` | `slos.yaml` or the generator changed without regenerating | `uv run python scripts/gen_slo_rules.py`, commit `deploy/prometheus/rules/slo.yaml`; regenerate `deploy/service/slo-rules.values.yaml` too (Change an SLO or an alert, below) |
 | test → `test_every_rule_selector_matches_something_the_app_exports` | A metric, route, label or histogram bucket changed, and an alert now selects nothing | Update the rule (or `slos.yaml`) to the new name, or revert the rename |
 | test → `test_promtool_unit_tests_pass` | A rule's behaviour changed, or its annotations no longer match the test | Run promtool (command in `deploy/prometheus/tests/alerts_test.yaml`); fix the rule or update the expected alert |
 | test → `test_runbook_links_point_at_real_sections` | A RUNBOOK heading was renamed | Rename it back, or update `runbook_url` in the rules |
@@ -794,7 +794,7 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 | k8s → digest-mode render | API server rejects a manifest (e.g. an invalid label) | `helm template … --set image.digest=sha256:<64 hex> \| kubectl apply --dry-run=server -f -` against kind |
 | k8s → monitoring checks | `scrapes 0 healthy prod pods` (ServiceMonitor or labels), `rule groups loaded` (PrometheusRule missing: is `monitoring.clusterWide` on for prod?), `rules not evaluating cleanly` (a PromQL error), or `a dashboard query is invalid` | `ALERT_DRILL=0 scripts/monitoring-check.sh` against kind |
 | k8s → alert drill | `alert drill (scripts/alert-drill.sh)` with its output indented above it: the staging alert never reached Alertmanager, or went to the wrong receiver. It ran in the background from step 3a, so it's reported at step 7 | `scripts/alert-drill.sh` against kind; check Prometheus → Alerts, then Alertmanager → Status → Config |
-| test → `test_every_dashboard_query_matches_something_the_app_exports` | A dashboard query selects a metric or label the app doesn't export | Fix the query in `deploy/helm/shortly/dashboards/slo.json` |
+| test → `test_every_dashboard_query_matches_something_the_app_exports` | A dashboard query selects a metric or label the app doesn't export | Fix the query in `monitoring.dashboards` in `deploy/service/values.yaml` |
 | test → `test_documented_release_verifies` | The Quick reference digest is wrong, or the registry or Sigstore is unreachable from CI | `scripts/verify-image.sh <that digest>`; fix the digest in the Quick reference, or re-run if it was a network blip |
 | test → `test_ratelimit.py` | The limiter's semantics changed (burst, sustained rate, retry time), or the in-memory and Postgres limiters disagree | `uv run pytest tests/test_ratelimit.py -v`; the contract tests run both limiters on the same fake clock |
 | test → other `test_deploy_gate.py` tests | `deploy.sh` or `verify-image.sh` lost a check | Read the failing case: each one names the image that must be refused |
@@ -894,7 +894,7 @@ Don't run load tests against prod. The drill runs against the kind `prod` namesp
 
 ## Change an SLO or an alert
 
-1. SLOs: edit `deploy/prometheus/slos.yaml`, then run `uv run python scripts/gen_slo_rules.py`. Never edit `deploy/helm/shortly/rules/slo.yaml` by hand. Cause-based alerts: edit `deploy/helm/shortly/rules/shortly.yaml`. Both ship with the chart, so a rule change is deployed like code: staging is not affected, and prod picks it up on its next release.
+1. SLOs: edit `deploy/prometheus/slos.yaml`, then run `uv run python scripts/gen_slo_rules.py`. Then the values file: `uv run --script ../platform/scripts/gen_slo_rules.py --spec deploy/prometheus/slos.yaml --values --out deploy/service/slo-rules.values.yaml`. Never edit either generated file by hand. Cause-based alerts: edit `deploy/prometheus/rules/shortly.yaml` and the same text in `deploy/service/values.yaml` (`monitoring.rules.shortly`; a test fails if they differ). Argo CD renders shortly from `main`, so a rule change reaches the cluster when it merges.
 2. Add or update a promtool test in `deploy/prometheus/tests/alerts_test.yaml`. It needs one case where the alert fires and one where it must stay quiet.
 3. Give every alert a `runbook_url` pointing at a section of this runbook. Write the section first.
 4. Run `uv run pytest tests/test_alert_rules.py`; it needs Docker for the promtool step.

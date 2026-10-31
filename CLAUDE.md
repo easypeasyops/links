@@ -15,7 +15,7 @@ must stay true. Any PR that changes behaviour they describe updates them **in th
   `scripts/loadtest.sh` and update DESIGN (Capacity) with the new numbers
 - SLOs or alert rules → DESIGN (SLOs and alerting) and RUNBOOK (a playbook section per
   `runbook_url`); edit `deploy/prometheus/slos.yaml` and regenerate, never
-  `deploy/helm/shortly/rules/slo.yaml`
+  `deploy/prometheus/rules/slo.yaml` or `deploy/service/slo-rules.values.yaml`
 
 They are mirrored as Claude Docs (links in each file's header). When editing with Claude,
 update the Claude Docs copy in the same session so the two don't drift; the repo copy is
@@ -43,8 +43,8 @@ the one reviewed with the code.
   it writes a PR; that one is outside the session's control.)
 - **One problem per PR, small enough to review in one sitting**: aim for about 200 changed
   lines (a sweet spot, not a hard limit). Tests and the docs updates the change needs ride
-  in the same PR; generated files (`deploy/helm/shortly/rules/slo.yaml`,
-  `deploy/service/slo-rules.values.yaml`, `tests/golden/`, `uv.lock`) don't count, but say so in the description.
+  in the same PR; generated files (`deploy/prometheus/rules/slo.yaml`,
+  `deploy/service/slo-rules.values.yaml`, `uv.lock`) don't count, but say so in the description.
 - A bigger change goes in as a stack: each PR leaves `main` working and CI green on its own
   (dormant pieces first, for example a chart nothing applies yet, then the switch that uses
   it), and its description says where it sits in the stack.

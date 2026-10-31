@@ -445,7 +445,7 @@ Four SLOs say what users can expect from shortly. Alerts fire when the error bud
 
 **What counts as good.** 404 (unknown link) and 410 (expired) are correct answers, so they are good events. Every 5xx is bad, including the 503 from load shedding: the user did not get an answer. The redirect latency target is the load test's gate (p99 < 50 ms). Redirects get the stricter objectives because every click depends on them, while a failed create can be retried by its caller.
 
-**Source of truth.** The SLOs are declared in `deploy/prometheus/slos.yaml`. `scripts/gen_slo_rules.py` turns that file into Prometheus rules in `deploy/helm/shortly/rules/slo.yaml`, which is committed so reviewers see the real PromQL. The generator holds nothing of shortly's (platform plan 1.4): `--spec` and `--out` name an app's spec and rules file (shortly's are the defaults), and the spec's `runbook_url` is where every alert links. One gap for a second app: the SLI selectors pick series by `method` and `route` only, so two apps with the same route in one namespace would share an SLI; the spec would then need a `job` matcher. The rules live in the chart because the chart ships them (see Delivery below). For each SLO the generator emits:
+**Source of truth.** The SLOs are declared in `deploy/prometheus/slos.yaml`. `scripts/gen_slo_rules.py` turns that file into Prometheus rules in `deploy/prometheus/rules/slo.yaml`, which is committed so reviewers see the real PromQL; the platform's copy of the generator writes the same rules as a values file for the service chart (`deploy/service/slo-rules.values.yaml`, `--values`). The generator holds nothing of shortly's (platform plan 1.4): `--spec` and `--out` name an app's spec and rules file (shortly's are the defaults), and the spec's `runbook_url` is where every alert links. One gap for a second app: the SLI selectors pick series by `method` and `route` only, so two apps with the same route in one namespace would share an SLI; the spec would then need a `job` matcher. The service chart ships them, as text in shortly's values (see Delivery below); `tests/test_service_values.py` keeps the values and the rule files equal. For each SLO the generator emits:
 
 - `slo:sli_error:ratio_rate<window>`: the error ratio over 5m, 30m, 1h, 2h, 6h, 1d, 3d and 30d.
 - `slo:objective:ratio`: the target itself.
@@ -463,7 +463,7 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 | page | 14.4x over 1h and 5m, or 6x over 6h and 30m | 2% or 5% | 2m |
 | ticket | 3x over 1d and 2h, or 1x over 3d and 6h | 10% | 15m |
 
-**Cause-based alerts** in `deploy/helm/shortly/rules/shortly.yaml` (hand-written) cover what an SLO computed from the app's own metrics cannot see, or warn before the budget is spent:
+**Cause-based alerts** in `deploy/prometheus/rules/shortly.yaml` (hand-written, and carried as text in `deploy/service/values.yaml`) cover what an SLO computed from the app's own metrics cannot see, or warn before the budget is spent:
 
 | Alert | Severity | Why the SLO alerts miss it |
 | --- | --- | --- |
@@ -592,7 +592,7 @@ The generic jobs are the platform's reusable workflows, which any app's CI calls
 | mypy `--strict` | Wrong types at the HTTP ↔ service ↔ store boundaries | Runtime `AttributeError` / invalid status mapping that tests might not hit |
 | pytest + real Postgres (testcontainers) | Contract between SQLAlchemy models, Alembic, and `PostgresStore` | Passing unit tests against `InMemoryStore` while production SQL is wrong |
 | `--cov-fail-under=90` | Untested branches quietly landing | Regressions in collision retry, load shedding, rate-limit edges |
-| Chart golden files (`tests/golden/`, `test_chart_golden.py`) | Any change in what the chart renders for staging or prod: a template edit, a values default, an env setting | Refactors of the chart that quietly change what reaches the cluster; reviewers reading templates instead of the manifests Argo CD applies |
+| Chart golden files (the platform's `charts/service/tests/shortly/`) | Any change in what the service chart renders for shortly's staging or prod: a template edit, a values default, an env setting | Refactors of the chart that quietly change what reaches the cluster; reviewers reading templates instead of the manifests Argo CD applies |
 | promtool / amtool / Kyverno CLI tests | Alert rules that never fire; policies that never deny; dashboard PromQL that selects nothing | Silent monitoring: the first time you learn an alert is broken is during an incident |
 
 Toolchain: Python 3.14 (`.python-version`), uv + committed `uv.lock`, `src/` layout. The same ruff/mypy/pytest stack runs in pre-commit locally so developers see failures before the PR.
@@ -693,7 +693,7 @@ They must agree: the platform's `tests/test_admission_policies.py` asserts the p
 
 ## Deployment
 
-One Helm chart (`deploy/helm/shortly`, Helm 4) deploys the same image digest to `staging`, then `prod`; per-environment differences live only in `deploy/envs/<env>.yaml`.
+One Helm chart (the platform's service chart, pinned by digest; Helm 4) deploys the same image digest to `staging`, then `prod`; per-environment differences live only in `deploy/envs/<env>.yaml`.
 
 An environment and the namespace it runs in are two things: staging runs in `shortly-staging` and prod in `shortly-prod`, one namespace per app and environment, so apps can share a cluster (platform plan, Phase 2). `scripts/lib/namespaces.sh` maps one to the other for every script, Argo CD's Applications deploy to the new names, and the chart takes the environment's own name from `environment` in `deploy/envs/<env>.yaml` (traces' `deployment.environment.name` stays `prod`). `tests/test_namespaces.py` keeps scripts from writing a namespace directly. What selects the app's namespaces names them (`shortly-staging`, `shortly-prod`): the admission policies, the Argo CD project, the Gateway's app listener, the backup bucket's network policy; Alertmanager's no-paging route matches any app's staging (`namespace =~ ".+-staging"`). The move went expand (everything accepted both names, PR 2.1b), migrate (`cluster.sh move-namespaces` copied the data, then the switch), contract (the old names removed). With more apps these lists grow per app: selecting namespaces by a label instead is the follow-up.
 
@@ -855,7 +855,7 @@ flowchart LR
   CI2 -->|merge| M2[main] -->|≤ 60 s| A2[Argo CD syncs prod] --> C[Rollout: 10% → 50% → 100%]
 ```
 
-**What is in git.** Since platform plan 3.3, shortly's two Applications come from the platform repo: its ApplicationSet (`easypeasyops/platform` `apps/applicationset.yaml`) generates `shortly-staging` and `shortly-prod` from `apps/shortly/envs/<env>.yaml`, under the AppProject `apps/shortly/project.yaml` (the service chart and this repository, the two namespaces, nothing cluster-scoped). Each renders the platform's **service chart** from GHCR, pinned by digest in that env file, with values from this repository's `main`, layered: `deploy/service/values.yaml`, `deploy/service/slo-rules.values.yaml` (generated), `deploy/envs/<env>.yaml`. The last names the release digest itself (`image.digest`). So the platform owns *how* shortly runs (the chart and its pin) and this repository owns *what* runs (its values and digests). `scripts/cluster.sh` applies the platform's `apps` root. Since plan step 3.4, CI's e2e (step 12) deploys through that same ApplicationSet; links' own Argo CD objects are gone. Until the old `deploy/helm/shortly` chart is deleted too, `tests/test_service_values.py` keeps `deploy/service/` equal to it. Argo CD polls `main` every 60 s. Sync is automatic, with `prune` (a resource removed from the chart is removed from the cluster) and `selfHeal` (a hand edit is put back within seconds).
+**What is in git.** Since platform plan 3.3, shortly's two Applications come from the platform repo: its ApplicationSet (`easypeasyops/platform` `apps/applicationset.yaml`) generates `shortly-staging` and `shortly-prod` from `apps/shortly/envs/<env>.yaml`, under the AppProject `apps/shortly/project.yaml` (the service chart and this repository, the two namespaces, nothing cluster-scoped). Each renders the platform's **service chart** from GHCR, pinned by digest in that env file, with values from this repository's `main`, layered: `deploy/service/values.yaml`, `deploy/service/slo-rules.values.yaml` (generated), `deploy/envs/<env>.yaml`. The last names the release digest itself (`image.digest`). So the platform owns *how* shortly runs (the chart and its pin) and this repository owns *what* runs (its values and digests). `scripts/cluster.sh` applies the platform's `apps` root. Since plan step 3.4, CI's e2e (step 12) deploys through that same ApplicationSet; links' own Argo CD objects are gone. links' own chart (`deploy/helm/shortly`) is gone too: `deploy/service/` is shortly's only deploy configuration. Argo CD polls `main` every 60 s. Sync is automatic, with `prune` (a resource removed from the chart is removed from the cluster) and `selfHeal` (a hand edit is put back within seconds).
 
 **A merged PR is a deploy, a revert is a rollback.** `scripts/promote.sh <env> <digest>` checks the digest's provenance (the same `verify-image.sh` as `deploy.sh`) and writes it, with its version, into the env file; `--pr` also opens the PR. Merging is the approval. Reverting the PR is the rollback; for prod inside the Rollout's `rollbackWindow` that takes seconds, without canary steps.
 
@@ -1022,7 +1022,7 @@ Only creates (10% of the mix) pay for the extra query, so the cost is small, and
 3. **The pool is not the bottleneck.** At about 300 req/s, a median of 1 connection was in use, with a peak of 4. A pool of 1 tripled p95 latency, so the pool stays at 5.
 4. **Overload queued silently.** Past the knee, latency reached seconds with zero errors. With the old 30 s `pool_timeout`, a slow database would have done the same. Now it sheds after 1 s.
 
-**Sizing** (chart 0.2.0, `deploy/helm/shortly/values.yaml`):
+**Sizing** (since chart 0.2.0; now `deploy/service/values.yaml`):
 
 | Setting | Value | Derivation |
 | --- | --- | --- |

@@ -65,7 +65,7 @@ services:
     image: prom/prometheus:v3.15.0
     volumes:
       - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./deploy/helm/shortly/rules:/etc/prometheus/rules:ro # the chart's alert rules
+      - ./deploy/prometheus/rules:/etc/prometheus/rules:ro # shortly's alert rules
     ports:
       - "127.0.0.1:9090:9090"
 

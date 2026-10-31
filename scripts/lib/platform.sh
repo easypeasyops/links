@@ -45,3 +45,13 @@ values_args() {
     printf '%s\n' --values "$_links_root/$path"
   done
 }
+
+# The k6 image the platform's service chart runs (the canary's synthetic traffic). CI loads
+# it into kind ahead of time and the HPA drill uses the same one, so no node pulls k6 from
+# Docker Hub mid-drill (a timed-out pull once aborted a healthy canary).
+k6_image() {
+  local f="$PLATFORM_DIR/charts/service/values.yaml" image
+  image=$(sed -nE 's/^ +image: (grafana\/k6:[^ ]+).*/\1/p' "$f")
+  [[ -n "$image" ]] || { echo "no k6 image in $f" >&2; return 1; }
+  echo "$image"
+}
