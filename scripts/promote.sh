@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Promote a release to an environment, the GitOps way: write its digest into
-# deploy/envs/<env>.yaml. Merging that change to main is the deploy (Argo CD syncs it,
-# deploy/argocd/); reverting it is the rollback.
+# deploy/envs/<env>.yaml. Merging that change to main is the deploy (Argo CD syncs it: the
+# platform's ApplicationSet reads this repo's main); reverting it is the rollback.
 #
 #   scripts/promote.sh staging ghcr.io/statsguy/shortly@sha256:...   # or just sha256:...
 #   scripts/promote.sh prod sha256:... --pr     # also branch, commit, push and open the PR

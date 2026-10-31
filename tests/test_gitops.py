@@ -67,21 +67,6 @@ def test_prod_runs_only_what_staging_ran() -> None:
     )
 
 
-def test_applications_differ_only_by_environment() -> None:
-    apps = list(yaml.safe_load_all((ROOT / "deploy/argocd/applications.yaml").read_text()))
-    assert [a["metadata"]["name"] for a in apps] == [f"shortly-{env}" for env in ENVS]
-    normalised = []
-    for app, env in zip(apps, ENVS, strict=True):
-        spec = app["spec"]
-        assert spec["destination"]["namespace"] == f"shortly-{env}"  # <app>-<env>
-        assert spec["source"]["helm"]["valueFiles"] == [f"../../envs/{env}.yaml"]
-        assert spec["source"]["targetRevision"] == "main"
-        assert spec["syncPolicy"]["automated"] == {"prune": True, "selfHeal": True}
-        text = yaml.safe_dump(app).replace(env, "ENV")
-        normalised.append(text)
-    assert normalised[0] == normalised[1]
-
-
 # ------------------------------------------------------------------- promote.sh, with stubs
 STAGED = "sha256:" + "b" * 64
 NEW = "sha256:" + "c" * 64
