@@ -67,11 +67,33 @@ jobs:
           # Platform: everything.
           - { suite: platform, policies: "1", backups: "1" }
           # Delivery: no admission policies or backups (unused there). Both install the
-          # platform through Argo CD, from this commit: what CI tests is what a laptop runs.
+          # platform through Argo CD, at platform.lock's commit: what CI tests is what a
+          # laptop runs.
           - { suite: delivery, policies: "0", backups: "0" }
+    env:
+      # The platform repo, checked out at platform.lock's commit (scripts/lib/platform.sh).
+      PLATFORM_DIR: ${{ github.workspace }}/.platform
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+
+      # The platform this commit runs on (platform plan 3.4): cluster.sh, the kind config, the
+      # policies and the platform chart all come from easypeasyops/platform at the commit
+      # platform.lock names. A platform change reaches this e2e when a PR moves the lock.
+      - name: Which platform (platform.lock)
+        id: platform
+        run: |
+          sha=$(sed -nE 's/^easypeasyops\/platform@([0-9a-f]{40})$/\1/p' platform.lock)
+          [[ -n "$sha" ]] || { echo "::error::platform.lock names no easypeasyops/platform@<sha>"; exit 1; }
+          echo "sha=$sha" >>"$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: needs.scope.outputs.full == 'true'
+        with:
+          repository: easypeasyops/platform
+          ref: ${{ steps.platform.outputs.sha }}
+          path: .platform
           persist-credentials: false
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
@@ -119,7 +141,7 @@ jobs:
         if: needs.scope.outputs.full == 'true'
         with:
           cluster_name: shortly
-          config: deploy/kind/cluster.yaml
+          config: .platform/deploy/kind/cluster.yaml
 
       # The canary's synthetic traffic and the HPA drill run k6 from Docker Hub. A kind node
       # pulling it anonymously once timed out on Docker Hub's token endpoint: no traffic, so
@@ -147,11 +169,10 @@ jobs:
 
       - name: Platform through Argo CD; namespaces, Postgres, secrets
         if: needs.scope.outputs.full == 'true'
-        run: scripts/cluster.sh up
+        run: .platform/scripts/cluster.sh up
         env:
-          # Argo CD syncs the platform from this commit (the PR's head: a merge commit only
-          # exists on GitHub's side under a ref Argo CD doesn't fetch).
-          PLATFORM_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+          # Argo CD syncs the platform from easypeasyops/platform at the locked commit.
+          PLATFORM_REVISION: ${{ steps.platform.outputs.sha }}
           ARGOCD_APPS: "0" # Argo CD doesn't manage the app yet: e2e step 12 does that
           POLICIES: ${{ matrix.policies }}
           BACKUPS: ${{ matrix.backups }}

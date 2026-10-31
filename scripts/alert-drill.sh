@@ -10,8 +10,8 @@
 # touch staging), so its wait costs CI no time. scripts/monitoring-check.sh runs it too,
 # unless ALERT_DRILL=0.
 set -euo pipefail
-# shellcheck source=scripts/lib/namespaces.sh
-source "$(dirname "$0")/lib/namespaces.sh"
+# shellcheck source=scripts/lib/platform.sh
+source "$(dirname "$0")/lib/platform.sh"
 export STAGING_NS
 
 pass() { echo "ok   $*"; }

@@ -36,7 +36,7 @@ def _attestation(ref: str, digest: str = DIGEST) -> str:
 
 
 @pytest.fixture
-def stubs(tmp_path: Path) -> tuple[Path, Path]:
+def stubs(tmp_path: Path, stub_platform: Path) -> tuple[Path, Path]:
     """A bin dir of fake tools that log their calls, and that log."""
     bin_dir, log = tmp_path / "bin", tmp_path / "calls.log"
     bin_dir.mkdir()
@@ -59,7 +59,13 @@ def stubs(tmp_path: Path) -> tuple[Path, Path]:
 
 def _deploy(stubs: tuple[Path, Path], ref: str, **env: str) -> tuple[int, str, str]:
     bin_dir, log = stubs
-    full_env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}", **env}
+    platform = bin_dir.parent / "platform"  # the stub_platform fixture, beside bin/
+    full_env = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "PLATFORM_DIR": str(platform),
+        **env,
+    }
     result = subprocess.run(
         [str(DEPLOY), "prod", ref], capture_output=True, text=True, env=full_env, check=False
     )

@@ -920,7 +920,9 @@ flowchart TB
 | Server-side apply and server-side diff | The kube-prometheus-stack, Kyverno and Envoy Gateway CRDs are too big for client-side apply, and fields that other controllers write (webhook CA bundles) are not drift |
 | Release names kept | Each chart keeps the release name `cluster.sh` used, so on an existing cluster Argo CD adopts the running resources instead of recreating them, and `cluster.sh` deletes the old Helm records once it has |
 
-**CI installs the platform the same way.** Both kind jobs run `cluster.sh up` with the PR's commit as `PLATFORM_REVISION`, so what CI tests is what a laptop runs; there is no Helm-only shortcut that could pass while the Argo CD path is broken.
+**CI installs the platform the same way.** Both kind jobs check out the platform repo (`easypeasyops/platform`) at the commit `platform.lock` names, and run *its* `cluster.sh up` with that commit as `PLATFORM_REVISION`, so what CI tests is what a laptop runs; there is no Helm-only shortcut that could pass while the Argo CD path is broken.
+
+**Platform changes arrive in waves (platform plan 3.4).** A change merged in the platform repo passes that repo's static checks, but reaches shortly only when a PR here moves `platform.lock` to it, and that PR runs this full e2e: shortly proves a new platform before running on it. The scripts find the platform through `scripts/lib/platform.sh`: `PLATFORM_DIR` (CI: the checkout), or the clone beside this one on a laptop, with a note when it isn't at the locked commit. Until 3.4 deletes them, this repo's copies of the platform files are no longer used by CI.
 
 **Alerts on Argo CD itself.** With GitOps, a sync that silently stops is a deploy that silently never happens. Four tickets, none paging (`deploy/argocd/platform/files/argocd-rules.yaml`, promtool-tested): an Application out of sync for 15 minutes, unhealthy (Degraded, Missing, Unknown) for 10, a failed sync, and the controller not scraped for 10 minutes. Playbook: RUNBOOK, Argo CD alerts.
 
