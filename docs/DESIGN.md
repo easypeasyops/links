@@ -576,7 +576,7 @@ flowchart TB
 
 #### Job `check` — “Is the code correct?”
 
-The generic jobs live in reusable workflows that any app's CI calls with its own inputs (platform plan, Phase 1): `reusable-python-check.yml` (`check`) and `reusable-image.yml` (`image`). `ci.yml` keeps what is shortly's own: the change scope, the kind e2e drills and the `ci` gate. Their checks are named `<caller> / <job>` (`check / lint, type-check, test`); only `ci` is required. The release workflow stays in `release.yml` for now: a reusable workflow becomes the signer of the provenance, so moving it waits for the identity-based admission policy (plan PR 1.5).
+The generic jobs are the platform's reusable workflows, which any app's CI calls with its own inputs: `reusable-python-check.yml` (`check`) and `reusable-image.yml` (`image`), from `easypeasyops/platform` at the commit `platform.lock` names (platform plan 3.4; until then they were copies in this repo). They move only with the lock, in a PR whose kind e2e proves the new platform; a test keeps the two equal, and Dependabot leaves them alone. `ci.yml` keeps what is shortly's own: the change scope, the kind e2e drills and the `ci` gate. Their checks are named `<caller> / <job>` (`check / lint, type-check, test`); only `ci` is required. The release workflow stays in `release.yml` for now: a reusable workflow becomes the signer of the provenance, so moving it waits for the identity-based admission policy (plan PR 1.5).
 
 | Piece | Catches | If missing |
 | --- | --- | --- |

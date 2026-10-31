@@ -32,12 +32,13 @@ jobs:
         id: scope
         run: scripts/ci-scope.sh
 
-  # The generic jobs live in reusable workflows (platform plan, Phase 1): any app's CI calls
+  # The generic jobs are the platform's reusable workflows, pinned to platform.lock's commit
+  # (tests/test_platform_lock.py keeps the two equal; move them together). Any app's CI calls
   # them with its own inputs. Their checks are named "<caller> / <job>"; only `ci` (gate,
   # below) is required, so the names are free to change.
   check:
     needs: scope
-    uses: ./.github/workflows/reusable-python-check.yml
+    uses: easypeasyops/platform/.github/workflows/reusable-python-check.yml@e1f213842918ccf1bbe6f766b3434d55b4a85a20 # platform.lock
     with:
       run: ${{ needs.scope.outputs.full == 'true' }}
       # Full history: tests/test_gitops.py checks prod's digest against everything
@@ -47,7 +48,7 @@ jobs:
 
   image:
     needs: scope
-    uses: ./.github/workflows/reusable-image.yml
+    uses: easypeasyops/platform/.github/workflows/reusable-image.yml@e1f213842918ccf1bbe6f766b3434d55b4a85a20 # platform.lock
     with:
       run: ${{ needs.scope.outputs.full == 'true' }}
       smoke-command: SHORTLY_IMAGE="$IMAGE" scripts/smoke.sh
