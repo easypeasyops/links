@@ -867,6 +867,8 @@ flowchart LR
 
 **`deploy.sh` stays for two jobs:** CI's e2e, which deploys a local build to a cluster without Applications, and break glass. It refuses an environment whose Application exists (`ARGOCD_OVERRIDE=1` overrides, after auto-sync is turned off: RUNBOOK).
 
+**Step 12 uses the platform's own ApplicationSet** (since platform plan 3.4): shortly's AppProject and `apps/applicationset.yaml` from the platform at `platform.lock`, applied as they are, with three CI-only changes made by `scripts/lib/e2e-appset.py`: only prod's env file, at the locked commit; values from the commit under test plus the platform's `e2e-values.yaml` and the local build; and `applicationsSync: create-only`, so the drill's edit to the Application isn't reverted. So the GitOps drill exercises the template that deploys shortly, not a copy.
+
 **Proven on every PR** (e2e step 12; first green run: takeover 13 s, a hand edit reverted in 2 s, the canary 215 s): Argo CD takes prod over from the PR's own commit (the local build instead of the digest), reverts a hand edit of the PodDisruptionBudget, then runs a full canary started by a change to the Application, with analysis and synthetic traffic, while staying in sync.
 
 | Choice | Why |
