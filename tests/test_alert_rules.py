@@ -34,7 +34,7 @@ from tests.conftest import FakeClock, scripted_codes
 
 ROOT = Path(__file__).resolve().parent.parent
 PROM = ROOT / "deploy/prometheus"
-RULES = ROOT / "deploy/helm/shortly/rules"  # the chart ships them as PrometheusRules
+RULES = PROM / "rules"  # deploy/service/ ships the same text (tests/test_service_values.py)
 RULE_FILES = sorted(RULES.glob("*.yaml"))
 # Metrics that come from outside the app: Prometheus itself and kube-state-metrics.
 EXTERNAL = {
@@ -123,7 +123,7 @@ def test_generated_slo_rules_are_current() -> None:
     gen = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(gen)
     assert (RULES / "slo.yaml").read_text() == gen.render(), (
-        "deploy/helm/shortly/rules/slo.yaml is stale: run `uv run python scripts/gen_slo_rules.py`"
+        "deploy/prometheus/rules/slo.yaml is stale: run `uv run python scripts/gen_slo_rules.py`"
     )
 
 
@@ -153,12 +153,14 @@ def test_every_dashboard_query_matches_something_the_app_exports(clock: FakeCloc
     samples = _exercised_metrics(clock)
     recorded = {r["record"] for r in _rules() if "record" in r}
     checked = 0
-    for path in sorted((ROOT / "deploy/helm/shortly/dashboards").glob("*.json")):
-        for panel in json.loads(path.read_text())["panels"]:
+    # shortly's own dashboards; the SLO dashboard is the platform chart's, over recorded series.
+    values = yaml.safe_load((ROOT / "deploy/service/values.yaml").read_text())
+    for name, text in values["monitoring"]["dashboards"].items():
+        for panel in json.loads(text)["panels"]:
             for target in panel.get("targets", []):
-                where = f"{path.name}: {panel['title']}"
+                where = f"{name}: {panel['title']}"
                 checked += _check_selectors(where, target["expr"], samples, recorded)
-    assert checked >= 5  # requests, latency, pool size, pool in use, load shed
+    assert checked >= 2  # pool in use, load shed
 
 
 def test_runbook_links_point_at_real_sections() -> None:

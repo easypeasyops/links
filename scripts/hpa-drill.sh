@@ -26,7 +26,7 @@ RATE="${RATE:-1000}"
 # 100 s leaves about 2x margin before the drill fails.
 DURATION="${DURATION:-100s}"
 FULL="${FULL:-0}"
-K6_IMAGE="${K6_IMAGE:-grafana/k6:2.3.0}"
+K6_IMAGE="${K6_IMAGE:-$(k6_image)}" # the one CI preloads into kind
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 JOB=k6-hpa-drill
 

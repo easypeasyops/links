@@ -1,14 +1,13 @@
 # shortly's values for the platform's service chart (easypeasyops/platform charts/service),
-# shared by every environment. Platform plan 3.3: Argo CD will render shortly from that
+# shared by every environment. Since platform plan 3.3, Argo CD renders shortly from that
 # chart, pinned by digest, with these values from this repo, layered as
 #   deploy/service/values.yaml            this file (hand-written)
 #   deploy/service/slo-rules.values.yaml  SLO rules, generated from deploy/prometheus/slos.yaml
 #                                         by the platform's scripts/gen_slo_rules.py --values
 #   deploy/envs/<env>.yaml                the environment's settings and image digest
 #
-# DORMANT until the switch (3.3c): today Argo CD still renders deploy/helm/shortly. Until
-# that chart is deleted (3.4), tests/test_service_values.py keeps every value here equal to
-# what it ships (its values, rules, canary script and dashboard panels).
+# monitoring.rules.shortly is deploy/prometheus/rules/shortly.yaml as text (promtool and the
+# local Prometheus read the file; tests/test_service_values.py keeps the two equal).
 
 app:
   name: shortly

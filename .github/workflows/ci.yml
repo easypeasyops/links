@@ -44,7 +44,6 @@ jobs:
       # Full history: tests/test_gitops.py checks prod's digest against everything
       # staging has run on main.
       fetch-depth: 0
-      helm-version: v4.3.1 # tests render the chart (test_chart_golden.py)
 
   image:
     needs: scope
@@ -102,22 +101,6 @@ jobs:
         with:
           version: v4.3.1 # deploy.sh uses Helm 4 flags (--rollback-on-failure)
 
-      - name: Lint and schema-validate the chart
-        if: needs.scope.outputs.full == 'true'
-        run: |
-          helm lint deploy/helm/shortly --set image.tag=ci
-          # --api-versions renders the ServiceMonitor/PrometheusRule (normally only rendered
-          # where the CRDs exist); their schemas come from the CRDs catalog, pinned by commit.
-          crds=https://raw.githubusercontent.com/datreeio/CRDs-catalog/501527ab9c40c827144c8f45945b25a023e344ce
-          for env in staging prod; do
-            helm template shortly deploy/helm/shortly -n "$env" -f "deploy/envs/$env.yaml" --set image.tag=ci \
-              --api-versions monitoring.coreos.com/v1/ServiceMonitor \
-              --api-versions monitoring.coreos.com/v1/PrometheusRule \
-              | docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary -kubernetes-version 1.37.0 \
-                  -schema-location default \
-                  -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" -
-          done
-
       - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         if: needs.scope.outputs.full == 'true'
         with:
@@ -131,8 +114,7 @@ jobs:
       - name: Preload k6 into kind
         if: needs.scope.outputs.full == 'true'
         run: |
-          image=$(sed -nE 's/^ +image: (grafana\/k6:[^ ]+).*/\1/p' .platform/charts/service/values.yaml)
-          [[ -n "$image" ]] || { echo "no k6 image in the platform's charts/service/values.yaml"; exit 1; }
+          image=$(source scripts/lib/platform.sh && k6_image) # the one hpa-drill.sh uses
           for attempt in 1 2 3; do docker pull -q "$image" && break; sleep $((attempt * 15)); done
           kind load docker-image "$image" --name shortly
 
