@@ -38,7 +38,7 @@ jobs:
   # below) is required, so the names are free to change.
   check:
     needs: scope
-    uses: easypeasyops/platform/.github/workflows/reusable-python-check.yml@fac7a23ca4814114747fa39b5837c3e27bbb4b11 # platform.lock
+    uses: easypeasyops/platform/.github/workflows/reusable-python-check.yml@d93f8750c7768c1f1cf491cbfaf6bd5b98877bd4 # platform.lock
     with:
       run: ${{ needs.scope.outputs.full == 'true' }}
       # Full history: tests/test_gitops.py checks prod's digest against everything
@@ -47,7 +47,7 @@ jobs:
 
   image:
     needs: scope
-    uses: easypeasyops/platform/.github/workflows/reusable-image.yml@fac7a23ca4814114747fa39b5837c3e27bbb4b11 # platform.lock
+    uses: easypeasyops/platform/.github/workflows/reusable-image.yml@d93f8750c7768c1f1cf491cbfaf6bd5b98877bd4 # platform.lock
     with:
       run: ${{ needs.scope.outputs.full == 'true' }}
       smoke-command: SHORTLY_IMAGE="$IMAGE" scripts/smoke.sh
