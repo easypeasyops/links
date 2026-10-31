@@ -896,9 +896,13 @@ Since PR #60 everything under the app comes from git too. Only Argo CD itself an
 flowchart TB
   CS["scripts/cluster.sh up<br/>Helm: Argo CD (bootstrap)"] --> Root
   Root["Application platform (root)<br/>deploy/argocd/platform, a Helm chart<br/>parameters: arch, revision, components"]
+  Root --> WP
   Root --> WB
   Root --> W0
   Root --> W1
+  subgraph WP["wave -2: what the children may deploy"]
+    PP[platform-project<br/>the AppProject, from git]
+  end
   subgraph WB["wave -1: what wave 0's Secrets need"]
     ES[external-secrets<br/>External Secrets Operator]
     CM[cert-manager]
@@ -921,6 +925,7 @@ flowchart TB
     KP[kyverno-policies<br/>Kyverno's webhook]
     AM[Argo CD alerts<br/>monitoring CRDs]
   end
+  WP -->|"all Healthy"| WB
   WB -->|"all Healthy"| W0
   W0 -->|"all Healthy"| W1
 ```
@@ -932,6 +937,8 @@ flowchart TB
 | Values files stay in git, beside the chart's source | Each chart Application is multi-source: the chart from its registry, `$values` from this repository at the root's revision |
 | metrics-server vendored, not fetched | The release manifest is checked into `deploy/platform/metrics-server/` with its SHA-256; a kustomize patch adds the kind-only flag |
 | Two sync waves, with Application health on | The policies need Kyverno's webhook serving, and the alerts on Argo CD need kube-prometheus-stack's CRDs: both come from slow charts, so they wait in wave 1. The Gateway and the tool routes need only Envoy Gateway's CRDs, which arrive within seconds, so they stay in wave 0 and the sync retry covers the race. In wave 1 they waited for the slowest chart, and the Envoy proxy's 2-minute start stopped overlapping with it: the platform job's install went from about 2.5 to 7.5 minutes (CI, PR #60). Argo CD only waits for a wave's Applications to be Healthy if it reports Application health, which `argocd-cm` turns back on (`deploy/kind/argocd-values.yaml`) |
+| The AppProject comes from git too | `cluster.sh` applies `platform-project.yaml` once, to bootstrap (the root itself is in that project); after that the `platform-project` child keeps it in sync. Before, a change that added a chart registry or namespace reached a running cluster's Applications but not the project, and the new child stayed Unknown until someone re-ran `cluster.sh up` (platform #20, #23) |
+| Waves overlap on a fresh cluster; retries order them | Argo CD holds a wave only for children that report Progressing, and a child that has never synced reports Missing, so every wave's children are created at once. A child whose dependency isn't ready (a webhook, a CRD, the store) fails its sync and retries every 5 s, doubling to 30 s, 20 times: it starts at most 30 s after it could. With retries up to 2 minutes apart, a chain of them (External Secrets' webhook, the store, the bucket's keys, the policies) cost CI 2 to 4 minutes (links #113) |
 | A wave before the charts (platform plan 4.1) | External Secrets Operator syncs in wave -1, so its CRDs and controller exist before wave 0, whose charts will read Secrets it makes (Grafana's admin password, the bucket's keys) |
 | An operator for the databases (platform plan 4.2) | CloudNativePG runs Postgres from a `Cluster` object: failover, base backups and WAL archiving (point-in-time recovery) come from the operator instead of a hand-rolled StatefulSet and an hourly `pg_dump`. Backups go through the Barman Cloud plugin: the operator's built-in `barmanObjectStore` is deprecated and removed in CloudNativePG 1.31. The plugin talks to the operator over mutual TLS with certificates from cert-manager, which is why cert-manager syncs in wave -1. The service chart renders an app's database when its values set `database.cluster.enabled` (a `Cluster` `<release>-db`, never pruned by Argo CD; its backups to `s3://cnpg-backups/<namespace>`; the bucket's keys from the `backup-bucket` ClusterSecretStore, which may hand out that one Secret to the app namespaces only). shortly doesn't set it yet: its database moves in platform plan 4.3 |
 | A secret store inside the cluster | The `secret-store` namespace holds the source of each platform secret; the `platform` ClusterSecretStore (External Secrets' Kubernetes provider) reads it through a ServiceAccount that may only read Secrets there, for the namespaces it names. No secrets server to run, unseal or back up on a laptop; a real cluster points the ClusterSecretStore at a secret manager and nothing else changes |
