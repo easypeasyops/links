@@ -158,7 +158,7 @@ pass "promoted the same image to prod: a Rollout, 2/2 ready, PDB and HPA (on the
 in_cluster prod /readyz || fail "prod not reachable through its Service"
 
 # ---------------------------------------------------------------- 3a. through the gateway
-# Users come in through the Gateway (deploy/kind/gateway.yaml), routed by hostname. From a
+# Users come in through the Gateway (the platform's deploy/kind/gateway.yaml), routed by hostname. From a
 # pod, as a client would: the Envoy proxy's Service, with the Host header deciding where to.
 GW=http://shortly-gateway.envoy-gateway-system.svc
 gw() { # host path [extra wget args...] -> prints "STATUS LOCATION"
@@ -228,7 +228,7 @@ fi # 3b
 
 # ---------------------------------------------------------------- 3c. front door
 # The laptop's 8080 (users) and 8090 (dev tools) reach the Gateway through the front-door
-# containers (scripts/cluster.sh), with no port-forward. And the listeners stay apart: a
+# containers (the platform's scripts/cluster.sh), with no port-forward. And the listeners stay apart: a
 # tool's hostname gets nothing on the users' port, and the app's nothing on the tools' port.
 if suite platform && [[ "${FRONT_DOOR:-1}" != 0 ]]; then
 front() { # port host path -> HTTP status
@@ -260,7 +260,7 @@ fi # 3c
 good_rev=$(revision prod)
 good_image=$(deployed_image prod)
 
-# Canary analysis needs Prometheus; its CI timings come from deploy/kind/e2e-values.yaml
+# Canary analysis needs Prometheus; its CI timings come from the platform's deploy/kind/e2e-values.yaml
 # (every deploy gets it). Without monitoring, steps are short plain pauses instead.
 canary_fast=(--set canary.pauseWithoutAnalysis=5s)
 # Every measurement of every AnalysisRun for one pod hash: "name=Phase ..." per run.

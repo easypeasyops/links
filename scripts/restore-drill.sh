@@ -8,7 +8,7 @@
 #   LIST=1 SOURCE=prod scripts/restore-drill.sh          # only list the backups (size, age)
 #
 # It never touches the source database. It creates a throwaway namespace (restore-drill)
-# with an empty Postgres, downloads the dump from the bucket (deploy/kind/backups.yaml),
+# with an empty Postgres, downloads the dump from the bucket (the platform's deploy/kind/backups.yaml),
 # runs pg_restore, then checks the result:
 #   - the schema is at the same Alembic revision as the source
 #   - EXPECT_LINKS, if given: exactly that many links came back (the source's count when
@@ -39,7 +39,7 @@ src_sql() { kubectl -n "$SOURCE" exec postgres-0 -- psql -U shortly -d shortly -
 dst_sql() { kubectl -n "$NS" exec "$POD" -c postgres -- psql -h 127.0.0.1 -U shortly -d shortly -tAc "$1"; }
 
 kubectl -n "$SOURCE" get cronjob postgres-backup >/dev/null 2>&1 \
-  || fail "no postgres-backup CronJob in $SOURCE (scripts/cluster.sh up)"
+  || fail "no postgres-backup CronJob in $SOURCE (the platform's scripts/cluster.sh up)"
 if [[ "${LIST:-0}" == 1 ]]; then
   # A one-off pod in the source namespace, labelled as a backup pod so the bucket admits it.
   kubectl -n "$SOURCE" run backup-list --image="$RCLONE_IMAGE" --restart=Never --rm -i --quiet \

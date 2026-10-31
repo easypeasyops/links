@@ -29,7 +29,7 @@ query() {
 count() { python3 -c 'import json, sys; d = json.load(sys.stdin); print(len(d["data"]["result"]) if d["status"] == "success" else -1)'; }
 
 kubectl -n monitoring get prometheus >/dev/null 2>&1 \
-  || fail "kube-prometheus-stack is not installed (scripts/cluster.sh up)"
+  || fail "kube-prometheus-stack is not installed (the platform's scripts/cluster.sh up)"
 
 # ---------------------------------------------------------------- 1. scrape
 n=0
