@@ -516,40 +516,39 @@ fi
 fi # 6-11
 
 # ---------------------------------------------------------------- 12. GitOps (Argo CD)
-# Prod's Application from deploy/argocd/applications.yaml, pointed at this commit instead of
-# main, and at the local build instead of the release digest (helm parameters). Everything
-# else is as on a real cluster: auto-sync, self-heal, the canary's ignored weights.
-if suite platform && [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applications.argoproj.io >/dev/null 2>&1; then
+# Prod's Application as the platform makes it: its ApplicationSet (apps/applicationset.yaml at
+# platform.lock) and shortly's AppProject, applied as they are, with three CI-only changes:
+#   - the generator reads only prod's env file, at the locked platform commit (not main);
+#   - the values come from this commit (GITOPS_REVISION) instead of main, plus the
+#     platform's e2e-values (CI clocks, as deploy.sh) and the local build instead of the
+#     release digest; the project also allows the platform repo, for that values file;
+#   - applicationsSync: create-only, so the change made through Argo CD below (an edit to
+#     the Application, as a merged PR would make) isn't reverted by the ApplicationSet.
+# Everything else is the real template: auto-sync, self-heal, the canary's ignored weights.
+if suite platform && [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applicationsets.argoproj.io >/dev/null 2>&1; then
   app() { kubectl -n argocd get application shortly-prod -o jsonpath="$1" 2>/dev/null; }
   synced_healthy() { [[ "$(app '{.status.sync.status}/{.status.health.status}')" == Synced/Healthy ]]; }
   wait_app() { # seconds what -> waits until Synced and Healthy on the newest spec
     for _ in $(seq 1 "$(($1 / 3))"); do synced_healthy && return 0; sleep 3; done
-    { kubectl -n argocd get application shortly-prod -o jsonpath='{range .status.resources[?(@.status!="Synced")]}{.kind}/{.name}: {.status}{"\n"}{end}{.status.operationState.message}{"\n"}' || true; } >&2
+    { kubectl -n argocd get application shortly-prod -o jsonpath='{range .status.resources[?(@.status!="Synced")]}{.kind}/{.name}: {.status}{"\n"}{end}{.status.operationState.message}{"\n"}{range .status.conditions[*]}{.type}: {.message}{"\n"}{end}' || true; } >&2
     fail "GitOps: $2: application shortly-prod is $(app '{.status.sync.status}/{.status.health.status}')"
   }
-  repo=${GITOPS_REPO:-https://github.com/statsguy/shortly.git}
-  kubectl apply -f "$ROOT/deploy/argocd/project.yaml" >/dev/null
-  # The prod document, as JSON (kubectl converts; the runner's python has no YAML module).
-  awk 'BEGIN{RS="\n---\n"} /name: shortly-prod/' "$ROOT/deploy/argocd/applications.yaml" \
-    | kubectl create --dry-run=client -o json -f - \
-    | python3 -c "$(cat <<'PY'
+  platform_repo=https://github.com/easypeasyops/platform.git
+  # shortly's project, as JSON (kubectl converts; the runner's python has no YAML module).
+  kubectl create --dry-run=client -o json -f "$PLATFORM_DIR/apps/shortly/project.yaml" \
+    | python3 -c '
 import json, sys
-revision, repo, repository, tag = sys.argv[1:]
-app = json.load(sys.stdin)
-assert app["metadata"]["name"] == "shortly-prod", app["metadata"]["name"]
-source = app["spec"]["source"]
-source["targetRevision"], source["repoURL"] = revision, repo
-source["helm"]["valueFiles"].append("../../kind/e2e-values.yaml")  # CI clocks, as deploy.sh
-source["helm"]["valuesObject"] = {  # applied after the value files, like --set
-    "image": {"repository": repository, "tag": tag, "digest": ""},
-    # The HPA drill (step 6) left prod at 4 pods, and the HPA keeps them for 5 minutes. A
-    # canary needs room for one more pod, which the CI node then lacks; a lower ceiling
-    # takes effect at once and doesn't touch the pod template.
-    "autoscaling": {"maxReplicas": 2},
-}
-print(json.dumps(app))
-PY
-)" "$GITOPS_REVISION" "$repo" "${IMAGE%:*}" "${IMAGE##*:}" | kubectl apply -f - >/dev/null
+project = json.load(sys.stdin)
+project["spec"]["sourceRepos"].append(sys.argv[1])  # CI only: the platform e2e-values
+print(json.dumps(project))
+' "$platform_repo" | kubectl apply -f - >/dev/null
+  kubectl create --dry-run=client -o json -f "$PLATFORM_DIR/apps/applicationset.yaml" \
+    | python3 "$ROOT/scripts/lib/e2e-appset.py" "$PLATFORM_LOCK" "$GITOPS_REVISION" \
+      "$platform_repo" "${IMAGE%:*}" "${IMAGE##*:}" \
+    | kubectl apply -f - >/dev/null
+  for _ in $(seq 1 40); do [[ -n "$(app '{.metadata.name}')" ]] && break; sleep 3; done
+  [[ "$(app '{.metadata.ownerReferences[0].name}')" == apps ]] \
+    || fail "GitOps: the ApplicationSet didn't generate shortly-prod: $(kubectl -n argocd get applicationset apps -o jsonpath='{.status.conditions}')"
   start=$SECONDS
   wait_app 240 "taking over prod"
   [[ "$(deployed_image prod)" == "$IMAGE" ]] || fail "GitOps: prod runs $(deployed_image prod), want $IMAGE"
@@ -569,7 +568,7 @@ PY
   # synthetic traffic, while Argo CD keeps watching. It must not reset the weights.
   old_hash=$(ro '{.status.stableRS}')
   kubectl -n argocd patch application shortly-prod --type json -p \
-    '[{"op":"add","path":"/spec/source/helm/valuesObject/config","value":{"logLevel":"DEBUG"}}]' >/dev/null
+    '[{"op":"add","path":"/spec/sources/0/helm/valuesObject/config","value":{"logLevel":"DEBUG"}}]' >/dev/null
   start=$SECONDS max_weight=0 out_of_sync=0
   while ((SECONDS - start < 420)); do
     w=$(kubectl -n "$PROD_NS" get httproute shortly -o jsonpath='{.spec.rules[0].backendRefs[1].weight}')
