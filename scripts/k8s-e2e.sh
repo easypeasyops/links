@@ -141,7 +141,10 @@ code=$(curl -sf -X POST $S/links -H 'content-type: application/json' \
 # /metrics lives on its own port (9100); the app port must not serve it.
 [[ "$(curl -s -o /dev/null -w '%{http_code}' $S/metrics)" == 404 ]] || fail "staging serves /metrics on the app port"
 forward staging 18081 9100 /metrics
-curl -sf http://127.0.0.1:18081/metrics | grep -q 'links_created_total 1.0' || fail "staging metrics"
+# Into a variable, not `curl | grep -q`: with pipefail, grep -q quitting at the first match
+# can kill curl mid-write (SIGPIPE) and fail the check while the metric is there (CI, #107).
+metrics=$(curl -sf http://127.0.0.1:18081/metrics) || fail "staging metrics: scrape failed"
+grep -q 'links_created_total 1.0' <<<"$metrics" || fail "staging metrics"
 pass "staging: migrated, ready, create → 307, metrics on port 9100 only"
 
 # ---------------------------------------------------------------- 3. promote to prod
