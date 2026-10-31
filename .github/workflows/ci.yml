@@ -117,11 +117,6 @@ jobs:
                   -schema-location default \
                   -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" -
           done
-          # The app's Argo CD project and Applications (step 12 applies the platform's
-          # ApplicationSet for real). The platform's own manifests are checked in its repo.
-          crds_lint() { docker run --rm -i ghcr.io/yannh/kubeconform:v0.8.0 -strict -summary \
-            -schema-location "$crds/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" -; }
-          awk 'FNR == 1 { print "---" } 1' deploy/argocd/*.yaml | crds_lint # one document stream
 
       - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         if: needs.scope.outputs.full == 'true'

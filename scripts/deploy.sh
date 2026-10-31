@@ -9,7 +9,7 @@
 # A digest is deployed only after scripts/verify-image.sh proves it was built by this repo's
 # release workflow from a release tag. A tag is accepted only on a kind-* kube context.
 #
-# Where Argo CD manages an environment (scripts/cluster.sh applies deploy/argocd/), releases
+# Where Argo CD manages an environment (the platform's ApplicationSet, apps/shortly/envs/), releases
 # go through git instead (scripts/promote.sh) and this script refuses. It remains the way
 # CI's e2e deploys local builds, and the break-glass path.
 #
@@ -31,7 +31,7 @@ NS=$(ns_of "$ENV") # the namespace this environment runs in
 
 context=$(kubectl config current-context 2>/dev/null || true)
 
-# Where Argo CD manages the environment (deploy/argocd/), git is the deploy: a release
+# Where Argo CD manages the environment (the platform's ApplicationSet), git is the deploy: a release
 # reaches it by a merged PR to deploy/envs/$ENV.yaml (scripts/promote.sh), and anything
 # deployed by hand here would be reverted by Argo CD's self-heal within a minute.
 if [[ -n "$(kubectl -n argocd get application "shortly-$ENV" -o name 2>/dev/null)" && "${ARGOCD_OVERRIDE:-}" != 1 ]]; then
