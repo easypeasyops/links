@@ -721,7 +721,7 @@ The `shortly` Service still exists and still serves in-cluster callers (probes, 
 
 **Argo Rollouts** is installed alongside (chart 2.43.6, Argo Rollouts v1.10.0) with its Gateway API traffic-router plugin (v0.17.0). The controller downloads the plugin when it starts and refuses it unless the checksum matches. The project publishes no checksums, so the pinned values were computed from the release binaries. That protects against a later swap, not against a bad original.
 
-**Build once, deploy many.** `scripts/deploy.sh <env> <image-ref>` takes a digest reference (`repo@sha256:…`) for released images; the bits tested in staging are the bits promoted to prod. A tag reference is accepted only on a `kind-*` context, for local images, which are loaded into kind first. The chart refuses to render with neither digest nor tag.
+**Build once, deploy many.** `scripts/deploy.sh <env> <image-ref>` deploys exactly what Argo CD would render for that environment (since platform plan 3.4): the platform's service chart at the digest pinned in its `apps/shortly/envs/<env>.yaml`, with the values files listed there. So CI's e2e tests the chart that runs, not a copy. It takes a digest reference (`repo@sha256:…`) for released images; the bits tested in staging are the bits promoted to prod. A tag reference is accepted only on a `kind-*` context, for local images, which are loaded into kind first. The chart refuses to render with neither digest nor tag.
 
 **Provenance gate.** Before deploying a digest, `deploy.sh` runs `scripts/verify-image.sh`, which checks the image's signed SLSA provenance with `gh attestation verify`. The deploy is refused unless:
 
