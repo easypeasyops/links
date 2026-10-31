@@ -569,11 +569,15 @@ print(json.dumps(project))
   old_hash=$(ro '{.status.stableRS}')
   kubectl -n argocd patch application shortly-prod --type json -p \
     '[{"op":"add","path":"/spec/sources/0/helm/valuesObject/config","value":{"logLevel":"DEBUG"}}]' >/dev/null
-  start=$SECONDS max_weight=0 out_of_sync=0
+  start=$SECONDS max_weight=0 out_of_sync=0 drifted=""
   while ((SECONDS - start < 420)); do
     w=$(kubectl -n "$PROD_NS" get httproute shortly -o jsonpath='{.spec.rules[0].backendRefs[1].weight}')
     ((${w:-0} > max_weight)) && max_weight=${w:-0}
-    [[ "$(app '{.status.sync.status}')" == OutOfSync ]] && out_of_sync=$((out_of_sync + 1))
+    if [[ "$(app '{.status.sync.status}')" == OutOfSync ]]; then
+      out_of_sync=$((out_of_sync + 1))
+      # Which resources, so a failure below says what Argo CD and the canary disagreed on.
+      drifted+=" $(app '{range .status.resources[?(@.status=="OutOfSync")]}{.kind}/{.name},{end}')@$((SECONDS - start))s"
+    fi
     new_hash=$(ro '{.status.stableRS}')
     [[ -n "$new_hash" && "$new_hash" != "$old_hash" && "$(ro '{.status.phase}')" == Healthy ]] && break
     [[ "$(ro '{.status.phase}')" == Degraded ]] && fail "GitOps: the canary was aborted: $(ro '{.status.message}')"
@@ -587,7 +591,8 @@ print(json.dumps(project))
       || fail "GitOps: analysis runs for the canary: '$(analysis_runs "$new_hash")'"
   fi
   # A sample or two of OutOfSync is the sync itself; repeated ones mean a fight over weights.
-  ((out_of_sync <= 3)) || fail "GitOps: Argo CD saw prod OutOfSync $out_of_sync times during the canary"
+  ((out_of_sync <= 3)) \
+    || fail "GitOps: Argo CD saw prod OutOfSync $out_of_sync times during the canary (out of sync, by seconds into it:$drifted)"
   wait_app 60 "after the canary"
   pass "GitOps: a change through Argo CD ran a full canary (weights up to ${max_weight}%, analysis Successful twice, synthetic traffic included) in $((SECONDS - start))s; Argo CD stayed in sync"
 else
