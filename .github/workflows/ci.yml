@@ -157,6 +157,20 @@ jobs:
             | (.status.conditions // [] | map(select(.type == "Ready" and .status == "True")) | first) as $ready
             | select($ready) | "\(($ready.lastTransitionTime | fromdateiso8601) - (.metadata.creationTimestamp | fromdateiso8601))\t\(.metadata.namespace)/\(.metadata.name)"' \
             | sort -rn | awk -F'\t' 'NR <= 15 { printf "%5ds  %s\n", $1, $2 }'
+          # A child synced more than once re-applied something that drifted after its first
+          # sync (self-heal, with a growing backoff), and the waves after it waited.
+          echo "== platform Applications: number of syncs, and when"
+          kubectl -n argocd get applications -l app.kubernetes.io/part-of=platform -o json | jq -r '.items[]
+            | "\(.status.history // [] | length)  \(.metadata.name): " + ([.status.history[]?.deployedAt[11:19]] | join(" "))' \
+            | sort -rn
+          echo "== Argo CD's automated syncs"
+          kubectl -n argocd logs statefulset/argocd-application-controller \
+            | grep -E 'Initiated automated sync|elf-heal|Skipping auto-sync' \
+            | awk '{ t = a = m = ""
+                if (match($0, /time="[^"]+"/)) t = substr($0, RSTART + 17, 8)
+                if (match($0, /application=[^ ]+/)) a = substr($0, RSTART + 12, RLENGTH - 12)
+                if (match($0, /msg="[^"]+"/)) m = substr($0, RSTART + 5, RLENGTH - 6)
+                print t, a, substr(m, 1, 160) }' | head -60 || true
 
       # When a sync never finishes, the job's timeout kills the wait before it can explain.
       - name: Argo CD state (on failure)
