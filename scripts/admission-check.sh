@@ -3,7 +3,7 @@
 # refuses shortly images without release provenance and reports images outside the allowlist.
 # Every request is a server-side dry run: it goes through admission webhooks, creates nothing.
 #
-#   scripts/admission-check.sh            # against the kind cluster from scripts/cluster.sh
+#   scripts/admission-check.sh            # against the kind cluster from the platform's scripts/cluster.sh
 #
 # Needs network from the cluster to ghcr.io and Sigstore (Rekor, TUF), like a real cluster.
 set -euo pipefail
@@ -79,7 +79,7 @@ $out"
 }
 
 kubectl get imagevalidatingpolicy require-release-provenance >/dev/null 2>&1 \
-  || fail "provenance policy not installed (POLICIES=0? see scripts/cluster.sh)"
+  || fail "provenance policy not installed (POLICIES=0? see the platform's scripts/cluster.sh)"
 
 admitted pod "$REPO@$RELEASE" "the documented release"
 refused pod "$REPO@$UNATTESTED" "a real image with no attestation of its own"

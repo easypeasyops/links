@@ -1,8 +1,0 @@
-# Envoy Gateway for the kind cluster (Argo CD, deploy/argocd/platform/): the controller that turns the
-# Gateway in deploy/kind/gateway.yaml into a running Envoy proxy. One replica is plenty here.
-deployment:
-  replicas: 1
-  envoyGateway:
-    resources:
-      requests: { cpu: 50m, memory: 128Mi }
-      limits: { memory: 512Mi }

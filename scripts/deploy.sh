@@ -67,7 +67,7 @@ fi
 # With canary.enabled (prod) the chart renders an Argo Rollout instead of a Deployment, and
 # the release is not done when helm returns: the Rollout then walks its steps.
 # DEPLOY_EXTRA_VALUES: one more values file, after the environment's (the e2e's shorter
-# clocks, deploy/kind/e2e-values.yaml). Not for real deploys.
+# clocks, the platform's deploy/kind/e2e-values.yaml). Not for real deploys.
 extra_values=()
 [[ -n "${DEPLOY_EXTRA_VALUES:-}" ]] && extra_values=(--values "$DEPLOY_EXTRA_VALUES")
 # The chart and values Argo CD renders for this environment (platform plan 3.4): the

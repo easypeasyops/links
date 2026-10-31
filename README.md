@@ -104,7 +104,7 @@ gh attestation verify oci://ghcr.io/statsguy/shortly@sha256:<digest> --owner sta
 Requires Docker, [kind](https://kind.sigs.k8s.io), kubectl, and Helm 4.
 
 ```bash
-scripts/cluster.sh up                                          # kind + metrics-server + monitoring + Kyverno + staging/prod + Postgres
+../platform/scripts/cluster.sh up                                          # kind + metrics-server + monitoring + Kyverno + staging/prod + Postgres
 scripts/deploy.sh staging ghcr.io/statsguy/shortly@sha256:<digest>
 scripts/deploy.sh prod    ghcr.io/statsguy/shortly@sha256:<digest>   # same digest: build once, deploy many
 helm -n shortly-prod history shortly                                   # what can I roll back to?

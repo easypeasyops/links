@@ -7,8 +7,9 @@ silently break has a test:
 - a rule is invalid, or doesn't fire / stay quiet as intended (promtool unit tests);
 - a selector matches nothing the app exports (a renamed metric, route, label or bucket);
 - a runbook link points at a section that doesn't exist;
-- a dashboard query selects nothing the app exports;
-- Alertmanager routes an alert to the wrong receiver (amtool).
+- a dashboard query selects nothing the app exports.
+The platform's own alerts (Argo CD) and Alertmanager's routing are tested in
+easypeasyops/platform (tests/test_alerting.py).
 """
 
 import importlib.util
@@ -166,9 +167,7 @@ def test_runbook_links_point_at_real_sections() -> None:
 
     runbook = (ROOT / "docs/RUNBOOK.md").read_text()
     anchors = {slug(h) for h in re.findall(r"^#{2,4} (.+)$", runbook, re.MULTILINE)}
-    argocd = yaml.safe_load((ROOT / "deploy/argocd/platform/files/argocd-rules.yaml").read_text())
-    platform = [rule for group in argocd["groups"] for rule in group["rules"]]
-    links = {r["annotations"]["runbook_url"] for r in _rules() + platform if "alert" in r}
+    links = {r["annotations"]["runbook_url"] for r in _rules() if "alert" in r}
     for link in links:
         assert link.startswith("https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#")
         assert link.split("#", 1)[1] in anchors, f"no RUNBOOK section for {link}"
@@ -197,65 +196,6 @@ def test_promtool_unit_tests_pass() -> None:
         text=True,
     )  # fmt: skip
     assert result.returncode == 0, result.stdout + result.stderr
-
-
-# The Alertmanager that kube-prometheus-stack (scripts/cluster.sh) runs.
-ALERTMANAGER_IMAGE = "quay.io/prometheus/alertmanager:v0.34.1"
-
-
-@pytest.fixture(scope="module")
-def alertmanager_config(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    if not _docker():
-        if os.environ.get("CI"):
-            pytest.fail("Docker is required for the amtool tests in CI")
-        pytest.skip("Docker not available")
-    values = yaml.safe_load((ROOT / "deploy/kind/monitoring-values.yaml").read_text())
-    directory = tmp_path_factory.mktemp("alertmanager")
-    directory.chmod(0o755)  # the amtool container runs as nobody
-    config = directory / "alertmanager.yaml"
-    config.write_text(yaml.safe_dump(values["alertmanager"]["config"]))
-    config.chmod(0o644)
-    return config
-
-
-def _amtool(config: Path, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["docker", "run", "--rm", "-v", f"{config.parent}:/c:ro", "--entrypoint", "amtool",
-         ALERTMANAGER_IMAGE, *args],
-        capture_output=True,
-        text=True,
-    )  # fmt: skip
-
-
-@pytest.mark.integration
-def test_alertmanager_config_is_valid(alertmanager_config: Path) -> None:
-    result = _amtool(alertmanager_config, "check-config", f"/c/{alertmanager_config.name}")
-    assert result.returncode == 0, result.stdout + result.stderr
-
-
-@pytest.mark.integration
-@pytest.mark.parametrize(
-    ("labels", "receiver"),
-    [
-        (["namespace=prod", "severity=page"], "pager"),
-        (["namespace=prod", "severity=ticket"], "tickets"),
-        # Any app's staging never pages: <app>-staging (platform plan, Phase 2).
-        (["namespace=shortly-staging", "severity=page"], "staging"),
-        (["namespace=shortly-prod", "severity=page"], "pager"),
-        (["namespace=prodstaging", "severity=page"], "pager"),  # the regex is anchored
-        (["alertname=Watchdog", "severity=none"], "null"),
-        (["namespace=monitoring", "severity=warning"], "null"),  # the stack's own alerts
-    ],
-)
-def test_alerts_route_to_the_right_receiver(
-    alertmanager_config: Path, labels: list[str], receiver: str
-) -> None:
-    result = _amtool(
-        alertmanager_config,
-        "config", "routes", "test", f"--config.file=/c/{alertmanager_config.name}",
-        f"--verify.receivers={receiver}", *labels,
-    )  # fmt: skip
-    assert result.returncode == 0, f"{labels} -> {result.stdout.strip()}, want {receiver}"
 
 
 def test_slo_generator_serves_any_app(tmp_path: Path) -> None:

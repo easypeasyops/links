@@ -26,8 +26,13 @@ the one reviewed with the code.
 - `uv run pytest` (needs Docker for integration tests); CI enforces `--cov-fail-under=90`.
 - Python version lives in `.python-version` and both Dockerfile `FROM` lines; change them together.
 - Deploy by digest: `scripts/deploy.sh <env> ghcr.io/statsguy/shortly@sha256:…`.
-- `deploy/policies/` (Kyverno) and `scripts/verify-image.sh` enforce the same provenance rules;
-  change them together (`tests/test_admission_policies.py` checks they agree).
+- The platform (chart, Argo CD root, kind, policies, `cluster.sh`) lives in
+  easypeasyops/platform; this repo runs it at the commit `platform.lock` names, from a
+  checkout beside this one (`../platform`, or `PLATFORM_DIR`). A platform change lands there,
+  then reaches shortly in a PR here that moves the lock.
+- `scripts/verify-image.sh` is a copy of the platform's deploy gate, which enforces the same
+  provenance rules as its admission policy (the platform's tests check they agree). Don't
+  change it here: it goes once `deploy.sh` runs the platform's.
 - Migrations follow expand / deploy / contract; every revision has a working `downgrade()`.
 
 ## Pull requests opened by Claude
@@ -38,8 +43,8 @@ the one reviewed with the code.
   it writes a PR; that one is outside the session's control.)
 - **One problem per PR, small enough to review in one sitting**: aim for about 200 changed
   lines (a sweet spot, not a hard limit). Tests and the docs updates the change needs ride
-  in the same PR; vendored or generated files (`deploy/platform/metrics-server/components.yaml`,
-  `deploy/helm/shortly/rules/slo.yaml`, `tests/golden/`) don't count, but say so in the description.
+  in the same PR; generated files (`deploy/helm/shortly/rules/slo.yaml`,
+  `deploy/service/slo-rules.values.yaml`, `tests/golden/`, `uv.lock`) don't count, but say so in the description.
 - A bigger change goes in as a stack: each PR leaves `main` working and CI green on its own
   (dormant pieces first, for example a chart nothing applies yet, then the switch that uses
   it), and its description says where it sits in the stack.

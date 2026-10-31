@@ -23,7 +23,7 @@ trap restore EXIT
 trap 'exit 143' TERM # so a killed drill still restores staging (EXIT trap)
 
 kubectl -n monitoring get prometheus >/dev/null 2>&1 \
-  || fail "kube-prometheus-stack is not installed (scripts/cluster.sh up)"
+  || fail "kube-prometheus-stack is not installed (the platform's scripts/cluster.sh up)"
 
 kubectl -n "$STAGING_NS" scale deploy/shortly --replicas=0 >/dev/null
 start=$SECONDS receiver=""

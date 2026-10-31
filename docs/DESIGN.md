@@ -4,6 +4,12 @@
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
+> **Platform files live in [easypeasyops/platform](https://github.com/easypeasyops/platform)**
+> (platform plan 3.4). Paths below under `deploy/argocd/platform`, `deploy/kind/`,
+> `deploy/platform/`, `deploy/policies/`, `scripts/cluster.sh` and `scripts/lib/namespaces.sh`
+> are in that repo, at the commit `platform.lock` names; so are the tests that check them.
+> Run `cluster.sh` from a platform checkout beside this one (`../platform/scripts/cluster.sh`).
+
 ## Overview
 
 shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /{code}` redirects to the target with a 307. It is built as a production-shaped reference service, so the operational machinery around it (CI, supply chain, observability, deploys, rollback) matters as much as the feature.
@@ -478,7 +484,8 @@ All series are per `namespace`, so staging and prod keep separate budgets.
 3. Every selector in every rule must match a sample the app actually exports, after the test has driven every outcome through the app (201, 307, 404, shed 503, readiness 503, exhausted code space). So a renamed route, metric, label or histogram bucket fails the build instead of silently disabling an alert.
 4. Every `runbook_url` must point at a heading that exists in RUNBOOK.md.
 5. Every query on the SLO dashboard must select something the app exports or a recorded series.
-6. amtool validates the Alertmanager config and checks where each kind of alert is routed.
+
+The platform's tests (`tests/test_alerting.py` there) give its own alerts on Argo CD the same promtool treatment, and use amtool to validate the Alertmanager config and check where each kind of alert is routed.
 
 **Delivery in Kubernetes.** Argo CD installs kube-prometheus-stack 91.9.0 (pinned by digest; "The platform under Argo CD" below) into a `monitoring` namespace: Prometheus Operator, Prometheus, Alertmanager, kube-state-metrics and Grafana. Pieces that can't work in kind are disabled: control-plane scraping, and node-exporter, which needs host namespaces that the namespace's `baseline` Pod Security level forbids. The shortly chart then ships its own monitoring:
 
@@ -682,7 +689,7 @@ Defense in depth on the path into the cluster:
 1. **`scripts/verify-image.sh`** (called by `deploy.sh`) — fast, clear error *before* Helm changes anything. Fails closed if `gh`, the registry, or the attestation is missing. Break-glass: `INSECURE_SKIP_VERIFY=1` (loud warning) for registry/Sigstore outages.
 2. **Kyverno `ImageValidatingPolicy`** — same rules at the API server for *every* create path (`kubectl`, CI, a compromised laptop). Tags are refused (`mutateDigest: false`): what was verified is what runs. Fail-closed webhook: if Kyverno cannot verify, new pods are refused rather than admitted unchecked.
 
-They must agree: `tests/test_admission_policies.py` asserts the policy and `verify-image.sh` name the same signer workflow. The image allowlist policy closes the bypass of "run a different image that has no provenance check"; in kind it is Audit-only so local `shortly:e2e` tags still work.
+They must agree: the platform's `tests/test_admission_policies.py` asserts the policy and `verify-image.sh` name the same signer workflow. The image allowlist policy closes the bypass of "run a different image that has no provenance check"; in kind it is Audit-only so local `shortly:e2e` tags still work.
 
 ## Deployment
 
@@ -745,7 +752,7 @@ The rules are the same as `verify-image.sh`, and a test asserts the two agree on
 
 **Admission only, never in the background.** The provenance policy sets `evaluation.background.enabled: false`. Otherwise Kyverno's reports controller re-verifies every running shortly image against the registry and Rekor, again and again. On the kind node that cost about 1.1 cores on average, with bursts of up to 9.7, and those bursts slowed every request in the cluster (Known limitations). An image can't change after admission, so a background re-check adds nothing. The reports controller also has a CPU limit (500m), as background work should: the app has none, because a limit throttles a latency-sensitive process even on an idle node.
 
-It is tested at two levels. `tests/test_admission_policies.py` runs the same Kyverno engine (the CLI image, pinned by digest) against the real registry: the documented release passes, and a tag, an unattested digest and an unattested init container fail. Two mutated copies of the policy, one expecting `ci.yml` as signer and one a different build type, must refuse the real release, which proves the checks aren't passing everything. `scripts/admission-check.sh` (e2e step 8) then sends server-side dry runs through the live API server. It also proves that a digest that doesn't exist and a Deployment template are refused, and that the allowlist reports the local build.
+It is tested at two levels. The platform's `tests/test_admission_policies.py` runs the same Kyverno engine (the CLI image, pinned by digest) against the real registry: the documented release passes, and a tag, an unattested digest and an unattested init container fail. Two mutated copies of the policy, one expecting `ci.yml` as signer and one a different build type, must refuse the real release, which proves the checks aren't passing everything. `scripts/admission-check.sh` (e2e step 8) then sends server-side dry runs through the live API server. It also proves that a digest that doesn't exist and a Deployment template are refused, and that the allowlist reports the local build.
 
 **Rollout.** Staging: `helm upgrade --install --rollback-on-failure --wait --timeout 3m`. `RollingUpdate` with `maxUnavailable: 0, maxSurge: 1` never drops below desired capacity: a new pod that never becomes ready stalls the rollout while old pods keep serving, Helm times out and rolls back. Prod: a canary (above). A canary pod that never becomes ready gets no traffic (the weight moves only once its pods are available), and the release is aborted and rolled back. The drill measures the prod case: 0 failed requests, through the Service and through the Gateway, during a broken release.
 
@@ -913,7 +920,7 @@ flowchart TB
 | Choice | Why |
 | --- | --- |
 | The root is a Helm chart that renders the children | Git can't know a cluster's CPU architecture (the Argo Rollouts plugin is a per-architecture binary) or which commit CI is testing. The root takes them as Helm parameters, which `cluster.sh` sets from the node and from `PLATFORM_REVISION` (`main` on a laptop, the PR's commit in CI) |
-| Charts pulled by digest, natively from OCI | `targetRevision` is the chart's digest, the version a comment beside it. `tests/test_platform.py` (integration) checks each version still resolves to its digest, so a re-pushed tag is caught before anyone trusts it |
+| Charts pulled by digest, natively from OCI | `targetRevision` is the chart's digest, the version a comment beside it. The platform's `tests/test_platform.py` (integration) checks each version still resolves to its digest, so a re-pushed tag is caught before anyone trusts it |
 | Values files stay in git, beside the chart's source | Each chart Application is multi-source: the chart from its registry, `$values` from this repository at the root's revision |
 | metrics-server vendored, not fetched | The release manifest is checked into `deploy/platform/metrics-server/` with its SHA-256; a kustomize patch adds the kind-only flag |
 | Two sync waves, with Application health on | The policies need Kyverno's webhook serving, and the alerts on Argo CD need kube-prometheus-stack's CRDs: both come from slow charts, so they wait in wave 1. The Gateway and the tool routes need only Envoy Gateway's CRDs, which arrive within seconds, so they stay in wave 0 and the sync retry covers the race. In wave 1 they waited for the slowest chart, and the Envoy proxy's 2-minute start stopped overlapping with it: the platform job's install went from about 2.5 to 7.5 minutes (CI, PR #60). Argo CD only waits for a wave's Applications to be Healthy if it reports Application health, which `argocd-cm` turns back on (`deploy/kind/argocd-values.yaml`) |

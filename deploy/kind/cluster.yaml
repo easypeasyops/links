@@ -1,9 +1,0 @@
-# Local cluster: `scripts/cluster.sh up`. One node is plenty for staging + prod namespaces.
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-name: shortly
-nodes:
-  - role: control-plane
-networking:
-  # Explicit, because deploy/envs/prod.yaml trusts this range as a proxy (forwardedAllowIps).
-  podSubnet: "10.244.0.0/16"
