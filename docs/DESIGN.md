@@ -901,10 +901,12 @@ flowchart TB
   Root --> W1
   subgraph WB["wave -1: what wave 0's Secrets need"]
     ES[external-secrets<br/>External Secrets Operator]
+    CM[cert-manager]
   end
   subgraph W0["wave 0: charts and their CRDs, and what needs only fast CRDs"]
     direction LR
     SS[secret-store<br/>store namespace, ClusterSecretStore,<br/>generated values]
+    PG[cloudnative-pg<br/>+ barman-cloud plugin]
     MS[metrics-server<br/>vendored manifest]
     EG[envoy-gateway]
     GW[gateway<br/>Gateway, listeners]
@@ -931,6 +933,7 @@ flowchart TB
 | metrics-server vendored, not fetched | The release manifest is checked into `deploy/platform/metrics-server/` with its SHA-256; a kustomize patch adds the kind-only flag |
 | Two sync waves, with Application health on | The policies need Kyverno's webhook serving, and the alerts on Argo CD need kube-prometheus-stack's CRDs: both come from slow charts, so they wait in wave 1. The Gateway and the tool routes need only Envoy Gateway's CRDs, which arrive within seconds, so they stay in wave 0 and the sync retry covers the race. In wave 1 they waited for the slowest chart, and the Envoy proxy's 2-minute start stopped overlapping with it: the platform job's install went from about 2.5 to 7.5 minutes (CI, PR #60). Argo CD only waits for a wave's Applications to be Healthy if it reports Application health, which `argocd-cm` turns back on (`deploy/kind/argocd-values.yaml`) |
 | A wave before the charts (platform plan 4.1) | External Secrets Operator syncs in wave -1, so its CRDs and controller exist before wave 0, whose charts will read Secrets it makes (Grafana's admin password, the bucket's keys) |
+| An operator for the databases (platform plan 4.2) | CloudNativePG runs Postgres from a `Cluster` object: failover, base backups and WAL archiving (point-in-time recovery) come from the operator instead of a hand-rolled StatefulSet and an hourly `pg_dump`. Backups go through the Barman Cloud plugin: the operator's built-in `barmanObjectStore` is deprecated and removed in CloudNativePG 1.31. The plugin talks to the operator over mutual TLS with certificates from cert-manager, which is why cert-manager syncs in wave -1. The service chart renders an app's database when its values set `database.cluster.enabled` (a `Cluster` `<release>-db`, never pruned by Argo CD; its backups to `s3://cnpg-backups/<namespace>`; the bucket's keys from the `backup-bucket` ClusterSecretStore, which may hand out that one Secret to the app namespaces only). shortly doesn't set it yet: its database moves in platform plan 4.3 |
 | A secret store inside the cluster | The `secret-store` namespace holds the source of each platform secret; the `platform` ClusterSecretStore (External Secrets' Kubernetes provider) reads it through a ServiceAccount that may only read Secrets there, for the namespaces it names. No secrets server to run, unseal or back up on a laptop; a real cluster points the ClusterSecretStore at a secret manager and nothing else changes |
 | Each value generated once, in the store, and immutable | A Password generator per secret, written into the store by an ExternalSecret with `refreshPolicy: CreatedOnce` (never refreshed, so a resync can't rotate a password everything uses) and `immutable: true`. `CreatedOnce` alone isn't enough: an ExternalSecret's first sync writes even over an existing Secret, so a recreated ExternalSecret would silently rotate every consumer's password; with an immutable target it fails loudly instead, and a value is replaced only by deleting it. Consumers (`grafana-admin` in `monitoring`, `seaweedfs-s3` in `backups`) are ExternalSecrets synced with the Application that reads them; their templates derive the rest (the user name, `s3.json`) |
 | A separate `platform` AppProject | The platform must create CRDs, ClusterRoles and webhooks. The app's project still may create nothing cluster-scoped, and neither project may deploy into the other's namespaces |
