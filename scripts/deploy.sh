@@ -21,7 +21,6 @@ set -euo pipefail
 ENV="${1:?usage: $0 <staging|prod> <image-ref> [helm args...]}"
 REF="${2:?usage: $0 <staging|prod> <image-ref> [helm args...]}"
 shift 2
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TIMEOUT="${DEPLOY_TIMEOUT:-3m}"
 
 case "$ENV" in staging | prod) ;; *) echo "unknown env: $ENV" >&2; exit 2 ;; esac
