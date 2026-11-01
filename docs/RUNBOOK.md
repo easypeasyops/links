@@ -27,7 +27,8 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Deploys | GitOps: Argo CD (namespace `argocd`) syncs each environment from `deploy/envs/<env>.yaml` on `main` within 60 s. Promote with `scripts/promote.sh`; roll back by reverting the promotion PR. UI: http://argocd.localhost:8090 (front door) |
 | Front door | Gateway `gateway/shortly` (Envoy Gateway); prod = `sho.rt.localhost`, staging = `staging.sho.rt.localhost`. Locally, always on: `http://sho.rt.localhost:8080/<code>`; the dev tools at `http://{argocd,grafana,prometheus,alertmanager}.localhost:8090` (the front door, Local cluster operations) |
 | Endpoints | `/healthz` liveness · `/readyz` readiness on port 8000 · `/metrics` on port **9100** (Prometheus only, by NetworkPolicy) |
-| Backups | CronJob `postgres-backup` per namespace, hourly at :41 UTC → S3 bucket `shortly-backups/<ns>/` (SeaweedFS, namespace `backups`), 7 days. RPO up to 1 h; restore: `scripts/restore-drill.sh` and "Restore Postgres from a backup" |
+| Database | CloudNativePG Cluster `shortly-db` per namespace (Service `shortly-db-rw`); the app reads Secret `shortly-db-app` (key `uri`). The primary pod: `kubectl -n shortly-prod get cluster shortly-db -o jsonpath='{.status.currentPrimary}'` (`shortly-db-1` until a failover); psql there with `kubectl -n shortly-prod exec -it <primary> -c postgres -- psql -d shortly` |
+| Backups | WAL archived continuously and a base backup hourly at :23 UTC, by the Barman Cloud plugin, to `s3://cnpg-backups/<ns>/shortly-db` (SeaweedFS, namespace `backups`), 7 days. RPO: the archive's lag (minutes); prove: `scripts/restore-drill-cnpg.sh`; restore: "Restore Postgres from a backup" |
 | Cleanup | CronJob `shortly-cleanup`, hourly at :17 UTC: deletes links expired more than 7 days ago (`cleanup:` in the chart values) |
 | Network | Default-deny ingress per namespace; Postgres accepts shortly only; the app may reach DNS and Postgres only (`networkPolicy` values, `deploy/kind/network-policies.yaml`) |
 | Logs | JSON on stdout; `request_id` and `trace_id` on every line |
@@ -62,7 +63,7 @@ NS=shortly-prod
 kubectl -n $NS get rollout,deploy shortly 2>/dev/null     # READY must equal desired (prod: a Rollout, Healthy)
 kubectl -n $NS get hpa shortly                             # TARGETS like "12%/70%", never "<unknown>"
 kubectl -n $NS get pods -l app.kubernetes.io/name=shortly -o wide   # restarts, node placement
-kubectl -n $NS exec postgres-0 -- wget -q -O- http://shortly/readyz # through the Service, in-cluster
+kubectl -n $NS run probe --rm -i --restart=Never --image=postgres:17-alpine -- wget -q -O- http://shortly/readyz   # through the Service, in-cluster
 helm -n $NS status shortly                                # STATUS: deployed
 ```
 
@@ -149,7 +150,7 @@ Staging and prod are deployed by **Argo CD from git** (docs/DESIGN.md, GitOps wi
 3. Check staging (see Health checks):
 
    ```bash
-   kubectl -n shortly-staging exec postgres-0 -- wget -q -O- http://shortly/readyz
+   kubectl -n shortly-staging run probe --rm -i --restart=Never --image=postgres:17-alpine -- wget -q -O- http://shortly/readyz
    # through the Gateway, as users (the front door)
    curl -s -X POST http://staging.sho.rt.localhost:8080/links -H 'content-type: application/json' -d '{"url":"https://example.com"}'
    curl -si http://staging.sho.rt.localhost:8080/<code from the response> | head -3   # expect 307 + Location
@@ -265,7 +266,7 @@ Roll back first, investigate second: when a release is bad, restore the last goo
    ```bash
    kubectl -n argocd get application shortly-prod     # Synced, Healthy
    kubectl -n shortly-prod get rollout shortly -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
-   kubectl -n shortly-prod exec postgres-0 -- wget -q -O- http://shortly/readyz
+   kubectl -n shortly-prod run probe --rm -i --restart=Never --image=postgres:17-alpine -- wget -q -O- http://shortly/readyz
    ```
 
    The image must be the previous digest.
@@ -278,7 +279,7 @@ Roll back first, investigate second: when a release is bad, restore the last goo
 
 If a migration itself broke something and the old code cannot run on the new schema, downgrade **before** rolling back. Only the new image contains the new revision, so the old one cannot undo it:
 
-1. Back up the database (`kubectl -n shortly-prod exec postgres-0 -- pg_dump -U shortly shortly > backup.sql`).
+1. Take a base backup, so the moment before the downgrade can be restored: `BACKUP=1 SOURCE=shortly-prod scripts/restore-drill-cnpg.sh` (it also proves the backup restores).
 2. Downgrade one revision from a pod still running the new image:
 
    ```bash
@@ -315,6 +316,8 @@ kubectl -n shortly-prod get backups,scheduledbackups              # base backups
 
 ### Move an environment's database (how prod moved)
 
+The record of platform plan 4.3: the old Postgres (`postgres-0`) is gone since, but the procedure is the one to follow when a database moves again.
+
 An environment moves in one PR that turns on `database.cluster` with `bootstrap.initdb.import` from the old Postgres and points the app at `shortly-db-app` (see `deploy/envs/prod.yaml`); Argo CD's waves import, migrate, then roll out. The import copies the database as it is when it runs, so **freeze writes first**, or the writes made during the import stay behind in the old database:
 
 1. **Freeze** (right before merging): the old database becomes read-only, and its open connections are closed so the app's pool reconnects read-only. Redirects keep working; creates fail with 5xx until the new pods take over, a minute or two.
@@ -343,43 +346,6 @@ The old database stays read-only afterwards, so nothing can write to it by mista
    kubectl delete namespace restore-drill
    ```
    Writes made since the target time are replaced: say so in the incident.
-
-**The old pg_dump backups** (until 4.3 removes the old Postgres) dump the old, unused databases; the procedure below applies to them.
-
-Each environment's Postgres is dumped hourly (CronJob `postgres-backup`, :41 UTC) to the bucket `shortly-backups/<namespace>/` in namespace `backups`, and kept 7 days. **Up to 1 hour of writes is lost on restore** (the recovery point): links created after the dump you restore are gone, so say so in the incident.
-
-**1. Choose the dump, and prove it restores.** Restore drills never touch the source:
-
-```bash
-LIST=1 SOURCE=shortly-prod scripts/restore-drill.sh            # the backups: size, time
-KEEP=1 SOURCE=shortly-prod scripts/restore-drill.sh            # newest, into a scratch DB in namespace restore-drill
-KEEP=1 SOURCE=shortly-prod DUMP=shortly-20261022T204100Z.dump scripts/restore-drill.sh   # a specific one
-kubectl -n restore-drill exec -it restore -c postgres -- psql -U shortly shortly   # look before you trust it
-```
-
-Take the newest dump from **before** the problem. After a bad migration or a mass delete, that is not the newest one.
-
-**2. Restore into the environment.** Stop everything that writes, restore, then let traffic back:
-
-```bash
-NS=shortly-prod
-kubectl -n $NS scale rollout/shortly --replicas=0         # staging: deploy/shortly; the HPA leaves 0 alone
-kubectl -n $NS patch cronjob shortly-cleanup -p '{"spec":{"suspend":true}}'
-kubectl -n $NS patch cronjob postgres-backup -p '{"spec":{"suspend":true}}'   # keep the good dumps
-kubectl -n restore-drill cp -c postgres restore:/work/shortly.dump ./shortly.dump
-kubectl -n $NS cp ./shortly.dump postgres-0:/tmp/shortly.dump
-kubectl -n $NS exec postgres-0 -- pg_restore -U shortly -d shortly --clean --if-exists \
-  --no-owner --no-privileges --exit-on-error /tmp/shortly.dump
-kubectl -n $NS exec postgres-0 -- psql -U shortly shortly -c "select count(*) from links" -c "select * from alembic_version"
-kubectl -n $NS scale rollout/shortly --replicas=2         # staging: deploy/shortly
-kubectl -n $NS patch cronjob shortly-cleanup -p '{"spec":{"suspend":false}}'
-kubectl -n $NS patch cronjob postgres-backup -p '{"spec":{"suspend":false}}'
-kubectl delete namespace restore-drill
-```
-
-If the Postgres volume itself is gone, recreate the database first: `../platform/scripts/cluster.sh up` brings back an empty `postgres` StatefulSet with the existing Secrets. Then restore as above. The dump creates the tables, so skip the migration until after the restore.
-
-**3. Check, then record.** The revision in `alembic_version` must match the release that's deployed; if the dump is older than the last migration, deploy runs the migration on the next `deploy.sh`. Note the dump's time and the gap to the incident in the postmortem: that gap is the data lost.
 
 ## Ship a schema change safely
 
@@ -412,7 +378,7 @@ flowchart TD
   A[Alert or user report] --> B{Release in the last hour?}
   B -- yes --> R[Roll back<br/>revert the promotion PR, then verify]
   B -- no --> C{"/readyz returning 503?"}
-  C -- yes --> D[Database playbook<br/>check postgres-0; app recovers itself]
+  C -- yes --> D[Database playbook<br/>check the Cluster shortly-db; app recovers itself]
   C -- no --> E{Pods restarting?}
   E -- yes --> F[CrashLoop playbook<br/>logs --previous: config, OOM or bug]
   E -- no --> S{"load_shed_total rising,<br/>or HPA at max?"}
@@ -450,7 +416,7 @@ No shortly target is being scraped, so every SLO alert is blind. Assume a full o
 
 ```bash
 kubectl -n shortly-prod get pods -l app.kubernetes.io/name=shortly     # are there pods at all?
-kubectl -n shortly-prod exec postgres-0 -- wget -q -O- http://shortly/readyz   # does the Service answer?
+kubectl -n shortly-prod run probe --rm -i --restart=Never --image=postgres:17-alpine -- wget -q -O- http://shortly/readyz   # does the Service answer?
 ```
 
 - Pods are missing or crash-looping: see CrashLoopBackOff, or Deploy stuck or failed.
@@ -483,7 +449,7 @@ kubectl -n gateway get gateway shortly                         # PROGRAMMED must
 kubectl -n shortly-prod get httproute shortly -o jsonpath='{.status.parents[0].conditions}'   # Accepted, ResolvedRefs
 kubectl -n envoy-gateway-system get pods                       # envoy-gateway (controller) and the proxy
 kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50
-kubectl -n shortly-prod exec postgres-0 -- wget -q -O- --header 'Host: sho.rt.localhost' http://shortly-gateway.envoy-gateway-system.svc/readyz
+kubectl -n shortly-prod run probe --rm -i --restart=Never --image=postgres:17-alpine -- wget -q -O- --header 'Host: sho.rt.localhost' http://shortly-gateway.envoy-gateway-system.svc/readyz
 ```
 
 | What you see | Cause | Fix |
@@ -499,12 +465,13 @@ kubectl -n shortly-prod exec postgres-0 -- wget -q -O- --header 'Host: sho.rt.lo
 
 ```bash
 kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --tail=200 | jq -c 'select(.msg=="database ping failed")' | tail -3
-kubectl -n shortly-prod get pods -l app=postgres
-kubectl -n shortly-prod logs postgres-0 --tail=50
-kubectl -n shortly-prod exec postgres-0 -- pg_isready -U shortly -d shortly
+kubectl -n shortly-prod get cluster shortly-db                   # STATUS, PRIMARY, READY instances
+kubectl -n shortly-prod get pods -l cnpg.io/cluster=shortly-db
+kubectl -n shortly-prod logs shortly-db-1 -c postgres --tail=50 | jq -c 'select(.level=="error" or .level=="fatal")'
+kubectl -n shortly-prod exec shortly-db-1 -c postgres -- pg_isready -d shortly
 ```
 
-**Fix:** restore Postgres (restart `kubectl -n shortly-prod delete pod postgres-0`, check its PVC, free disk). The app recovers by itself once the DB answers; do not restart app pods. If credentials changed, check that Secret `shortly-db` matches `postgres-auth`.
+**Fix:** the operator restarts a failed instance by itself (and, with more than one, fails over); check its PVC and free disk, and the operator's own logs (`kubectl -n cnpg-system logs deploy/cloudnative-pg --tail=50`). The app recovers by itself once the DB answers; do not restart app pods. If the database's password changed, the operator rewrote `shortly-db-app` too: the app reads it at start, so its pods need a restart then.
 
 ### CrashLoopBackOff
 
@@ -720,7 +687,7 @@ Check p99 by route, then `kubectl -n shortly-prod get hpa shortly`.
 ```bash
 kubectl -n shortly-prod describe hpa shortly | sed -n '/Conditions/,$p'    # why it did or didn't scale
 kubectl top pods -n shortly-prod -l app.kubernetes.io/name=shortly
-kubectl -n shortly-prod exec postgres-0 -- psql -U shortly shortly -c \
+kubectl -n shortly-prod exec shortly-db-1 -c postgres -- psql -d shortly -c \
   "select state, wait_event_type, count(*) from pg_stat_activity group by 1,2"
 kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly --tail=500 | jq -c 'select(.status==503) | .route' | sort | uniq -c
 ```
@@ -754,7 +721,7 @@ kubectl -n shortly-prod logs -f job/cleanup-manual-<that number>   # "cleanup fi
 **How big is the backlog?**
 
 ```bash
-kubectl -n shortly-prod exec postgres-0 -- psql -U shortly shortly -c \
+kubectl -n shortly-prod exec shortly-db-1 -c postgres -- psql -d shortly -c \
   "select count(*) from links where expires_at < now() - interval '7 days'"
 ```
 
@@ -790,7 +757,7 @@ kubectl -n shortly-prod logs job/<the latest one> -c upload --tail=20    # rclon
 | No Jobs; `SUSPEND` is `True` | Suspended, perhaps by a restore that didn't finish | `kubectl -n shortly-prod patch cronjob postgres-backup -p '{"spec":{"suspend":false}}'` |
 | No failed Jobs; `LAST SCHEDULE` hours old; on the laptop | The Mac slept: the CronJob controller's timers stall while Docker's VM is paused (runs come hours apart) | `../platform/scripts/cluster.sh wake`: restarts the controller and backs up every environment whose last backup is over an hour old |
 
-**Take one now**, after fixing the cause: `kubectl -n shortly-prod create job backup-manual-$(date +%s) --from=cronjob/postgres-backup`. Then prove it: `SOURCE=shortly-prod scripts/restore-drill.sh`.
+**Take one now**, after fixing the cause: `kubectl -n shortly-prod create job backup-manual-$(date +%s) --from=cronjob/postgres-backup`. (Since 4.3 this CronJob dumps the old, unused database: prod's data is backed up by CloudNativePG, proved by `SOURCE=shortly-prod scripts/restore-drill-cnpg.sh`. This section is replaced when the alert moves to those backups.)
 
 ### Rate limiting: 429 on POST /links
 
@@ -857,13 +824,13 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 | test → `test_ratelimit.py` | The limiter's semantics changed (burst, sustained rate, retry time), or the in-memory and Postgres limiters disagree | `uv run pytest tests/test_ratelimit.py -v`; the contract tests run both limiters on the same fake clock |
 | test → other `test_deploy_gate.py` tests | `deploy.sh` stopped calling the platform's gate, or deployed what it refused | Read the failing case: each one names the image that must be refused |
 | k8s → Lint and schema-validate | A chart manifest fails its schema | Run the step's `kubeconform` command locally; the error names the field |
-| k8s → backup and restore | `backup: the Job did not complete` (its logs print above: database, bucket, credentials), `a pod that isn't a backup pod reached the backup bucket` (the `seaweedfs` NetworkPolicy), `the scratch database never became ready` (the download failed: the `fetch` log prints above), `restored schema at revision …` or `restored N links, expected M` (the dump is incomplete or stale), `canary link … is not in the restored database` | `SOURCE=shortly-prod KEEP=1 scripts/restore-drill.sh` against kind; see Backup job not running |
+| k8s → backup and restore | `prod's WAL … not archived after 120 s` (the plugin can't reach the bucket: the Cluster's `ContinuousArchiving` condition, the `shortly-db-backup` ExternalSecret), `the drill Cluster never became healthy` (its pods' logs print above: the recovery can't read the bucket, or no base backup completed yet), `restored schema at revision …` or `restored N links, expected M`, `link e2ewal1 … is not in the restored database` (WAL wasn't replayed), `a pod that isn't a backup or database pod reached the backup bucket` (the `seaweedfs` NetworkPolicy) | `SOURCE=shortly-prod KEEP=1 scripts/restore-drill-cnpg.sh` against kind; see "The database: CloudNativePG" |
 | k8s → expired-link cleanup | `index … missing or invalid` (the concurrent index build failed: see the migrate Job's logs), `the Job did not complete` (its logs print above: DB access, provenance, Pod Security), `left …, want e2efut1,e2enew1` (the cutoff or grace period changed) | `kubectl -n shortly-staging logs job/cleanup-e2e`; `uv run pytest tests/test_cleanup.py -v` |
 | k8s → gateway | `prod /readyz via sho.rt.localhost` or `staging …` (the route isn't attached or the proxy isn't ready), `create through sho.rt.localhost failed`, `a prod link resolved through staging's hostname` (two routes claim one hostname), `an unknown hostname was routed somewhere` (a route without `hostnames`) | `kubectl -n gateway get gateway shortly`; `kubectl -n shortly-prod get httproute shortly -o yaml` (status: `Accepted`, `ResolvedRefs`); `kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50` |
 | k8s → network policies | `a non-Prometheus pod scraped prod's metrics port` or `a pod that isn't shortly reached Postgres` (a policy missing, or the CNI not enforcing NetworkPolicy), or a `control:` line (the allowed path broke: check labels and `networkPolicy` values) | `kubectl -n shortly-prod get networkpolicy`; the step's commands in `scripts/k8s-e2e.sh` |
 | k8s → admission checks | `was ADMITTED, expected refused` (the policy isn't enforcing), `was refused, expected admitted` (the release no longer verifies in-cluster: often no network to Sigstore), `not by the provenance policy` (Pod Security or a manifest error), or no allowlist reports | `scripts/admission-check.sh` against kind; `kubectl -n kyverno logs deploy/kyverno-admission-controller` |
 | k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready); `load too light` (CPU never got 10% past the target: raise the drill's `RATE`); or no scale-up despite high CPU (a real HPA problem) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
-| k8s → rate limit | `only N creates succeeded, the burst is 20` (limit lower than the chart says, or DB errors), `at most N allowed` or `none refused` (limit missing, or counted per pod instead of shared; the check allows for the tokens that refill while it runs), `another client was refused` (the limit isn't per client: check `forwardedAllowIps`) | `kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly \| grep 'rate limited'`; the step's `wget` command from `postgres-0` |
+| k8s → rate limit | `only N creates succeeded, the burst is 20` (limit lower than the chart says, or DB errors), `at most N allowed` or `none refused` (limit missing, or counted per pod instead of shared; the check allows for the tokens that refill while it runs), `another client was refused` (the limit isn't per client: check `forwardedAllowIps`) | `kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly \| grep 'rate limited'`; the step's `wget` command from the `client` pod |
 | k8s → drill | Deploy, promotion or rollback broke | `../platform/scripts/cluster.sh up && docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh`; diagnostics print on failure |
 
 The platform's own checks (admission policies and their Kyverno CLI verdicts, Alertmanager routing, the platform chart, the front door) run in easypeasyops/platform's CI, with its own `ci` gate; its README says what each job checks.
@@ -880,7 +847,7 @@ The local environments are disposable: `../platform/scripts/cluster.sh up` rebui
 | --- | --- |
 | Create (idempotent) | `../platform/scripts/cluster.sh up` |
 | Tear down everything | `../platform/scripts/cluster.sh down` |
-| Reset one environment's data (then redeploy so migrations recreate the schema) | prod: `kubectl -n shortly-prod delete statefulset postgres && kubectl -n shortly-prod delete pvc data-postgres-0 && ../platform/scripts/cluster.sh up`. Staging (CloudNativePG): `kubectl -n shortly-staging delete cluster shortly-db`, and Argo CD recreates it, importing the old Postgres again |
+| Reset one environment's data | `kubectl -n shortly-<env> delete cluster shortly-db` (its volumes go with it): Argo CD recreates it empty, and the migration recreates the schema. Its backups stay in the bucket, and a new Cluster refuses to archive into the same folder until they're deleted |
 | Deploy a local build (kind only; tags are refused elsewhere) | `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev` |
 | Check an image's provenance | `../platform/scripts/verify-image.sh ghcr.io/statsguy/shortly@sha256:…` |
 | Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step; `E2E_SUITE=platform` or `delivery` runs one CI half) |
@@ -904,16 +871,16 @@ The local environments are disposable: `../platform/scripts/cluster.sh up` rebui
 | Argo CD UI | http://argocd.localhost:8090, user `admin`; password: `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' \| base64 -d` |
 | Grafana password | `kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' \| base64 -d` |
 | Rotate a platform secret (it leaked) | Delete its source in the store (it is immutable: deleting is the only way to replace it), `kubectl -n secret-store delete secret <grafana-admin\|seaweedfs-s3>`, and the generator makes a new one; then pull it out at once with `kubectl -n <monitoring\|backups> annotate externalsecret <name> force-sync=$(date +%s) --overwrite` and restart what reads it at start (`kubectl -n monitoring rollout restart deploy/grafana`, or `kubectl -n backups rollout restart statefulset/seaweedfs` plus `kubectl -n <app ns> delete secret backup-s3` and `../platform/scripts/cluster.sh up` to copy the new keys) |
-| Back up a database now | `kubectl -n shortly-prod create job backup-manual-$(date +%s) --from=cronjob/postgres-backup` |
-| List backups / prove the newest restores | `LIST=1 SOURCE=shortly-prod scripts/restore-drill.sh` / `SOURCE=shortly-prod scripts/restore-drill.sh` (`KEEP=1` keeps the scratch DB) |
+| Back up a database now, and prove it restores | `BACKUP=1 SOURCE=shortly-prod scripts/restore-drill-cnpg.sh` (`KEEP=1` keeps the scratch Cluster) |
+| List backups | `kubectl -n shortly-prod get backups` (base backups; WAL in between is archived continuously) |
 | Run the expired-link cleanup now | `kubectl -n shortly-prod create job cleanup-manual-$(date +%s) --from=cronjob/shortly-cleanup` |
 | Read a pod's metrics (port 9100) | `kubectl -n shortly-prod port-forward svc/shortly 9100` → http://localhost:9100/metrics |
 | Monitoring checks only | `scripts/monitoring-check.sh` (includes the alert drill; `ALERT_DRILL=0` skips it) |
 | Alert drill only | `scripts/alert-drill.sh` (scales staging to 0 for about 90 s, then restores it) |
-| Open psql | `kubectl -n shortly-prod exec -it postgres-0 -- psql -U shortly shortly` |
-| Show the generated DB URL | `kubectl -n shortly-prod get secret shortly-db -o jsonpath='{.data.url}' \| base64 -d` |
+| Open psql | `kubectl -n shortly-prod exec -it shortly-db-1 -c postgres -- psql -d shortly` (the primary: see Quick reference) |
+| Show the app's DB URL | `kubectl -n shortly-prod get secret shortly-db-app -o jsonpath='{.data.uri}' \| base64 -d` |
 | Which image is running | `kubectl -n shortly-prod get rollout shortly -o jsonpath='{.spec.template.spec.containers[0].image}'` (staging: `deploy`) |
-| Uninstall the app only | `helm -n shortly-prod uninstall shortly` (data stays in the PVC) |
+| Uninstall the app only | Delete its Argo CD Application instead (`kubectl -n argocd delete application shortly-prod`; the ApplicationSet recreates it from git): Argo CD never deletes the Cluster. `helm uninstall` (a `deploy.sh` release) **deletes the database** with the release |
 
 `cluster.sh up` bootstraps Argo CD with Helm (pinned by version and digest, values in `deploy/kind/argocd-values.yaml`) and makes none of the platform's secrets: they (`grafana-admin` in `monitoring`, the S3 identity `seaweedfs-s3` in `backups`) come from the secret store (namespace `secret-store`): External Secrets generates each value there once and copies it out. A cluster set up before platform plan 4.1 gets new values when it moves to 4.1: rotate the consumers as below (restart Grafana and SeaweedFS, recopy `backup-s3`). It then applies the platform's AppProject (to bootstrap: Argo CD keeps it in sync from git after that) and root Application (`deploy/argocd/platform-root.yaml`, with the node's architecture and `PLATFORM_REVISION`, default `main`) and waits until every platform Application is Synced and Healthy. Argo CD installs the rest from `deploy/argocd/platform/`, in four sync waves. On a fresh cluster they overlap: a child that has never synced doesn't hold its wave, and what orders them is each child's sync retry (every 5 s, doubling to 30 s):
 - **Wave -2:** the platform's AppProject (`platform-project`): what the children may deploy, kept from git, so a change to it reaches a running cluster on its own.

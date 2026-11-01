@@ -346,33 +346,32 @@ Losing the database loses every link, and a short link that stops resolving brea
 ```mermaid
 flowchart LR
   subgraph app [staging / prod namespace]
-    PG[(Postgres)] -->|pg_dump, hourly :41| Job[postgres-backup Job<br/>dump, check, upload]
+    PG[(Cluster shortly-db<br/>CloudNativePG)] -->|WAL, continuously<br/>base backup, hourly :23| SC[Barman Cloud<br/>sidecar]
   end
   subgraph bk [backups namespace]
-    S3[(SeaweedFS S3<br/>shortly-backups/ns/…)]
+    S3[(SeaweedFS S3<br/>cnpg-backups/ns/shortly-db)]
   end
-  Job -->|rclone| S3
+  SC --> S3
   subgraph drill [restore-drill namespace, throwaway]
-    R[empty Postgres<br/>+ pg_restore] 
+    R[Cluster drill<br/>bootstrap.recovery]
   end
-  S3 -->|newest dump| R
+  S3 -->|newest base backup + WAL| R
 ```
 
 | Property | How | Why |
 | --- | --- | --- |
-| What | `pg_dump --format=custom` of the whole database, by the server's own image | A logical dump restores into any Postgres of the same or newer major version; the server's image keeps client and server versions equal |
-| Checked when taken | `pg_restore --list` on the archive before upload; the Job fails otherwise | A corrupt dump is found within the hour, not during the incident |
-| Where | An S3 bucket in its own namespace (`deploy/kind/backups.yaml`); only pods labelled `component=backup` reach it (NetworkPolicy) | Backups that share the database's failure domain or credentials are lost with it. In a real cloud: another account or region, versioning and object lock |
-| How often, how long | Hourly at :41; 7 days kept, deleted by the Job itself (never the newest) | Recovery point and storage cost; see RPO below |
-| Proven | `scripts/restore-drill.sh`: the newest dump into an empty Postgres in a throwaway namespace; checks the Alembic revision, the link count and a canary link. e2e step 11 runs it on every PR | A backup nobody has restored is a hope. The drill also measures the restore time |
-| Watched | `ShortlyBackupNotRunning` (ticket) after 2 missed runs or 2 hours without a success | Backups fail silently: nothing breaks until the day they're needed |
+| What | A physical base backup of the instance hourly (:23) and when the Cluster is created, plus every WAL segment as it's written, by the Barman Cloud plugin's sidecar (`ObjectStore` and `ScheduledBackup`, rendered by the service chart's `database.cluster`) | A restore replays WAL on top of a base backup, so it can reach any moment, not just the last dump |
+| Where | An S3 bucket in its own namespace (`deploy/kind/backups.yaml`), `s3://cnpg-backups/<namespace>/shortly-db`; only backup and database pods reach it (NetworkPolicy); the keys come from the `backup-bucket` store | Backups that share the database's failure domain or credentials are lost with it. In a real cloud: another account or region, versioning and object lock |
+| How long | 7 days (`retentionPolicy`), base backups and WAL; the plugin deletes older ones | Recovery window and storage cost |
+| Proven | `scripts/restore-drill-cnpg.sh`: the newest base backup and the WAL after it into a throwaway Cluster; checks the Alembic revision, the link count and a link written after the base backup (only WAL replay brings it back). e2e step 11 runs it against prod on every PR | A backup nobody has restored is a hope. The drill also measures the restore time (52 s in CI, most of it the operator starting the Cluster) |
+| Watched | `ShortlyBackupNotRunning` still watches the old `pg_dump` CronJob (until 4.3 removes it); alerts on the plugin's own metrics replace it next | Backups fail silently: nothing breaks until the day they're needed |
 
-**On CloudNativePG (both environments since platform plan 4.3).** The operator's Barman Cloud plugin archives every WAL segment as it fills and takes a base backup hourly (:23) and when the Cluster is created, to `s3://cnpg-backups/<namespace>/shortly-db`; 7 days kept. `scripts/restore-drill-cnpg.sh` recovers the newest base backup and the WAL after it into a throwaway Cluster (`bootstrap.recovery` from the source's ObjectStore), and e2e step 11 runs it against prod on every PR with a link written after the base backup: only WAL replay brings that one back (52 s in CI, most of it the operator starting the Cluster). `TARGET_TIME` recovers to a moment instead of the latest, which is how a real restore starts (RUNBOOK). The old hourly `pg_dump` (below) still runs against the old, unused Postgres until 4.3 removes it. The RPO becomes the archive's lag behind the database (a segment is archived when it fills, or within `archive_timeout`, 5 min by default), not the hour between dumps.
+The old hourly `pg_dump` (CronJob `postgres-backup`, platform plan 2) still runs against the old, unused Postgres until 4.3 removes both. `TARGET_TIME` recovers to a moment instead of the latest, which is how a real restore starts (RUNBOOK).
 
 **Recovery objectives (local setup).**
 
-- **RPO, the data you can lose: up to 1 hour**, the backup interval. Everything written since the last dump is gone. Continuous WAL archiving (pgBackRest, WAL-G, or a managed database's point-in-time recovery) brings it down to seconds; that is the production answer, not hourly dumps.
-- **RTO, the time to restore: about 5 s** for the drill's database in CI (2,967 links, a 78 KB dump: download, empty Postgres, `pg_restore`, checks). That figure is mostly fixed overhead. Restore time grows with the database: a logical restore rebuilds every index, so a large table takes minutes to hours. Re-measure as data grows; RUNBOOK has the procedure for a real restore into prod.
+- **RPO, the data you can lose: minutes**, the archive's lag behind the database: a WAL segment is archived when it fills, or within `archive_timeout` (5 min by default) on a quiet database. The base backups only bound how much WAL a restore replays.
+- **RTO, the time to restore: about 50 s** for the drill in CI (about 4,600 links): the operator creating the Cluster, fetching the base backup, replaying WAL. It grows with the database and with the WAL since the last base backup (hourly keeps that short). A real restore is a recovery into a scratch Cluster and a copy into the environment's (RUNBOOK), so add the copy's time.
 
 ## Configuration and secrets
 
@@ -773,14 +772,14 @@ The probes, and `/metrics`, never wait in the request threadpool. FastAPI runs s
 | Anyone (`networkPolicy.httpFrom`): the Gateway's Envoy proxy, and in-cluster callers | shortly | 8000 | The public API. On a real cluster, narrow this to the proxy's namespace |
 | Prometheus pods in `monitoring` | shortly | 9100 | Scrapes; nobody else sees internal metrics |
 | shortly (app, migration and cleanup Jobs) | kube-dns | 53 UDP/TCP | Name resolution |
-| shortly (pods labelled `app.kubernetes.io/part-of: shortly`, the chart's `app.partOf`) | postgres | 5432 | The only dependency, in both directions |
+| shortly (pods labelled `app.kubernetes.io/part-of: shortly`, the chart's `app.partOf`) | the Cluster `shortly-db`'s pods | 5432 | The only dependency, in both directions (the chart's `shortly-db` NetworkPolicy; the Cluster's own pods replicate, and the operator in `cnpg-system` reaches each instance's status port, 8000) |
 | Anything else | any pod in `shortly-staging` or `shortly-prod` | any | Refused: default-deny ingress |
 
-The app's egress is closed too: it can reach DNS and the database, nothing else. A dependency added later (an OpenTelemetry collector, a URL reputation API) needs an explicit `networkPolicy.extraEgress` rule, which a reviewer sees. Kubelet probes and `kubectl port-forward` don't go through these rules. Postgres's own egress stays open, because the e2e uses `postgres-0` as an in-cluster client.
+The app's egress is closed too: it can reach DNS and the database, nothing else. A dependency added later (an OpenTelemetry collector, a URL reputation API) needs an explicit `networkPolicy.extraEgress` rule, which a reviewer sees. Kubelet probes and `kubectl port-forward` don't go through these rules. The database's egress stays open: it reaches the bucket and the API server.
 
 NetworkPolicy is only as good as the CNI that enforces it. A CNI that ignores it accepts the objects without a word, and every allowed path still works. So e2e step 9 tests the refusals, each next to a control that succeeds from the same place:
-- `postgres-0` reaches the app port but is refused on the metrics port.
-- A pod labelled `part-of: shortly` reaches Postgres; a stranger pod is refused, and so is a pod with only the old `name: shortly` label.
+- A stranger pod (the e2e's `client`, `scripts/lib/client.sh`) reaches the app port but is refused on the metrics port.
+- A pod labelled `part-of: shortly` reaches the database; a stranger pod is refused, and so is a pod with only the `name: shortly` label.
 
 The allowed paths are proven by the steps before it, including Prometheus scraping port 9100.
 

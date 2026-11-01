@@ -30,7 +30,7 @@
 #  11. prod's CloudNativePG backups restore: its base backup plus a link written after it
 #      (WAL only), into a scratch Cluster (scripts/restore-drill-cnpg.sh), and only backup and
 #      database pods reach the bucket (skipped if BACKUPS=0)
-#  11b. `cluster.sh wake` restarts the CronJob scheduler and takes an overdue backup at once
+#  11b. `cluster.sh wake` restarts the CronJob scheduler
 #  12. GitOps: Argo CD takes prod over from this commit, reverts a hand edit, and runs a
 #      canary it started itself without fighting Argo Rollouts over the route's weights
 #      (needs GITOPS_REVISION, a commit Argo CD can fetch; CI sets it)
@@ -50,6 +50,8 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # ENVS, and the namespace each runs in: helpers below take an environment (staging, prod)
 # shellcheck source=scripts/lib/platform.sh
 source "$(dirname "$0")/lib/platform.sh"
+# shellcheck source=scripts/lib/client.sh
+source "$(dirname "$0")/lib/client.sh"
 PF_PIDS=()
 ALERT_PID="" ALERT_LOG=$(mktemp)
 SUITE="${E2E_SUITE:-all}"
@@ -89,6 +91,7 @@ on_exit() {
     done
     kubectl -n gateway get gateway shortly -o wide || true
   fi
+  for env in "${ENVS[@]}"; do kubectl -n "$(ns_of "$env")" delete pod client --wait=false >/dev/null 2>&1 || true; done
   exit "$status"
 }
 trap on_exit EXIT
@@ -108,8 +111,8 @@ forward() {
 
 # GET a path through the Service from INSIDE the cluster (kube-proxy load-balancing, like a
 # real client). Port-forward can't be used for this: it pins one pod and dies with it.
-# Uses busybox wget in the Postgres pod; exit 0 only on a 2xx.
-in_cluster() { kubectl -n "$(ns_of "$1")" exec postgres-0 -- wget -q -O /dev/null -T 2 "http://shortly$2" 2>/dev/null; }
+# Uses busybox wget in the client pod (scripts/lib/client.sh); exit 0 only on a 2xx.
+in_cluster() { kubectl -n "$(ns_of "$1")" exec client -- wget -q -O /dev/null -T 2 "http://shortly$2" 2>/dev/null; }
 
 revision() { helm -n "$(ns_of "$1")" status shortly -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])'; }
 # prod runs an Argo Rollout (canary.enabled), staging a Deployment: same pod template.
@@ -136,6 +139,9 @@ for env in "${ENVS[@]}"; do
 done
 pass "digest-mode render accepted by the API server (server-side dry run)"
 
+# The in-cluster client pod in each namespace (scripts/lib/client.sh), deleted on exit.
+for env in "${ENVS[@]}"; do client_ready "$(ns_of "$env")"; done
+
 # ---------------------------------------------------------------- 1-2. staging
 # Staging's Postgres is a CloudNativePG Cluster (deploy/envs/staging.yaml), created by this
 # first deploy: the import from the old Postgres, initdb, then the app (more time than the
@@ -144,7 +150,7 @@ DEPLOY_TIMEOUT=6m "$ROOT/scripts/deploy.sh" staging "$IMAGE" >/dev/null
 pass "staging deployed under restricted Pod Security (revision $(revision staging))"
 db_phase=$(kubectl -n "$STAGING_NS" get cluster shortly-db -o jsonpath='{.status.phase}')
 [[ "$db_phase" == "Cluster in healthy state" ]] || fail "staging's CloudNativePG Cluster: '$db_phase'"
-pass "staging runs on its CloudNativePG Cluster (shortly-db: $db_phase), imported from the old Postgres"
+pass "staging runs on its CloudNativePG Cluster (shortly-db: $db_phase)"
 
 forward staging 18080
 S=http://127.0.0.1:18080
@@ -181,12 +187,12 @@ in_cluster prod /readyz || fail "prod not reachable through its Service"
 GW=http://shortly-gateway.envoy-gateway-system.svc
 gw() { # host path [extra wget args...] -> prints "STATUS LOCATION"
   local host=$1 path=$2; shift 2
-  kubectl -n "$PROD_NS" exec postgres-0 -- wget -S -O /dev/null -T 5 --header "Host: $host" "$@" "$GW$path" 2>&1 \
+  kubectl -n "$PROD_NS" exec client -- wget -S -O /dev/null -T 5 --header "Host: $host" "$@" "$GW$path" 2>&1 \
     | awk '/^  HTTP\//{if (!s) s=$2} /^  [Ll]ocation:/{if (!l) l=$2} END{print s, l}' # first response only: wget follows redirects
 }
 [[ "$(gw sho.rt.localhost /readyz)" == "200 " ]] || fail "gateway: prod /readyz via sho.rt.localhost"
 [[ "$(gw staging.sho.rt.localhost /readyz)" == "200 " ]] || fail "gateway: staging /readyz via staging.sho.rt.localhost"
-gw_code=$(kubectl -n "$PROD_NS" exec postgres-0 -- wget -q -O - -T 5 --header "Host: sho.rt.localhost" \
+gw_code=$(kubectl -n "$PROD_NS" exec client -- wget -q -O - -T 5 --header "Host: sho.rt.localhost" \
   --header 'content-type: application/json' --header "X-Forwarded-For: 203.0.113.250" \
   --post-data '{"url":"https://gateway-e2e.invalid/via-gateway"}' "$GW/links" \
   | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])' 2>/dev/null || true)
@@ -217,7 +223,7 @@ if suite platform; then
 # Postgres. Per-pod counters would let all burst + 5 through.
 # X-Forwarded-For picks the client (prod trusts the pod network as kind's stand-in ingress).
 create_as() {
-  kubectl -n "$PROD_NS" exec postgres-0 -- wget -S -O /dev/null -T 3 \
+  kubectl -n "$PROD_NS" exec client -- wget -S -O /dev/null -T 3 \
     --header 'content-type: application/json' --header "X-Forwarded-For: $1" \
     --post-data '{"url":"https://example.com/rate"}' http://shortly/links 2>&1 \
     | grep -m1 -oE 'HTTP/1\.[01] [0-9]{3}' | cut -d' ' -f2
@@ -366,7 +372,7 @@ pass "manual helm rollback to revision $good_rev restored the previous release i
 # and abort at the first step, while users mostly never notice: only the canary's share
 # of traffic (10%) could fail at all. We measure that share through the Gateway.
 if ((monitoring)); then
-  gw_code2=$(kubectl -n "$PROD_NS" exec postgres-0 -- wget -q -O - -T 5 --header "Host: sho.rt.localhost" \
+  gw_code2=$(kubectl -n "$PROD_NS" exec client -- wget -q -O - -T 5 --header "Host: sho.rt.localhost" \
     --header 'content-type: application/json' --header "X-Forwarded-For: 203.0.113.251" \
     --post-data '{"url":"https://gateway-e2e.invalid/canary"}' "$GW/links" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin)["code"])')
@@ -436,18 +442,19 @@ fi
 # the app reaches Postgres (/readyz), Prometheus scrapes port 9100 (step 7). Here, the
 # refusals: these must FAIL. A CNI that ignored NetworkPolicy would fail this step, not
 # pass it silently. Each refusal has a control that succeeds from the same place.
-in_cluster prod /readyz || fail "control: prod app port unreachable from postgres-0"
-if kubectl -n "$PROD_NS" exec postgres-0 -- wget -q -O /dev/null -T 3 http://shortly:9100/metrics 2>/dev/null; then
+in_cluster prod /readyz || fail "control: prod app port unreachable from the client pod"
+if kubectl -n "$PROD_NS" exec client -- wget -q -O /dev/null -T 3 http://shortly:9100/metrics 2>/dev/null; then
   fail "network policy: a non-Prometheus pod scraped prod's metrics port"
 fi
 pass "network policy: the metrics port refuses pods other than Prometheus"
 
-# A pod that isn't shortly must not reach Postgres. pg_isready exits 2 = no response.
+# A pod that isn't shortly must not reach prod's database (its CloudNativePG Cluster: the
+# chart's NetworkPolicy shortly-db). pg_isready exits 2 = no response.
 probe_pg() {
   kubectl -n "$PROD_NS" run "np-probe-$1" --image=postgres:17-alpine --restart=Never --rm -i --quiet \
     --labels="$2" --overrides='{"spec":{"automountServiceAccountToken":false,
       "securityContext":{"runAsNonRoot":true,"runAsUser":70,"seccompProfile":{"type":"RuntimeDefault"}},
-      "containers":[{"name":"probe","image":"postgres:17-alpine","command":["pg_isready","-h","postgres","-t","4"],
+      "containers":[{"name":"probe","image":"postgres:17-alpine","command":["pg_isready","-h","shortly-db-rw","-t","4"],
       "securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]}}}]}}' >/dev/null 2>&1
 }
 probe_pg part-of app.kubernetes.io/part-of=shortly \
@@ -455,11 +462,11 @@ probe_pg part-of app.kubernetes.io/part-of=shortly \
 if probe_pg stranger app=stranger; then
   fail "network policy: a pod that isn't shortly reached Postgres"
 fi
-# The old peer (name=shortly, charts before 0.6.0) was removed: such a pod must be refused.
-if probe_pg old-label app.kubernetes.io/name=shortly; then
-  fail "network policy: Postgres still admits the old app.kubernetes.io/name=shortly label"
+# The app's selector label alone (name=shortly) isn't part-of: such a pod must be refused.
+if probe_pg name-only app.kubernetes.io/name=shortly; then
+  fail "network policy: the database admits app.kubernetes.io/name=shortly without part-of"
 fi
-pass "network policy: Postgres accepts part-of=shortly only (not strangers, not the old label)"
+pass "network policy: the database accepts part-of=shortly only (not strangers, not the name label alone)"
 
 # ---------------------------------------------------------------- 10. expired-link cleanup
 # Plant links in staging's database, run the CronJob now, and check that exactly the right
@@ -474,7 +481,7 @@ psql_staging() {
   kubectl -n "$STAGING_NS" exec "$primary" -c postgres -- psql -d shortly -v ON_ERROR_STOP=1 -tAc "$1"
 }
 status_of() {
-  kubectl -n "$(ns_of "$1")" exec postgres-0 -- wget -S -O /dev/null -T 3 "http://shortly$2" 2>&1 \
+  kubectl -n "$(ns_of "$1")" exec client -- wget -S -O /dev/null -T 3 "http://shortly$2" 2>&1 \
     | grep -m1 -oE 'HTTP/1\.[01] [0-9]{3}' | cut -d' ' -f2
 }
 [[ "$(psql_staging "SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid WHERE c.relname = 'ix_links_expires_at'")" == t ]] \
@@ -526,9 +533,9 @@ if kubectl -n "$PROD_NS" get objectstore shortly-db >/dev/null 2>&1; then
     || fail "backup: prod's WAL $segment not archived after 120 s (last: '${archived:-none}')"
   pass "backup: prod's base backup completed, and WAL up to $segment is archived"
   SOURCE="$PROD_NS" EXPECT_CODE=e2ewal1 EXPECT_LINKS="$want_links" "$ROOT/scripts/restore-drill-cnpg.sh"
-  # The bucket is for backup and database pods only: postgres-0 (neither) is refused. The
+  # The bucket is for backup and database pods only: the client pod (neither) is refused. The
   # control is the drill above, whose Cluster reached it.
-  if kubectl -n "$PROD_NS" exec postgres-0 -- nc -z -w 3 seaweedfs.backups.svc 8333 2>/dev/null; then
+  if kubectl -n "$PROD_NS" exec client -- nc -z -w 3 seaweedfs.backups.svc 8333 2>/dev/null; then
     fail "network policy: a pod that isn't a backup or database pod reached the backup bucket"
   fi
   pass "network policy: the backup bucket refuses pods other than backup and database pods"
@@ -536,21 +543,22 @@ else
   echo "skip backup checks: no backup bucket (BACKUPS=0?)"
 fi
 
-# 11b. `cluster.sh wake` (after a laptop slept): the controller restarts, and an overdue
-# pg_dump backup starts at once. MAX_AGE=0 makes every backup "overdue" here. (The old
-# Postgres and its CronJob stay until the end of platform plan 4.3.)
+# 11b. `cluster.sh wake` (after a laptop slept) restarts the CronJob scheduler
+# (kube-controller-manager), so the cleanup CronJob runs again on time. While the platform
+# still runs the old Postgres's pg_dump CronJob, it also starts an overdue backup at once
+# (MAX_AGE=0 makes every backup "overdue" here).
+restarts() { kubectl -n kube-system get pod -l component=kube-controller-manager \
+  -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'; }
+before=$(restarts)
+WAKE_BACKUP_MAX_AGE=0 "$PLATFORM_DIR/scripts/cluster.sh" wake
+(($(restarts) == before + 1)) || fail "wake: kube-controller-manager was not restarted"
 if kubectl -n "$PROD_NS" get cronjob postgres-backup >/dev/null 2>&1; then
-  restarts() { kubectl -n kube-system get pod -l component=kube-controller-manager \
-    -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'; }
-  before=$(restarts)
-  WAKE_BACKUP_MAX_AGE=0 "$PLATFORM_DIR/scripts/cluster.sh" wake
-  (($(restarts) == before + 1)) || fail "wake: kube-controller-manager was not restarted"
   wake_job=$(kubectl -n "$PROD_NS" get jobs -o name | grep -m1 'job.batch/backup-wake-' || true)
   [[ -n "$wake_job" ]] || fail "wake: no backup-wake Job in prod"
   kubectl -n "$PROD_NS" wait --for=condition=complete "$wake_job" --timeout=180s >/dev/null \
     || fail "wake: $wake_job did not complete"
-  pass "wake: kube-controller-manager restarted, and the overdue prod backup ran at once ($wake_job)"
 fi
+pass "wake: kube-controller-manager restarted${wake_job:+, and the overdue prod backup ran at once ($wake_job)}"
 
 fi # 6-11
 

@@ -15,6 +15,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=scripts/lib/platform.sh
 source "$(dirname "$0")/lib/platform.sh"
+# shellcheck source=scripts/lib/client.sh
+source "$(dirname "$0")/lib/client.sh"
 export PROD_NS
 pass() { echo "ok   $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -58,8 +60,9 @@ pass "chart's PrometheusRules loaded: 5 groups, every rule health=ok"
 
 # ---------------------------------------------------------------- 3. recording rules
 # A little traffic so the 5m rates exist even when the HPA drill was skipped.
+client_ready "$PROD_NS"
 for _ in $(seq 1 20); do
-  kubectl -n "$PROD_NS" exec postgres-0 -- wget -q -O /dev/null -T 2 http://shortly/no-such-code 2>/dev/null || true
+  kubectl -n "$PROD_NS" exec client -- wget -q -O /dev/null -T 2 http://shortly/no-such-code 2>/dev/null || true
 done
 n=0
 for _ in $(seq 1 40); do
