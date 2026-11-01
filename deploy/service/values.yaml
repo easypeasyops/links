@@ -359,24 +359,34 @@ monitoring:
                 description: The shortly-cleanup CronJob has missed at least 3 runs, or has never succeeded. Expired links pile up until it runs again.
                 runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#cleanup-job-not-running
 
-            # Needs kube-state-metrics. Backups that silently stopped are found during the
-            # incident that needs them. Hourly job (RPO 1 h): fires after 2 missed runs, or if it
-            # has never succeeded in 2 hours. Only where a postgres-backup CronJob exists (the
-            # kind setup); a managed database's backups are watched through its provider.
+            # The databases' backups (CloudNativePG, platform plan 4.3), from each instance's
+            # exporter (the service chart's PodMonitor, chart 1.1.0). Backups that silently stopped
+            # are found during the incident that needs them. A base backup every hour: fires after
+            # 2 missed, or if there has never been one (the plugin reports 0). If the metric is
+            # missing altogether, the scrape is broken and the monitoring checks catch that.
             - alert: ShortlyBackupNotRunning
-              expr: |-
-                time() - max by (namespace) (kube_cronjob_status_last_successful_time{cronjob="postgres-backup"}) > 2 * 3600
-                  or (
-                    time() - max by (namespace) (kube_cronjob_created{cronjob="postgres-backup"}) > 2 * 3600
-                      unless max by (namespace) (kube_cronjob_status_last_successful_time{cronjob="postgres-backup"})
-                  )
+              expr: time() - max by (namespace) (barman_cloud_cloudnative_pg_io_last_available_backup_timestamp) > 2 * 3600
               for: 15m
               labels:
                 severity: ticket
               annotations:
-                summary: Postgres backups haven't succeeded for over 2 hours
-                description: The postgres-backup CronJob has missed at least 2 runs, or has never succeeded. Data written since the last good backup can't be recovered if the database is lost.
-                runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backup-job-not-running
+                summary: Postgres base backups haven't succeeded for over 2 hours
+                description: The newest base backup of the namespace's database is over 2 hours old, or there is none. A restore has to replay WAL from an older base backup, or has nothing to start from.
+                runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backups-not-running
+
+            # Between base backups, every change is in the WAL archive: when archiving fails, the
+            # point a restore can reach stops moving, and unarchived WAL fills the database's
+            # volume. Fires when the last attempt failed and none has succeeded since (the primary
+            # reports both, as epoch seconds; -1 = never).
+            - alert: ShortlyWalArchivingFailing
+              expr: max by (namespace) (cnpg_pg_stat_archiver_last_failed_time) > max by (namespace) (cnpg_pg_stat_archiver_last_archived_time)
+              for: 15m
+              labels:
+                severity: ticket
+              annotations:
+                summary: WAL archiving to the backup bucket is failing
+                description: The database's last attempt to archive WAL failed and none has succeeded since. A restore can't reach past the last archived segment, and WAL piles up on the database's volume until it fills.
+                runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backups-not-running
   # The platform's SLO dashboard is the chart's; its Runbook link is the SLO spec's.
   sloDashboard:
     runbookUrl: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts

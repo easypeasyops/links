@@ -407,55 +407,67 @@ tests:
         alertname: ShortlyCleanupNotRunning
         exp_alerts: []
 
-  - name: backups that stopped open a ticket
+  - name: base backups that stopped open a ticket
     interval: 1m
     input_series:
-      # Last success at t=0, nothing since.
-      - series: 'kube_cronjob_status_last_successful_time{namespace="prod",cronjob="postgres-backup"}'
-        values: '0x200'
-      - series: 'kube_cronjob_created{namespace="prod",cronjob="postgres-backup"}'
+      # Last base backup at t=0, nothing since.
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="prod",pod="shortly-db-1"}'
         values: '0x200'
     alert_rule_test:
       - eval_time: 2h
         alertname: ShortlyBackupNotRunning
-        exp_alerts: [] # just over 2 h stale, but not yet for 15 minutes
+        exp_alerts: [] # just over 2 h old, but not yet for 15 minutes
       - eval_time: 2h20m
         alertname: ShortlyBackupNotRunning
         exp_alerts:
           - exp_labels: {namespace: prod, severity: ticket}
             exp_annotations:
-              summary: Postgres backups haven't succeeded for over 2 hours
-              description: The postgres-backup CronJob has missed at least 2 runs, or has never succeeded. Data written since the last good backup can't be recovered if the database is lost.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backup-job-not-running
+              summary: Postgres base backups haven't succeeded for over 2 hours
+              description: The newest base backup of the namespace's database is over 2 hours old, or there is none. A restore has to replay WAL from an older base backup, or has nothing to start from.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backups-not-running
 
-  - name: backups that never succeeded open a ticket
+  - name: hourly base backups stay quiet
     interval: 1m
     input_series:
-      - series: 'kube_cronjob_created{namespace="prod",cronjob="postgres-backup"}'
-        values: '0x200'
-    alert_rule_test:
-      - eval_time: 1h50m
-        alertname: ShortlyBackupNotRunning
-        exp_alerts: []
-      - eval_time: 2h20m
-        alertname: ShortlyBackupNotRunning
-        exp_alerts:
-          - exp_labels: {namespace: prod, severity: ticket}
-            exp_annotations:
-              summary: Postgres backups haven't succeeded for over 2 hours
-              description: The postgres-backup CronJob has missed at least 2 runs, or has never succeeded. Data written since the last good backup can't be recovered if the database is lost.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backup-job-not-running
-
-  - name: hourly backups stay quiet
-    interval: 1m
-    input_series:
-      - series: 'kube_cronjob_status_last_successful_time{namespace="prod",cronjob="postgres-backup"}'
+      - series: 'barman_cloud_cloudnative_pg_io_last_available_backup_timestamp{namespace="prod",pod="shortly-db-1"}'
         values: '0x59 3600x59 7200x59 10800x59'
-      - series: 'kube_cronjob_created{namespace="prod",cronjob="postgres-backup"}'
-        values: '0x239'
     alert_rule_test:
       - eval_time: 3h50m
         alertname: ShortlyBackupNotRunning
+        exp_alerts: []
+
+  - name: failing WAL archiving opens a ticket
+    interval: 1m
+    input_series:
+      # Archived until t=10m (600), then every attempt fails.
+      - series: 'cnpg_pg_stat_archiver_last_archived_time{namespace="prod",pod="shortly-db-1"}'
+        values: '0+60x10 600x60'
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="prod",pod="shortly-db-1"}'
+        values: '-1x10 660+60x60'
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: ShortlyWalArchivingFailing
+        exp_alerts: [] # failing for 10 minutes: not yet 15
+      - eval_time: 30m
+        alertname: ShortlyWalArchivingFailing
+        exp_alerts:
+          - exp_labels: {namespace: prod, severity: ticket}
+            exp_annotations:
+              summary: WAL archiving to the backup bucket is failing
+              description: The database's last attempt to archive WAL failed and none has succeeded since. A restore can't reach past the last archived segment, and WAL piles up on the database's volume until it fills.
+              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backups-not-running
+
+  - name: WAL archiving that recovered stays quiet
+    interval: 1m
+    input_series:
+      # One failure at 5m, archiving again from 6m on.
+      - series: 'cnpg_pg_stat_archiver_last_archived_time{namespace="prod",pod="shortly-db-1"}'
+        values: '0x5 360+60x60'
+      - series: 'cnpg_pg_stat_archiver_last_failed_time{namespace="prod",pod="shortly-db-1"}'
+        values: '-1x4 300x60'
+    alert_rule_test:
+      - eval_time: 40m
+        alertname: ShortlyWalArchivingFailing
         exp_alerts: []
 
   - name: fault injection left on opens a ticket
