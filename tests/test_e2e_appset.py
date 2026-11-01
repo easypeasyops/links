@@ -21,6 +21,8 @@ PATCH = (
     '          - {{ printf "$values/%s" . | quote }}\n'
     "        {{- end }}\n    - repoURL: {{ .values.repoURL | quote }}\n"
     "      targetRevision: {{ .values.revision | quote }}\n      ref: values\n"
+    "    - repoURL: https://github.com/easypeasyops/platform.git\n"
+    "      targetRevision: main\n      path: deploy/app-namespace\n"
 )
 LOCK = "e" * 40
 
@@ -66,6 +68,12 @@ def test_values_at_the_commit_under_test_then_ci_values() -> None:
     )
     assert '"image": {"repository": "shortly", "tag": "e2e", "digest": ""}' in patch
     assert patch.endswith(f'targetRevision: "{LOCK}"\n      ref: platform\n')
+
+
+def test_the_namespace_baseline_at_the_lock() -> None:
+    patch = json.loads(run(PATCH).stdout)["spec"]["templatePatch"]
+    assert f'targetRevision: "{LOCK}"\n      path: deploy/app-namespace\n' in patch
+    assert "targetRevision: main" not in patch
 
 
 def test_refuses_a_changed_template() -> None:
