@@ -737,27 +737,29 @@ helm -n shortly-prod get values shortly | grep -i fault
 
 Fix: if it is in `deploy/envs/`, revert that change (a PR); Argo CD removes it within a minute. If someone set it by hand, Argo CD's self-heal has already removed it, unless auto-sync is off: turn it back on (`kubectl -n argocd delete application shortly-prod`; the platform's ApplicationSet recreates it from git). Then find out how it got there: it must never be in `deploy/envs/`.
 
-### Backup job not running
+### Backups not running
 
-`ShortlyBackupNotRunning` (ticket) means the `postgres-backup` CronJob hasn't succeeded for over 2 hours, or never has. Nothing user-facing breaks, but every hour without a backup is an hour of links that a database loss would take with it.
+Two tickets watch each database's backups (CloudNativePG's Barman Cloud plugin, to `s3://cnpg-backups/<ns>/shortly-db`), from the instances' metrics (the chart's PodMonitor):
+- `ShortlyBackupNotRunning`: the newest base backup is over 2 hours old (they run hourly at :23), or there is none.
+- `ShortlyWalArchivingFailing`: the last attempt to archive WAL failed and none has succeeded since. The point a restore can reach stops moving, and unarchived WAL fills the database's volume.
+
+Nothing user-facing breaks yet, but a database loss now loses everything since the last good backup or archived segment.
 
 ```bash
-kubectl -n shortly-prod get cronjob postgres-backup               # SUSPEND, LAST SCHEDULE, LAST SUCCESSFUL
-kubectl -n shortly-prod get jobs -l app.kubernetes.io/name=postgres-backup
-kubectl -n shortly-prod logs job/<the latest one> -c dump --tail=20      # pg_dump
-kubectl -n shortly-prod logs job/<the latest one> -c upload --tail=20    # rclone
+kubectl -n shortly-prod get scheduledbackups,backups                  # the newest Backup's PHASE and its error
+kubectl -n shortly-prod get cluster shortly-db -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.message}{"\n"}{end}'   # ContinuousArchiving
+kubectl -n shortly-prod logs shortly-db-1 -c plugin-barman-cloud --tail=30   # the sidecar: uploads, errors
+kubectl -n shortly-prod describe externalsecret shortly-db-backup     # the bucket's keys
 ```
 
-| What you see | Cause | Fix |
+| Symptom | Likely cause | Fix |
 | --- | --- | --- |
-| `dump` fails to connect | Postgres down, or the network policy doesn't admit the Job (`component=backup` label changed) | Database first; else compare the pod's labels with the `postgres` NetworkPolicy |
-| `dump` fails in `pg_restore --list` | The archive is corrupt (disk full in the `work` volume, killed mid-write) | Re-run; if it repeats, check the volume's `sizeLimit` against the database size |
-| `upload` times out or is refused | The bucket is down, or the `seaweedfs` NetworkPolicy no longer admits the Job | `kubectl -n backups get pods`; `kubectl -n backups logs statefulset/seaweedfs --tail=50` |
-| `upload` gets 403 | Credentials differ between `backup-s3` (app namespace) and `seaweedfs-s3` (backups) | Delete `backup-s3` in the namespace and re-run `../platform/scripts/cluster.sh up`, which copies them again |
-| No Jobs; `SUSPEND` is `True` | Suspended, perhaps by a restore that didn't finish | `kubectl -n shortly-prod patch cronjob postgres-backup -p '{"spec":{"suspend":false}}'` |
-| No failed Jobs; `LAST SCHEDULE` hours old; on the laptop | The Mac slept: the CronJob controller's timers stall while Docker's VM is paused (runs come hours apart) | `../platform/scripts/cluster.sh wake`: restarts the controller and backs up every environment whose last backup is over an hour old |
+| Backups `failed`, or archiving errors mentioning access or credentials | The bucket's keys: the `shortly-db-backup` ExternalSecret isn't Ready, or the store's value was rotated | Fix the ExternalSecret (its `describe` names the cause); after a rotation, delete the Secret so it's copied again |
+| Errors connecting to `seaweedfs.backups.svc` | The bucket is down, or its NetworkPolicy refuses the database's pods | `kubectl -n backups get pods`; the policy must admit `cnpg.io/cluster` pods (platform `deploy/kind/backups.yaml`) |
+| No new Backups at all; on the laptop | The Mac slept, or the operator isn't running | `kubectl -n cnpg-system get pods`; the ScheduledBackup catches up on the next hour |
+| Archiving fails with "WAL archive not empty" after the Cluster was recreated | A new Cluster won't archive into a folder that holds another one's WAL | Move the old backups aside in the bucket, or delete them if they aren't needed, then the Cluster archives again |
 
-**Take one now**, after fixing the cause: `kubectl -n shortly-prod create job backup-manual-$(date +%s) --from=cronjob/postgres-backup`. (Since 4.3 this CronJob dumps the old, unused database: prod's data is backed up by CloudNativePG, proved by `SOURCE=shortly-prod scripts/restore-drill-cnpg.sh`. This section is replaced when the alert moves to those backups.)
+**Take one now**, after fixing the cause, and prove it restores: `BACKUP=1 SOURCE=shortly-prod scripts/restore-drill-cnpg.sh`.
 
 ### Rate limiting: 429 on POST /links
 
