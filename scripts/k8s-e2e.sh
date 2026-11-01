@@ -128,8 +128,16 @@ done
 pass "digest-mode render accepted by the API server (server-side dry run)"
 
 # ---------------------------------------------------------------- 1-2. staging
-"$ROOT/scripts/deploy.sh" staging "$IMAGE" >/dev/null
+# Staging's Postgres is a CloudNativePG Cluster (deploy/envs/staging.yaml), created by this
+# first deploy: the import from the old Postgres, initdb, then the app (more time than the
+# other deploys). Without the backup bucket (BACKUPS=0) it can't archive WAL: no backups.
+staging_db=()
+kubectl get namespace backups >/dev/null 2>&1 || staging_db=(--set database.cluster.backup.enabled=false)
+DEPLOY_TIMEOUT=6m "$ROOT/scripts/deploy.sh" staging "$IMAGE" "${staging_db[@]}" >/dev/null
 pass "staging deployed under restricted Pod Security (revision $(revision staging))"
+db_phase=$(kubectl -n "$STAGING_NS" get cluster shortly-db -o jsonpath='{.status.phase}')
+[[ "$db_phase" == "Cluster in healthy state" ]] || fail "staging's CloudNativePG Cluster: '$db_phase'"
+pass "staging runs on its CloudNativePG Cluster (shortly-db: $db_phase), imported from the old Postgres"
 
 forward staging 18080
 S=http://127.0.0.1:18080
@@ -451,7 +459,13 @@ pass "network policy: Postgres accepts part-of=shortly only (not strangers, not 
 # rows went: expired 30 days ago (past the 7-day grace) gone; expired yesterday (410 Gone
 # still) and not yet expired kept. The Job runs the release image, under the restricted
 # PSS and its own NetworkPolicy, so this also proves it can reach Postgres.
-psql_staging() { kubectl -n "$STAGING_NS" exec postgres-0 -- psql -U shortly -d shortly -v ON_ERROR_STOP=1 -tAc "$1"; }
+# Staging's database is its CloudNativePG Cluster: psql on the primary, over the local
+# socket (the postgres superuser).
+psql_staging() {
+  local primary
+  primary=$(kubectl -n "$STAGING_NS" get cluster shortly-db -o jsonpath='{.status.currentPrimary}')
+  kubectl -n "$STAGING_NS" exec "$primary" -c postgres -- psql -d shortly -v ON_ERROR_STOP=1 -tAc "$1"
+}
 status_of() {
   kubectl -n "$(ns_of "$1")" exec postgres-0 -- wget -S -O /dev/null -T 3 "http://shortly$2" 2>&1 \
     | grep -m1 -oE 'HTTP/1\.[01] [0-9]{3}' | cut -d' ' -f2

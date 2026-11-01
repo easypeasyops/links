@@ -21,3 +21,25 @@ resources:
   limits: { memory: 192Mi }
 monitoring:
   enabled: true
+# Staging's Postgres runs on the platform's CloudNativePG operator (platform plan 4.3): the
+# Cluster shortly-db, with WAL archiving and hourly base backups to the bucket. It was
+# filled once, when it was created, by importing the database from the old Postgres
+# (bootstrap.initdb.import; writes made to the old one during that minute stayed there).
+# The app reads the URL the operator writes for its user.
+database:
+  existingSecret: shortly-db-app
+  secretKey: uri
+  cluster:
+    enabled: true
+    bootstrap:
+      initdb:
+        database: shortly
+        owner: shortly
+        import:
+          type: microservice
+          databases: [shortly]
+          source: { externalCluster: old-postgres }
+    externalClusters:
+      - name: old-postgres
+        connectionParameters: { host: postgres, user: shortly, dbname: shortly, sslmode: disable }
+        password: { name: postgres-auth, key: password }
