@@ -608,11 +608,17 @@ print(json.dumps(project))
   old_hash=$(ro '{.status.stableRS}')
   kubectl -n argocd patch application shortly-prod --type json -p \
     '[{"op":"add","path":"/spec/sources/0/helm/valuesObject/config","value":{"logLevel":"DEBUG"}}]' >/dev/null
-  start=$SECONDS max_weight=0 out_of_sync=0 drifted=""
+  start=$SECONDS max_weight=0 out_of_sync=0 drifted="" applied=""
   while ((SECONDS - start < 420)); do
     w=$(kubectl -n "$PROD_NS" get httproute shortly -o jsonpath='{.spec.rules[0].backendRefs[1].weight}')
     ((${w:-0} > max_weight)) && max_weight=${w:-0}
-    if [[ "$(app '{.status.sync.status}')" == OutOfSync ]]; then
+    # Until Argo CD has applied the change to the Rollout, OutOfSync is the change itself:
+    # with a database the sync first passes its waves and the migration (platform #33), so
+    # that takes a while. Only OutOfSync after it counts against the canary.
+    if [[ -z "$applied" && "$(ro '{.spec.template.spec.containers[0].env[?(@.name=="SHORTLY_LOG_LEVEL")].value}')" == DEBUG ]]; then
+      applied=$((SECONDS - start))
+    fi
+    if [[ -n "$applied" && "$(app '{.status.sync.status}')" == OutOfSync ]]; then
       out_of_sync=$((out_of_sync + 1))
       # Which resources, so a failure below says what Argo CD and the canary disagreed on.
       drifted+=" $(app '{range .status.resources[?(@.status=="OutOfSync")]}{.kind}/{.name},{end}')@$((SECONDS - start))s"
@@ -633,7 +639,7 @@ print(json.dumps(project))
   ((out_of_sync <= 3)) \
     || fail "GitOps: Argo CD saw prod OutOfSync $out_of_sync times during the canary (out of sync, by seconds into it:$drifted)"
   wait_app 60 "after the canary"
-  pass "GitOps: a change through Argo CD ran a full canary (weights up to ${max_weight}%, analysis Successful twice, synthetic traffic included) in $((SECONDS - start))s; Argo CD stayed in sync"
+  pass "GitOps: a change through Argo CD reached the Rollout after ${applied}s and ran a full canary (weights up to ${max_weight}%, analysis Successful twice, synthetic traffic included) in $((SECONDS - start))s; Argo CD stayed in sync"
 else
   echo "skip GitOps checks: no Argo CD, or GITOPS_REVISION unset (CI sets it)"
 fi
