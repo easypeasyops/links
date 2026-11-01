@@ -366,7 +366,7 @@ flowchart LR
 | Proven | `scripts/restore-drill-cnpg.sh`: the newest base backup and the WAL after it into a throwaway Cluster; checks the Alembic revision, the link count and a link written after the base backup (only WAL replay brings it back). e2e step 11 runs it against prod on every PR | A backup nobody has restored is a hope. The drill also measures the restore time (52 s in CI, most of it the operator starting the Cluster) |
 | Watched | `ShortlyBackupNotRunning` (ticket) when the newest base backup is over 2 hours old or missing (the plugin's `barman_cloud_cloudnative_pg_io_last_available_backup_timestamp`), `ShortlyWalArchivingFailing` (ticket) when WAL archiving fails and nothing has succeeded since (`cnpg_pg_stat_archiver_*`); both read the instances' exporter, which the chart scrapes since chart 1.1.0 | Backups fail silently: nothing breaks until the day they're needed. WAL is watched apart from the base backups because it is what carries the last hour |
 
-The old hourly `pg_dump` (CronJob `postgres-backup`, platform plan 2) still runs against the old, unused Postgres until 4.3 removes both. `TARGET_TIME` recovers to a moment instead of the latest, which is how a real restore starts (RUNBOOK).
+The old hourly `pg_dump` (CronJob `postgres-backup`, platform plan 2) went with the old Postgres at the end of 4.3. `TARGET_TIME` recovers to a moment instead of the latest, which is how a real restore starts (RUNBOOK).
 
 **Recovery objectives (local setup).**
 
@@ -892,7 +892,7 @@ flowchart LR
 
 ### The platform under Argo CD
 
-Since PR #60 everything under the app comes from git too. Only Argo CD itself and each environment's database and its secrets are still put there by `scripts/cluster.sh`; since platform plan 4.1 the platform's own secrets come from the secret store, through External Secrets. A merged change to a platform chart's values, a policy or the Gateway reaches the cluster within a minute, as a promotion does, and a hand edit is reverted.
+Since PR #60 everything under the app comes from git too. Only Argo CD itself and each environment's namespace (its Pod Security labels and default-deny policy) are still put there by `scripts/cluster.sh`. Since platform plan 4.1 the platform's own secrets come from the secret store, through External Secrets, and since 4.3 each environment's database comes with the app, a CloudNativePG Cluster rendered by the service chart, with its credentials and backups. A merged change to a platform chart's values, a policy or the Gateway reaches the cluster within a minute, as a promotion does, and a hand edit is reverted.
 
 ```mermaid
 flowchart TB
