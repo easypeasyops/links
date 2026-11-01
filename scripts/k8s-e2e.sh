@@ -30,6 +30,8 @@
 #  11. prod's backup runs, only backup pods reach the bucket, and the dump restores into a
 #      fresh database with every link (scripts/restore-drill.sh; skipped if BACKUPS=0)
 #  11b. `cluster.sh wake` restarts the CronJob scheduler and takes an overdue backup at once
+#  11c. staging's CloudNativePG backups restore: its base backup plus a link written after it
+#      (WAL only), into a scratch Cluster (scripts/restore-drill-cnpg.sh; skipped if BACKUPS=0)
 #  12. GitOps: Argo CD takes prod over from this commit, reverts a hand edit, and runs a
 #      canary it started itself without fighting Argo Rollouts over the route's weights
 #      (needs GITOPS_REVISION, a commit Argo CD can fetch; CI sets it)
@@ -528,6 +530,31 @@ if kubectl -n "$PROD_NS" get cronjob postgres-backup >/dev/null 2>&1; then
   pass "wake: kube-controller-manager restarted, and the overdue prod backup ran at once ($wake_job)"
 else
   echo "skip backup checks: no postgres-backup CronJob (BACKUPS=0?)"
+fi
+
+# 11c. Staging's CloudNativePG backups (platform plan 4.3): the base backup the chart takes
+# when the Cluster is created, then a link written after it, in WAL only. Restoring both
+# into a scratch Cluster proves the archive replays, not just that a snapshot exists.
+if kubectl -n "$STAGING_NS" get objectstore shortly-db >/dev/null 2>&1; then
+  for _ in $(seq 1 60); do
+    [[ "$(kubectl -n "$STAGING_NS" get backups -l cnpg.io/cluster=shortly-db \
+      -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' | grep -c completed)" -gt 0 ]] && break
+    sleep 3
+  done
+  psql_staging "INSERT INTO links (code, target, created_at) VALUES ('e2ewal1', 'https://example.com/wal', now())" >/dev/null
+  want_links=$(psql_staging "SELECT count(*) FROM links")
+  # Close the WAL segment holding that insert, and wait until the plugin has archived it.
+  segment=$(psql_staging "SELECT pg_walfile_name(pg_switch_wal())")
+  archived=""
+  for _ in $(seq 1 40); do
+    archived=$(psql_staging "SELECT coalesce(last_archived_wal, '') FROM pg_stat_archiver")
+    [[ -n "$archived" && ! "$archived" < "$segment" ]] && break
+    sleep 3
+  done
+  [[ -n "$archived" && ! "$archived" < "$segment" ]] \
+    || fail "backup (CloudNativePG): WAL $segment not archived after 120 s (last: '${archived:-none}')"
+  pass "backup (CloudNativePG): a base backup completed, and WAL up to $segment is archived"
+  SOURCE="$STAGING_NS" EXPECT_CODE=e2ewal1 EXPECT_LINKS="$want_links" "$ROOT/scripts/restore-drill-cnpg.sh"
 fi
 
 fi # 6-11

@@ -304,6 +304,7 @@ kubectl -n shortly-staging get backups,scheduledbackups           # base backups
 - The app reads `shortly-db-app` (key `uri`), which the operator writes for the `shortly` user. Services: `shortly-db-rw` (the primary), `shortly-db-ro`.
 - It was filled once, when the Cluster was created, by importing the old Postgres's database (`bootstrap.initdb.import`, type microservice): the old StatefulSet `postgres` still runs in staging until the end of 4.3, but nothing reads it.
 - WAL is archived continuously and a base backup taken hourly (:23), by the Barman Cloud plugin, to the bucket; the old hourly `pg_dump` CronJob still dumps the old, unused database until it's removed.
+- **Prove the backups restore:** `SOURCE=shortly-staging scripts/restore-drill-cnpg.sh` recovers the newest base backup and every archived WAL segment after it into a scratch Cluster (namespace `restore-drill`, deleted afterwards; `KEEP=1` keeps it, `BACKUP=1` takes a base backup first) and prints how long it took. It never touches staging. CI runs it on every PR (e2e step 11c) with a link written after the base backup, which only WAL replay can bring back.
 - Argo CD never deletes the Cluster (`Prune=false,Delete=false`): removing it is a deliberate `kubectl -n shortly-staging delete cluster shortly-db`, and its volumes go with it.
 
 | Symptom | Likely cause | Check / fix |

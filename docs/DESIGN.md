@@ -367,6 +367,8 @@ flowchart LR
 | Proven | `scripts/restore-drill.sh`: the newest dump into an empty Postgres in a throwaway namespace; checks the Alembic revision, the link count and a canary link. e2e step 11 runs it on every PR | A backup nobody has restored is a hope. The drill also measures the restore time |
 | Watched | `ShortlyBackupNotRunning` (ticket) after 2 missed runs or 2 hours without a success | Backups fail silently: nothing breaks until the day they're needed |
 
+**On CloudNativePG (staging since platform plan 4.3, prod next).** The operator's Barman Cloud plugin archives every WAL segment as it fills and takes a base backup hourly (:23) and when the Cluster is created, to `s3://cnpg-backups/<namespace>/shortly-db`; 7 days kept. `scripts/restore-drill-cnpg.sh` recovers the newest base backup and the WAL after it into a throwaway Cluster (`bootstrap.recovery` from the source's ObjectStore), and e2e step 11c runs it on every PR with a link written after the base backup: only WAL replay brings that one back. The RPO becomes the archive's lag behind the database (a segment is archived when it fills, or within `archive_timeout`, 5 min by default), not the hour between dumps.
+
 **Recovery objectives (local setup).**
 
 - **RPO, the data you can lose: up to 1 hour**, the backup interval. Everything written since the last dump is gone. Continuous WAL archiving (pgBackRest, WAL-G, or a managed database's point-in-time recovery) brings it down to seconds; that is the production answer, not hourly dumps.
