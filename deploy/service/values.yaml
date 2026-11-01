@@ -52,6 +52,13 @@ config:
 
 database:
   existingSecret: shortly-db
+  # The CloudNativePG Cluster each environment turns on (deploy/envs/): 10m CPU requested,
+  # not the chart's 50m. Each database idles at a few millicores, and the kind node's CPU
+  # requests are what's scarce: at 50m, prod's and staging's Clusters left the e2e's
+  # cleanup Job Pending ("Insufficient cpu") while the HPA drill's extra pod was still up.
+  cluster:
+    resources:
+      requests: { cpu: 10m }
 
 # The app's environment variables. The chart renders this list as it is, in order: which
 # variables the app reads is the app's business, not the chart's. Each string is a template,
