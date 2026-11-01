@@ -52,6 +52,13 @@ config:
 
 database:
   existingSecret: shortly-db
+  # The CloudNativePG Cluster each environment turns on (deploy/envs/): 10m CPU requested,
+  # not the chart's 50m. Each database idles at a few millicores, and the kind node's CPU
+  # requests are what's scarce: at 50m, prod's and staging's Clusters left the e2e's
+  # cleanup Job Pending ("Insufficient cpu") while the HPA drill's extra pod was still up.
+  cluster:
+    resources:
+      requests: { cpu: 10m }
 
 # The app's environment variables. The chart renders this list as it is, in order: which
 # variables the app reads is the app's business, not the chart's. Each string is a template,
@@ -89,10 +96,19 @@ migrations:
   # happens exactly on a rollback (a reverted promotion, or an older digest redeployed).
   # Expand/contract makes the old code work on the newer schema, so the right move is to
   # leave it alone. (Helm skipped hooks on `helm rollback`; Argo CD runs them on every sync.)
+  # First it waits, up to 3 minutes, for the database to accept a connection: under plain
+  # Helm (deploy.sh) a first install runs this hook as soon as the objects exist, while the
+  # new CloudNativePG Cluster is still starting (prod: --wait=legacy doesn't wait for the
+  # Rollout, so nothing else holds it back). Under Argo CD the Cluster is already healthy.
   command:
     - sh
     - -c
     - |
+      for i in $(seq 1 60); do
+        python -c 'import os, psycopg; psycopg.connect(os.environ["SHORTLY_DATABASE_URL"], connect_timeout=3).close()' 2>/dev/null && break
+        [ "$i" -eq 60 ] && { echo "migrate: the database didn't accept a connection in 3 minutes"; exit 1; }
+        sleep 3
+      done
       out=$(alembic upgrade head 2>&1); rc=$?
       printf '%s\n' "$out"
       if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "Can't locate revision identified by"; then

@@ -5,6 +5,8 @@
 #   SOURCE=shortly-staging scripts/restore-drill-cnpg.sh        # into a scratch Cluster
 #   KEEP=1 SOURCE=shortly-staging scripts/restore-drill-cnpg.sh # leave it to poke at
 #   BACKUP=1 SOURCE=shortly-staging scripts/restore-drill-cnpg.sh # take a base backup first
+#   TARGET_TIME="2026-11-01 09:30:00+00" KEEP=1 SOURCE=shortly-prod scripts/restore-drill-cnpg.sh
+#                                                    # the database as it was then (RUNBOOK)
 #
 # It never touches the source. It creates a throwaway namespace (restore-drill) with a
 # Cluster bootstrapped by `recovery` from the source's ObjectStore (s3://cnpg-backups/
@@ -108,6 +110,7 @@ spec:
       source: origin
       database: shortly
       owner: shortly
+$( [[ -n "${TARGET_TIME:-}" ]] && printf '      recoveryTarget: { targetTime: "%s" }\n' "$TARGET_TIME" )
   externalClusters:
     - name: origin
       plugin:
@@ -140,4 +143,4 @@ if [[ -n "${EXPECT_CODE:-}" ]]; then
   target=$(dst_sql "SELECT target FROM links WHERE code = '$EXPECT_CODE'")
   [[ -n "$target" ]] || fail "link $EXPECT_CODE (written after the base backup) is not in the restored database"
 fi
-pass "restore drill (CloudNativePG): $SOURCE/$CLUSTER's base backup and WAL recovered into a fresh Cluster in ${took}s; revision $got_rev, $links links${EXPECT_CODE:+, $EXPECT_CODE present (replayed from WAL)}"
+pass "restore drill (CloudNativePG): $SOURCE/$CLUSTER's base backup and WAL${TARGET_TIME:+ up to $TARGET_TIME} recovered into a fresh Cluster in ${took}s; revision $got_rev, $links links${EXPECT_CODE:+, $EXPECT_CODE present (replayed from WAL)}"
