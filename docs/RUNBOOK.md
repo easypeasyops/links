@@ -290,6 +290,28 @@ If a migration itself broke something and the old code cannot run on the new sch
 
 **Rehearsal.** `scripts/k8s-e2e.sh` performs both an automatic and a manual rollback on every PR, plus a healthy and a faulty canary. If those steps start failing in CI, treat it as a broken rollback path, not a flaky test.
 
+## Staging's database: CloudNativePG
+
+Since platform plan 4.3, **staging** runs on a CloudNativePG Cluster, `shortly-db` in `shortly-staging`, rendered by the service chart from `deploy/envs/staging.yaml`. Prod still runs on the old StatefulSet `postgres` (below) until it moves the same way.
+
+```bash
+kubectl -n shortly-staging get cluster shortly-db                 # STATUS "Cluster in healthy state", PRIMARY
+kubectl -n shortly-staging exec -it "$(kubectl -n shortly-staging get cluster shortly-db -o jsonpath='{.status.currentPrimary}')" \
+  -c postgres -- psql -d shortly                                  # psql as the superuser
+kubectl -n shortly-staging get backups,scheduledbackups           # base backups to s3://cnpg-backups/shortly-staging
+```
+
+- The app reads `shortly-db-app` (key `uri`), which the operator writes for the `shortly` user. Services: `shortly-db-rw` (the primary), `shortly-db-ro`.
+- It was filled once, when the Cluster was created, by importing the old Postgres's database (`bootstrap.initdb.import`, type microservice): the old StatefulSet `postgres` still runs in staging until the end of 4.3, but nothing reads it.
+- WAL is archived continuously and a base backup taken hourly (:23), by the Barman Cloud plugin, to the bucket; the old hourly `pg_dump` CronJob still dumps the old, unused database until it's removed.
+- Argo CD never deletes the Cluster (`Prune=false,Delete=false`): removing it is a deliberate `kubectl -n shortly-staging delete cluster shortly-db`, and its volumes go with it.
+
+| Symptom | Likely cause | Check / fix |
+| --- | --- | --- |
+| `shortly-staging` stuck Progressing on `Cluster/shortly-db` | The import or initdb Job is failing or slow | `kubectl -n shortly-staging get pods -l cnpg.io/cluster=shortly-db`; the `*-import-*` / `*-initdb-*` pod's logs. Can't reach `postgres:5432`: the old Postgres's NetworkPolicy must admit `cnpg.io/cluster` pods (`cluster.sh up` applies it) |
+| Cluster healthy, but WAL archiving fails (`kubectl get cluster shortly-db -o jsonpath='{.status.conditions}'`, `ContinuousArchiving` False) | The bucket's keys (`shortly-db-backup`, an ExternalSecret from the `backup-bucket` store) or the bucket isn't reachable | `kubectl -n shortly-staging describe externalsecret shortly-db-backup`; the bucket's NetworkPolicy admits `cnpg.io/cluster` pods |
+| Migration Job waits | It runs after the Cluster is healthy (an Argo CD Sync hook, wave -1), so it waits for the row above | As above |
+
 ## Restore Postgres from a backup
 
 Each environment's Postgres is dumped hourly (CronJob `postgres-backup`, :41 UTC) to the bucket `shortly-backups/<namespace>/` in namespace `backups`, and kept 7 days. **Up to 1 hour of writes is lost on restore** (the recovery point): links created after the dump you restore are gone, so say so in the incident.
@@ -826,7 +848,7 @@ The local environments are disposable: `../platform/scripts/cluster.sh up` rebui
 | --- | --- |
 | Create (idempotent) | `../platform/scripts/cluster.sh up` |
 | Tear down everything | `../platform/scripts/cluster.sh down` |
-| Reset one environment's data (then redeploy so migrations recreate the schema) | `kubectl -n shortly-staging delete statefulset postgres && kubectl -n shortly-staging delete pvc data-postgres-0 && ../platform/scripts/cluster.sh up` |
+| Reset one environment's data (then redeploy so migrations recreate the schema) | prod: `kubectl -n shortly-prod delete statefulset postgres && kubectl -n shortly-prod delete pvc data-postgres-0 && ../platform/scripts/cluster.sh up`. Staging (CloudNativePG): `kubectl -n shortly-staging delete cluster shortly-db`, and Argo CD recreates it, importing the old Postgres again |
 | Deploy a local build (kind only; tags are refused elsewhere) | `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev` |
 | Check an image's provenance | `../platform/scripts/verify-image.sh ghcr.io/statsguy/shortly@sha256:…` |
 | Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step; `E2E_SUITE=platform` or `delivery` runs one CI half) |
