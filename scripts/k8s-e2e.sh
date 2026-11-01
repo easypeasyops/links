@@ -27,11 +27,10 @@
 #      kubectl (scripts/admission-check.sh; skipped when Kyverno isn't installed)
 #   9. network policies are enforced: the metrics port and Postgres refuse other pods
 #  10. the cleanup CronJob deletes links past their grace period, and only those
-#  11. prod's backup runs, only backup pods reach the bucket, and the dump restores into a
-#      fresh database with every link (scripts/restore-drill.sh; skipped if BACKUPS=0)
+#  11. prod's CloudNativePG backups restore: its base backup plus a link written after it
+#      (WAL only), into a scratch Cluster (scripts/restore-drill-cnpg.sh), and only backup and
+#      database pods reach the bucket (skipped if BACKUPS=0)
 #  11b. `cluster.sh wake` restarts the CronJob scheduler and takes an overdue backup at once
-#  11c. staging's CloudNativePG backups restore: its base backup plus a link written after it
-#      (WAL only), into a scratch Cluster (scripts/restore-drill-cnpg.sh; skipped if BACKUPS=0)
 #  12. GitOps: Argo CD takes prod over from this commit, reverts a hand edit, and runs a
 #      canary it started itself without fighting Argo Rollouts over the route's weights
 #      (needs GITOPS_REVISION, a commit Argo CD can fetch; CI sets it)
@@ -57,6 +56,14 @@ SUITE="${E2E_SUITE:-all}"
 case "$SUITE" in all | platform | delivery) ;; *) echo "E2E_SUITE must be all, platform or delivery" >&2; exit 2 ;; esac
 suite() { [[ "$SUITE" == all || "$SUITE" == "$1" ]]; }
 export DEPLOY_EXTRA_VALUES="${DEPLOY_EXTRA_VALUES-$PLATFORM_DIR/deploy/kind/e2e-values.yaml}"
+# Both environments' Postgres is a CloudNativePG Cluster archiving to the backup bucket.
+# Without the bucket (BACKUPS=0) it can't archive: every deploy turns backups off, through
+# one more values file (deploy.sh takes one), so no deploy turns them back on.
+if [[ -n "$DEPLOY_EXTRA_VALUES" ]] && ! kubectl get namespace backups >/dev/null 2>&1; then
+  no_backups=$(mktemp --suffix=.yaml)
+  { cat "$DEPLOY_EXTRA_VALUES"; printf '\ndatabase:\n  cluster:\n    backup:\n      enabled: false\n'; } >"$no_backups"
+  export DEPLOY_EXTRA_VALUES="$no_backups"
+fi
 
 pass() { echo "ok   $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -132,10 +139,8 @@ pass "digest-mode render accepted by the API server (server-side dry run)"
 # ---------------------------------------------------------------- 1-2. staging
 # Staging's Postgres is a CloudNativePG Cluster (deploy/envs/staging.yaml), created by this
 # first deploy: the import from the old Postgres, initdb, then the app (more time than the
-# other deploys). Without the backup bucket (BACKUPS=0) it can't archive WAL: no backups.
-staging_db=()
-kubectl get namespace backups >/dev/null 2>&1 || staging_db=(--set database.cluster.backup.enabled=false)
-DEPLOY_TIMEOUT=6m "$ROOT/scripts/deploy.sh" staging "$IMAGE" "${staging_db[@]}" >/dev/null
+# other deploys).
+DEPLOY_TIMEOUT=6m "$ROOT/scripts/deploy.sh" staging "$IMAGE" >/dev/null
 pass "staging deployed under restricted Pod Security (revision $(revision staging))"
 db_phase=$(kubectl -n "$STAGING_NS" get cluster shortly-db -o jsonpath='{.status.phase}')
 [[ "$db_phase" == "Cluster in healthy state" ]] || fail "staging's CloudNativePG Cluster: '$db_phase'"
@@ -158,7 +163,7 @@ grep -q 'links_created_total 1.0' <<<"$metrics" || fail "staging metrics"
 pass "staging: migrated, ready, create → 307, metrics on port 9100 only"
 
 # ---------------------------------------------------------------- 3. promote to prod
-"$ROOT/scripts/deploy.sh" prod "$IMAGE" >/dev/null
+DEPLOY_TIMEOUT=6m "$ROOT/scripts/deploy.sh" prod "$IMAGE" >/dev/null # creates prod's Cluster too
 [[ "$(workload prod)" == rollout/shortly ]] || fail "prod is not an Argo Rollout (canary.enabled?)"
 ready=$(kubectl -n "$PROD_NS" get rollout shortly -o jsonpath='{.status.readyReplicas}')
 [[ "$ready" == 2 ]] || fail "prod has $ready ready replicas, want 2"
@@ -492,32 +497,49 @@ kubectl -n "$STAGING_NS" delete job cleanup-e2e --wait=false >/dev/null
 pass "cleanup: the Job deleted only the link past its grace period (404), kept the rest (410, live)"
 
 # ---------------------------------------------------------------- 11. backup and restore
-# Back up prod now (the CronJob's own template), with a canary link written just before,
-# then restore that dump into a scratch database and check every link came back. A backup
-# is only proven by a restore; this one is proven on every PR.
-if kubectl -n "$PROD_NS" get cronjob postgres-backup >/dev/null 2>&1; then
-  psql_prod() { kubectl -n "$PROD_NS" exec postgres-0 -- psql -U shortly -d shortly -v ON_ERROR_STOP=1 -tAc "$1"; }
-  psql_prod "INSERT INTO links (code, target, created_at) VALUES ('e2ebkp1', 'https://example.com/backup', now())" >/dev/null
+# Prod's CloudNativePG backups (platform plan 4.3): the base backup the chart takes when the
+# Cluster is created, then a link written after it, in WAL only. Restoring both into a
+# scratch Cluster (scripts/restore-drill-cnpg.sh) proves the archive replays, not just that
+# a snapshot exists. A backup is only proven by a restore; this one is proven on every PR.
+psql_prod() {
+  local primary
+  primary=$(kubectl -n "$PROD_NS" get cluster shortly-db -o jsonpath='{.status.currentPrimary}')
+  kubectl -n "$PROD_NS" exec "$primary" -c postgres -- psql -d shortly -v ON_ERROR_STOP=1 -tAc "$1"
+}
+if kubectl -n "$PROD_NS" get objectstore shortly-db >/dev/null 2>&1; then
+  for _ in $(seq 1 60); do
+    [[ "$(kubectl -n "$PROD_NS" get backups -l cnpg.io/cluster=shortly-db \
+      -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' | grep -c completed)" -gt 0 ]] && break
+    sleep 3
+  done
+  psql_prod "INSERT INTO links (code, target, created_at) VALUES ('e2ewal1', 'https://example.com/wal', now())" >/dev/null
   want_links=$(psql_prod "SELECT count(*) FROM links")
-  kubectl -n "$PROD_NS" create job backup-e2e --from=cronjob/postgres-backup >/dev/null
-  if ! kubectl -n "$PROD_NS" wait --for=condition=complete job/backup-e2e --timeout=180s >/dev/null; then
-    kubectl -n "$PROD_NS" logs job/backup-e2e --all-containers --tail=20 || true
-    fail "backup: the Job did not complete"
-  fi
-  uploaded=$(kubectl -n "$PROD_NS" logs job/backup-e2e -c upload | grep '"backup uploaded"' || true)
-  [[ -n "$uploaded" ]] || fail "backup: no 'backup uploaded' log line"
-  pass "backup: pg_dump checked and uploaded ($(kubectl -n "$PROD_NS" logs job/backup-e2e -c dump | grep -o '"bytes": [0-9]*'))"
-  # The bucket is for backup pods only: postgres-0 (no component=backup label) is refused.
-  # The control is the Job above, which reached it from the same namespace.
+  # Close the WAL segment holding that insert, and wait until the plugin has archived it.
+  segment=$(psql_prod "SELECT pg_walfile_name(pg_switch_wal())")
+  archived=""
+  for _ in $(seq 1 40); do
+    archived=$(psql_prod "SELECT coalesce(last_archived_wal, '') FROM pg_stat_archiver")
+    [[ -n "$archived" && ! "$archived" < "$segment" ]] && break
+    sleep 3
+  done
+  [[ -n "$archived" && ! "$archived" < "$segment" ]] \
+    || fail "backup: prod's WAL $segment not archived after 120 s (last: '${archived:-none}')"
+  pass "backup: prod's base backup completed, and WAL up to $segment is archived"
+  SOURCE="$PROD_NS" EXPECT_CODE=e2ewal1 EXPECT_LINKS="$want_links" "$ROOT/scripts/restore-drill-cnpg.sh"
+  # The bucket is for backup and database pods only: postgres-0 (neither) is refused. The
+  # control is the drill above, whose Cluster reached it.
   if kubectl -n "$PROD_NS" exec postgres-0 -- nc -z -w 3 seaweedfs.backups.svc 8333 2>/dev/null; then
-    fail "network policy: a pod that isn't a backup pod reached the backup bucket"
+    fail "network policy: a pod that isn't a backup or database pod reached the backup bucket"
   fi
-  pass "network policy: the backup bucket refuses pods other than backup and restore pods"
-  SOURCE="$PROD_NS" EXPECT_CODE=e2ebkp1 EXPECT_LINKS="$want_links" "$ROOT/scripts/restore-drill.sh"
-  kubectl -n "$PROD_NS" delete job backup-e2e --wait=false >/dev/null
+  pass "network policy: the backup bucket refuses pods other than backup and database pods"
+else
+  echo "skip backup checks: no backup bucket (BACKUPS=0?)"
+fi
 
-  # 11b. `cluster.sh wake` (after a laptop slept): the controller restarts, and an overdue
-  # backup starts at once. MAX_AGE=0 makes every backup "overdue" here.
+# 11b. `cluster.sh wake` (after a laptop slept): the controller restarts, and an overdue
+# pg_dump backup starts at once. MAX_AGE=0 makes every backup "overdue" here. (The old
+# Postgres and its CronJob stay until the end of platform plan 4.3.)
+if kubectl -n "$PROD_NS" get cronjob postgres-backup >/dev/null 2>&1; then
   restarts() { kubectl -n kube-system get pod -l component=kube-controller-manager \
     -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'; }
   before=$(restarts)
@@ -528,33 +550,6 @@ if kubectl -n "$PROD_NS" get cronjob postgres-backup >/dev/null 2>&1; then
   kubectl -n "$PROD_NS" wait --for=condition=complete "$wake_job" --timeout=180s >/dev/null \
     || fail "wake: $wake_job did not complete"
   pass "wake: kube-controller-manager restarted, and the overdue prod backup ran at once ($wake_job)"
-else
-  echo "skip backup checks: no postgres-backup CronJob (BACKUPS=0?)"
-fi
-
-# 11c. Staging's CloudNativePG backups (platform plan 4.3): the base backup the chart takes
-# when the Cluster is created, then a link written after it, in WAL only. Restoring both
-# into a scratch Cluster proves the archive replays, not just that a snapshot exists.
-if kubectl -n "$STAGING_NS" get objectstore shortly-db >/dev/null 2>&1; then
-  for _ in $(seq 1 60); do
-    [[ "$(kubectl -n "$STAGING_NS" get backups -l cnpg.io/cluster=shortly-db \
-      -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' | grep -c completed)" -gt 0 ]] && break
-    sleep 3
-  done
-  psql_staging "INSERT INTO links (code, target, created_at) VALUES ('e2ewal1', 'https://example.com/wal', now())" >/dev/null
-  want_links=$(psql_staging "SELECT count(*) FROM links")
-  # Close the WAL segment holding that insert, and wait until the plugin has archived it.
-  segment=$(psql_staging "SELECT pg_walfile_name(pg_switch_wal())")
-  archived=""
-  for _ in $(seq 1 40); do
-    archived=$(psql_staging "SELECT coalesce(last_archived_wal, '') FROM pg_stat_archiver")
-    [[ -n "$archived" && ! "$archived" < "$segment" ]] && break
-    sleep 3
-  done
-  [[ -n "$archived" && ! "$archived" < "$segment" ]] \
-    || fail "backup (CloudNativePG): WAL $segment not archived after 120 s (last: '${archived:-none}')"
-  pass "backup (CloudNativePG): a base backup completed, and WAL up to $segment is archived"
-  SOURCE="$STAGING_NS" EXPECT_CODE=e2ewal1 EXPECT_LINKS="$want_links" "$ROOT/scripts/restore-drill-cnpg.sh"
 fi
 
 fi # 6-11

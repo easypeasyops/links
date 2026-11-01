@@ -290,30 +290,61 @@ If a migration itself broke something and the old code cannot run on the new sch
 
 **Rehearsal.** `scripts/k8s-e2e.sh` performs both an automatic and a manual rollback on every PR, plus a healthy and a faulty canary. If those steps start failing in CI, treat it as a broken rollback path, not a flaky test.
 
-## Staging's database: CloudNativePG
+## The database: CloudNativePG
 
-Since platform plan 4.3, **staging** runs on a CloudNativePG Cluster, `shortly-db` in `shortly-staging`, rendered by the service chart from `deploy/envs/staging.yaml`. Prod still runs on the old StatefulSet `postgres` (below) until it moves the same way.
+Since platform plan 4.3, each environment runs on a CloudNativePG Cluster, `shortly-db` in `shortly-<env>`, rendered by the service chart from `deploy/envs/<env>.yaml` (staging since links #119, prod since links #121). The old StatefulSet `postgres` still runs in each until 4.3 removes it, but nothing reads it.
 
 ```bash
-kubectl -n shortly-staging get cluster shortly-db                 # STATUS "Cluster in healthy state", PRIMARY
-kubectl -n shortly-staging exec -it "$(kubectl -n shortly-staging get cluster shortly-db -o jsonpath='{.status.currentPrimary}')" \
+kubectl -n shortly-prod get cluster shortly-db                    # STATUS "Cluster in healthy state", PRIMARY
+kubectl -n shortly-prod exec -it "$(kubectl -n shortly-prod get cluster shortly-db -o jsonpath='{.status.currentPrimary}')" \
   -c postgres -- psql -d shortly                                  # psql as the superuser
-kubectl -n shortly-staging get backups,scheduledbackups           # base backups to s3://cnpg-backups/shortly-staging
+kubectl -n shortly-prod get backups,scheduledbackups              # base backups to s3://cnpg-backups/shortly-prod
 ```
 
 - The app reads `shortly-db-app` (key `uri`), which the operator writes for the `shortly` user. Services: `shortly-db-rw` (the primary), `shortly-db-ro`.
 - It was filled once, when the Cluster was created, by importing the old Postgres's database (`bootstrap.initdb.import`, type microservice): the old StatefulSet `postgres` still runs in staging until the end of 4.3, but nothing reads it.
 - WAL is archived continuously and a base backup taken hourly (:23), by the Barman Cloud plugin, to the bucket; the old hourly `pg_dump` CronJob still dumps the old, unused database until it's removed.
-- **Prove the backups restore:** `SOURCE=shortly-staging scripts/restore-drill-cnpg.sh` recovers the newest base backup and every archived WAL segment after it into a scratch Cluster (namespace `restore-drill`, deleted afterwards; `KEEP=1` keeps it, `BACKUP=1` takes a base backup first) and prints how long it took. It never touches staging. CI runs it on every PR (e2e step 11c) with a link written after the base backup, which only WAL replay can bring back.
+- **Prove the backups restore:** `SOURCE=shortly-prod scripts/restore-drill-cnpg.sh` recovers the newest base backup and every archived WAL segment after it into a scratch Cluster (namespace `restore-drill`, deleted afterwards; `KEEP=1` keeps it, `BACKUP=1` takes a base backup first) and prints how long it took. It never touches the source. CI runs it against prod on every PR (e2e step 11) with a link written after the base backup, which only WAL replay can bring back.
 - Argo CD never deletes the Cluster (`Prune=false,Delete=false`): removing it is a deliberate `kubectl -n shortly-staging delete cluster shortly-db`, and its volumes go with it.
 
 | Symptom | Likely cause | Check / fix |
 | --- | --- | --- |
-| `shortly-staging` stuck Progressing on `Cluster/shortly-db` | The import or initdb Job is failing or slow | `kubectl -n shortly-staging get pods -l cnpg.io/cluster=shortly-db`; the `*-import-*` / `*-initdb-*` pod's logs. Can't reach `postgres:5432`: the old Postgres's NetworkPolicy must admit `cnpg.io/cluster` pods (`cluster.sh up` applies it) |
-| Cluster healthy, but WAL archiving fails (`kubectl get cluster shortly-db -o jsonpath='{.status.conditions}'`, `ContinuousArchiving` False) | The bucket's keys (`shortly-db-backup`, an ExternalSecret from the `backup-bucket` store) or the bucket isn't reachable | `kubectl -n shortly-staging describe externalsecret shortly-db-backup`; the bucket's NetworkPolicy admits `cnpg.io/cluster` pods |
+| `shortly-<env>` stuck Progressing on `Cluster/shortly-db` | The import or initdb Job is failing or slow | `kubectl -n shortly-<env> get pods -l cnpg.io/cluster=shortly-db`; the `*-import-*` / `*-initdb-*` pod's logs. Can't reach `postgres:5432`: the old Postgres's NetworkPolicy must admit `cnpg.io/cluster` pods (`cluster.sh up` applies it) |
+| Cluster healthy, but WAL archiving fails (`kubectl get cluster shortly-db -o jsonpath='{.status.conditions}'`, `ContinuousArchiving` False) | The bucket's keys (`shortly-db-backup`, an ExternalSecret from the `backup-bucket` store) or the bucket isn't reachable | `kubectl -n shortly-<env> describe externalsecret shortly-db-backup`; the bucket's NetworkPolicy admits `cnpg.io/cluster` pods |
 | Migration Job waits | It runs after the Cluster is healthy (an Argo CD Sync hook, wave -1), so it waits for the row above | As above |
 
+### Move an environment's database (how prod moved)
+
+An environment moves in one PR that turns on `database.cluster` with `bootstrap.initdb.import` from the old Postgres and points the app at `shortly-db-app` (see `deploy/envs/prod.yaml`); Argo CD's waves import, migrate, then roll out. The import copies the database as it is when it runs, so **freeze writes first**, or the writes made during the import stay behind in the old database:
+
+1. **Freeze** (right before merging): the old database becomes read-only, and its open connections are closed so the app's pool reconnects read-only. Redirects keep working; creates fail with 5xx until the new pods take over, a minute or two.
+   ```bash
+   kubectl -n shortly-prod exec postgres-0 -- psql -U shortly -d shortly \
+     -c "ALTER DATABASE shortly SET default_transaction_read_only = on" \
+     -c "SELECT count(pg_terminate_backend(pid)) FROM pg_stat_activity WHERE datname = 'shortly' AND pid <> pg_backend_pid()" \
+     -c "SELECT count(*) FROM links"                                # note the count
+   ```
+2. **Merge** the PR. `kubectl -n shortly-prod get cluster shortly-db -w` until "Cluster in healthy state"; then the migration runs and the canary rolls out. The canary's pods write to the new database; the stable ones can't write to the old one, so every write lands in the new one.
+3. **Verify**: the same count on the new primary (`… exec shortly-db-1 -c postgres -- psql -d shortly -tAc 'select count(*) from links'`), an old link redirects, and a new one can be created.
+4. **If it goes wrong before the merge**: unfreeze with `ALTER DATABASE shortly SET default_transaction_read_only = off` and the same `pg_terminate_backend`. After the merge, revert the PR: the app goes back to the old database, which is unchanged (read-only); unfreeze it. Argo CD keeps the new Cluster (never pruned); delete it by hand before trying again, so the next import starts fresh.
+
+The old database stays read-only afterwards, so nothing can write to it by mistake.
+
 ## Restore Postgres from a backup
+
+**On CloudNativePG (both environments).** WAL is archived continuously, so a restore can reach any moment of the last 7 days, not just the last hourly dump.
+
+1. **Recover a copy, never in place:** `TARGET_TIME="2026-11-01 09:30:00+00" KEEP=1 SOURCE=shortly-prod scripts/restore-drill-cnpg.sh` recovers the database as it was at that moment (leave out `TARGET_TIME` for the latest) into the Cluster `drill` in namespace `restore-drill`, and keeps it. Check it there (`kubectl -n restore-drill exec -it drill-1 -c postgres -- psql -d shortly`).
+2. **Copy it into prod's database**, replacing its content (a logical copy: the Cluster, its backups and the app's credentials stay as they are):
+   ```bash
+   kubectl -n restore-drill exec drill-1 -c postgres -- pg_dump -d shortly --format=custom --no-owner --no-privileges >/tmp/restore.dump
+   kubectl -n shortly-prod exec -i "$(kubectl -n shortly-prod get cluster shortly-db -o jsonpath='{.status.currentPrimary}')" -c postgres -- \
+     pg_restore -d shortly --clean --if-exists --no-owner --role=shortly --exit-on-error </tmp/restore.dump
+   kubectl delete namespace restore-drill
+   ```
+   Writes made since the target time are replaced: say so in the incident.
+
+**The old pg_dump backups** (until 4.3 removes the old Postgres) dump the old, unused databases; the procedure below applies to them.
 
 Each environment's Postgres is dumped hourly (CronJob `postgres-backup`, :41 UTC) to the bucket `shortly-backups/<namespace>/` in namespace `backups`, and kept 7 days. **Up to 1 hour of writes is lost on restore** (the recovery point): links created after the dump you restore are gone, so say so in the incident.
 
