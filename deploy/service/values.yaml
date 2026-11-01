@@ -51,7 +51,9 @@ config:
   forwardedAllowIps: "127.0.0.1"
 
 database:
-  existingSecret: shortly-db
+  # The URL the operator writes for the app user of the environment's Cluster (below).
+  existingSecret: shortly-db-app
+  secretKey: uri
   # The CloudNativePG Cluster each environment turns on (deploy/envs/): 10m CPU requested,
   # not the chart's 50m. Each database idles at a few millicores, and the kind node's CPU
   # requests are what's scarce: at 50m, prod's and staging's Clusters left the e2e's

@@ -890,7 +890,23 @@ The local environments are disposable: `../platform/scripts/cluster.sh up` rebui
 - **Wave 0:** the secret store (`secret-store`: the namespace, the `platform` ClusterSecretStore and the generated values), CloudNativePG and its Barman Cloud plugin (`cnpg-system`; dormant until an app's database moves to it), metrics-server, Envoy Gateway with the Gateway and the tool routes, Argo Rollouts with the Gateway API plugin for that architecture, kube-prometheus-stack, Kyverno, and the backup bucket.
 - **Wave 1:** the Kyverno policies, and the alerts on Argo CD.
 
-`cluster.sh up` then creates the `shortly-staging` and `shortly-prod` namespaces (one per app and environment; `scripts/lib/namespaces.sh`), which enforce the restricted Pod Security Standard. In each it generates a random password into Secrets `postgres-auth` and `shortly-db`, and applies `deploy/kind/postgres.yaml`, the network policies and the backup CronJob (`deploy/kind/postgres-backup.yaml`, with the bucket credentials copied into Secret `backup-s3`). It never overwrites existing Secrets.
+`cluster.sh up` then creates the `shortly-staging` and `shortly-prod` namespaces (one per app and environment; `scripts/lib/namespaces.sh`), which enforce the restricted Pod Security Standard, and applies their default-deny network policy. Nothing else: each environment's database comes with the app (the service chart's `database.cluster`, CloudNativePG), with its credentials (`shortly-db-app`, written by the operator) and its backups (the bucket's keys from the `backup-bucket` store).
+
+**On a cluster set up before platform plan 4.3 finished**, the old Postgres and what went with it still run, unused: `cluster.sh` never deletes. Remove them once both environments run on CloudNativePG (`kubectl -n shortly-<env> get cluster shortly-db` healthy, the app reading `shortly-db-app`). Prod's old database was frozen read-only at the move, and its data is in the new one; this deletes it for good:
+
+```bash
+for ns in shortly-staging shortly-prod; do
+  kubectl -n $ns delete statefulset postgres --ignore-not-found
+  kubectl -n $ns delete service postgres --ignore-not-found
+  kubectl -n $ns delete pvc data-postgres-0 --ignore-not-found
+  kubectl -n $ns delete cronjob postgres-backup --ignore-not-found
+  kubectl -n $ns delete jobs -l app.kubernetes.io/name=postgres-backup --ignore-not-found
+  kubectl -n $ns delete networkpolicy postgres --ignore-not-found
+  kubectl -n $ns delete secret postgres-auth shortly-db backup-s3 --ignore-not-found
+done
+```
+
+The old dumps stay in the bucket (`shortly-backups/`) with nothing left to prune them; they're small, and deleting that folder is optional.
 
 **On a cluster built before the platform moved under Argo CD** (PR #60), run `cluster.sh up` once. Argo CD adopts the running resources: each chart keeps its old Helm release name, so nothing is recreated. Once it has, `cluster.sh` deletes the old Helm records (`helm list -A` then shows no platform releases). Expect a minute or two of syncing, and `monitoring` restarting its pods once.
 
