@@ -29,10 +29,10 @@ the one reviewed with the code.
 
 - `uv run pytest` (needs Docker for integration tests); CI enforces `--cov-fail-under=90`.
 - Python version lives in `.python-version` and both Dockerfile `FROM` lines; change them together.
-- Deploy by digest: `scripts/deploy.sh <env> ghcr.io/statsguy/shortly@sha256:…`.
+- Deploy by digest: `scripts/deploy.sh <env> ghcr.io/easypeasyops/links/shortly@sha256:…`.
 - The platform (chart, Argo CD root, kind, policies, `cluster.sh`) lives in
   easypeasyops/platform; this repo runs it at the commit `platform.lock` names, from a
-  checkout beside this one (`../platform`, or `PLATFORM_DIR`). A platform change lands there,
+  checkout beside this one (`../../../platform` from `apps/shortly/`, or `PLATFORM_DIR`). A platform change lands there,
   then reaches shortly in a PR here that moves the lock.
 - `deploy.sh` and `promote.sh` run the platform's deploy gate (`scripts/verify-image.sh` at
   `platform.lock`), which enforces the same provenance rules as its admission policy (the
