@@ -38,7 +38,7 @@ jobs:
   # below) is required, so the names are free to change.
   check:
     needs: scope
-    uses: easypeasyops/platform/.github/workflows/reusable-python-check.yml@394d5082f3803e6f863c929268a1ea89252495df # platform.lock
+    uses: easypeasyops/platform/.github/workflows/reusable-python-check.yml@2ddee85ac1dae997c3e2773c7a0b078153aa039c # platform.lock
     with:
       run: ${{ needs.scope.outputs.full == 'true' }}
       # Full history: tests/test_gitops.py checks prod's digest against everything
@@ -47,7 +47,7 @@ jobs:
 
   image:
     needs: scope
-    uses: easypeasyops/platform/.github/workflows/reusable-image.yml@394d5082f3803e6f863c929268a1ea89252495df # platform.lock
+    uses: easypeasyops/platform/.github/workflows/reusable-image.yml@2ddee85ac1dae997c3e2773c7a0b078153aa039c # platform.lock
     with:
       run: ${{ needs.scope.outputs.full == 'true' }}
       smoke-command: SHORTLY_IMAGE="$IMAGE" scripts/smoke.sh
@@ -130,7 +130,7 @@ jobs:
           tags: shortly:e2e
           cache-from: type=gha
 
-      - name: Platform through Argo CD; namespaces, Postgres, secrets
+      - name: Platform through Argo CD (cluster.sh bootstraps Argo CD only)
         if: needs.scope.outputs.full == 'true'
         run: .platform/scripts/cluster.sh up
         env:
