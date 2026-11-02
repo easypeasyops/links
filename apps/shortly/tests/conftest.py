@@ -86,7 +86,7 @@ def locked_verify_image(tmp_path_factory: pytest.TempPathFactory) -> Path:
         pytest.skip("gh not installed")
     lock = re.search(
         r"^easypeasyops/platform@([0-9a-f]{40})$",
-        (Path(__file__).resolve().parent.parent / "platform.lock").read_text(),
+        (Path(__file__).resolve().parents[3] / "platform.lock").read_text(),
         re.M,
     )
     assert lock, "platform.lock names no easypeasyops/platform@<sha>"

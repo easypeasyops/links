@@ -33,10 +33,11 @@ def _scope(tmp_path: Path, changed: list[str], event: str = "pull_request") -> s
 @pytest.mark.parametrize(
     ("changed", "expected"),
     [
-        (["docs/DESIGN.md"], "full=false"),
-        (["README.md", "docs/DESIGN.md"], "full=false"),
-        (["docs/RUNBOOK.md"], "full=true"),  # tests and the e2e read the release digest
-        (["docs/DESIGN.md", "src/shortly/app.py"], "full=true"),
+        (["apps/shortly/docs/DESIGN.md"], "full=false"),
+        (["README.md", "apps/shortly/docs/DESIGN.md"], "full=false"),
+        # tests and the e2e read the release digest
+        (["apps/shortly/docs/RUNBOOK.md"], "full=true"),
+        (["apps/shortly/docs/DESIGN.md", "apps/shortly/src/shortly/app.py"], "full=true"),
         ([".github/workflows/ci.yml"], "full=true"),
     ],
 )
@@ -47,4 +48,4 @@ def test_only_markdown_other_than_the_runbook_skips(
 
 
 def test_pushes_to_main_always_run_everything(tmp_path: Path) -> None:
-    assert _scope(tmp_path, ["docs/DESIGN.md"], event="push") == "full=true"
+    assert _scope(tmp_path, ["apps/shortly/docs/DESIGN.md"], event="push") == "full=true"

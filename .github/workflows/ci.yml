@@ -30,7 +30,7 @@ jobs:
           fetch-depth: 2 # the PR merge commit and its first parent, for scripts/ci-scope.sh
       - name: Does this change need the checks?
         id: scope
-        run: scripts/ci-scope.sh
+        run: apps/shortly/scripts/ci-scope.sh
 
   # The generic jobs are the platform's reusable workflows, pinned to platform.lock's commit
   # (tests/test_platform_lock.py keeps the two equal; move them together). Any app's CI calls
@@ -41,6 +41,7 @@ jobs:
     uses: easypeasyops/platform/.github/workflows/reusable-python-check.yml@f9b883fe99a2ffafd330839e108ca0da239a1a77 # platform.lock
     with:
       run: ${{ needs.scope.outputs.full == 'true' }}
+      working-directory: apps/shortly # shortly's project (platform plan 3.5)
       # Full history: tests/test_gitops.py checks prod's digest against everything
       # staging has run on main.
       fetch-depth: 0
@@ -50,7 +51,8 @@ jobs:
     uses: easypeasyops/platform/.github/workflows/reusable-image.yml@f9b883fe99a2ffafd330839e108ca0da239a1a77 # platform.lock
     with:
       run: ${{ needs.scope.outputs.full == 'true' }}
-      smoke-command: SHORTLY_IMAGE="$IMAGE" scripts/smoke.sh
+      context: apps/shortly
+      smoke-command: SHORTLY_IMAGE="$IMAGE" apps/shortly/scripts/smoke.sh
 
   # Two kind clusters in parallel, each running half of the e2e drills (E2E_SUITE in
   # scripts/k8s-e2e.sh): the platform checks plus GitOps, and the delivery drills (rollbacks
@@ -114,7 +116,7 @@ jobs:
       - name: Preload k6 into kind
         if: needs.scope.outputs.full == 'true'
         run: |
-          image=$(source scripts/lib/platform.sh && k6_image) # the one hpa-drill.sh uses
+          image=$(source apps/shortly/scripts/lib/platform.sh && k6_image) # the one hpa-drill.sh uses
           for attempt in 1 2 3; do docker pull -q "$image" && break; sleep $((attempt * 15)); done
           kind load docker-image "$image" --name shortly
 
@@ -125,7 +127,7 @@ jobs:
         if: needs.scope.outputs.full == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: .
+          context: apps/shortly
           load: true
           tags: shortly:e2e
           cache-from: type=gha
@@ -186,7 +188,7 @@ jobs:
 
       - name: Deploy, promote, rollback drill
         if: needs.scope.outputs.full == 'true'
-        run: scripts/k8s-e2e.sh
+        run: apps/shortly/scripts/k8s-e2e.sh
         env:
           IMAGE: shortly:e2e
           E2E_SUITE: ${{ matrix.suite }}
