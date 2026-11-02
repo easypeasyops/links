@@ -10,6 +10,3 @@ and docs (platform plan 3.5):
 
 At the repo root: CI and releases (`.github/workflows/`), `platform.lock` (the platform commit
 every app here is tested and deployed against) and `CLAUDE.md`.
-
-`deploy` at the root is a link to `apps/shortly/deploy`, only while the platform's
-`apps/shortly/envs/*.yaml` still name the old paths; it goes once they name the new ones.
