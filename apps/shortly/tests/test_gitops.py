@@ -20,7 +20,7 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 ENVS = ("staging", "prod")
 DIGEST_LINE = re.compile(r'^  digest: "(sha256:[0-9a-f]{64})"', re.M)
-REPOS = ("ghcr.io/easypeasyops/links/shortly", "ghcr.io/statsguy/shortly")  # new, up to v0.7.1
+REPOS = ("ghcr.io/easypeasyops/links/shortly",)  # released per app from links (plan 3.5)
 
 
 def _env_image(env: str) -> str:
@@ -95,7 +95,7 @@ def repo(tmp_path: Path) -> Path:
     shutil.copy(ROOT / "scripts/promote.sh", work / "scripts/promote.sh")
     for env in ENVS:
         (work / f"deploy/envs/{env}.yaml").write_text(
-            f"# {env}\nimage:\n  repository: ghcr.io/statsguy/shortly\n"
+            f"# {env}\nimage:\n  repository: ghcr.io/easypeasyops/links/shortly\n"
             f'  digest: "{STAGED}" # v1.0.0\nreplicaCount: 1\n'
         )
     verify = tmp_path / "verify"

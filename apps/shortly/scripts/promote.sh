@@ -16,16 +16,13 @@ ENV="${1:?usage: $0 <staging|prod> <digest|repo@digest> [--pr]}"
 REF="${2:?usage: $0 <staging|prod> <digest|repo@digest> [--pr]}"
 PR="${3:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REPO=ghcr.io/easypeasyops/links/shortly # releases from links (platform plan 3.5)
-OLD_REPO=ghcr.io/statsguy/shortly       # up to v0.7.1: a rollback may name it
+REPO=ghcr.io/easypeasyops/links/shortly # released per app from links (platform plan 3.5)
 FILE="deploy/envs/$ENV.yaml"
 
 case "$ENV" in staging | prod) ;; *) echo "unknown env: $ENV" >&2; exit 2 ;; esac
 DIGEST="${REF#*@}"
 [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "not a digest: $REF" >&2; exit 2; }
-[[ "$REF" != *@* ]] || REPO="${REF%@*}"
-[[ "$REPO" == ghcr.io/easypeasyops/links/shortly || "$REPO" == "$OLD_REPO" ]] \
-  || { echo "REFUSED: not a shortly image: $REF" >&2; exit 1; }
+[[ "$REF" != *@* || "${REF%@*}" == "$REPO" ]] || { echo "REFUSED: not a shortly image: $REF" >&2; exit 1; }
 
 cd "$ROOT"
 current=$(sed -nE 's/^  digest: "(sha256:[0-9a-f]{64})".*/\1/p' "$FILE")
