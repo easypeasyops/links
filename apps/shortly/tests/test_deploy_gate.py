@@ -107,11 +107,13 @@ def test_break_glass_skips_verification_loudly(stubs: tuple[Path, Path]) -> None
 
 
 def _documented_release() -> str:
-    """The digest the runbook's Quick reference names as the current release."""
+    """The image the runbook's Quick reference names as the current release: repo@digest."""
     runbook = (ROOT / "docs/RUNBOOK.md").read_text()
-    match = re.search(r"^\| Current release \| v[\d.]+, `(sha256:[0-9a-f]{64})`", runbook, re.M)
-    assert match, "RUNBOOK Quick reference has no 'Current release' digest"
-    return f"ghcr.io/statsguy/shortly@{match[1]}"
+    match = re.search(
+        r"^\| Current release \| v[\d.]+, `([^`@ ]+@sha256:[0-9a-f]{64})`", runbook, re.M
+    )
+    assert match, "RUNBOOK Quick reference has no 'Current release' image"
+    return match[1]
 
 
 @pytest.mark.integration
@@ -120,4 +122,4 @@ def test_documented_release_verifies(locked_verify_image: Path) -> None:
         [str(locked_verify_image), _documented_release()], capture_output=True, text=True
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "refs/tags/v" in result.stdout
+    assert "refs/tags/shortly/v" in result.stdout  # released per app (platform plan 3.5)

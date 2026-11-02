@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Promote a release to an environment, the GitOps way: write its digest into
+# Promote a release to an environment, the GitOps way: write its repository and digest into
 # deploy/envs/<env>.yaml. Merging that change to main is the deploy (Argo CD syncs it: the
 # platform's ApplicationSet reads this repo's main); reverting it is the rollback.
 #
-#   scripts/promote.sh staging ghcr.io/statsguy/shortly@sha256:...   # or just sha256:...
+#   scripts/promote.sh staging ghcr.io/easypeasyops/links/shortly@sha256:...   # or just sha256:...
 #   scripts/promote.sh prod sha256:... --pr     # also branch, commit, push and open the PR
 #
 # Refuses, before touching the file:
@@ -16,13 +16,16 @@ ENV="${1:?usage: $0 <staging|prod> <digest|repo@digest> [--pr]}"
 REF="${2:?usage: $0 <staging|prod> <digest|repo@digest> [--pr]}"
 PR="${3:-}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-REPO=ghcr.io/statsguy/shortly
+REPO=ghcr.io/easypeasyops/links/shortly # releases from links (platform plan 3.5)
+OLD_REPO=ghcr.io/statsguy/shortly       # up to v0.7.1: a rollback may name it
 FILE="deploy/envs/$ENV.yaml"
 
 case "$ENV" in staging | prod) ;; *) echo "unknown env: $ENV" >&2; exit 2 ;; esac
 DIGEST="${REF#*@}"
 [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "not a digest: $REF" >&2; exit 2; }
-[[ "$REF" != *@* || "${REF%@*}" == "$REPO" ]] || { echo "REFUSED: not a $REPO image: $REF" >&2; exit 1; }
+[[ "$REF" != *@* ]] || REPO="${REF%@*}"
+[[ "$REPO" == ghcr.io/easypeasyops/links/shortly || "$REPO" == "$OLD_REPO" ]] \
+  || { echo "REFUSED: not a shortly image: $REF" >&2; exit 1; }
 
 cd "$ROOT"
 current=$(sed -nE 's/^  digest: "(sha256:[0-9a-f]{64})".*/\1/p' "$FILE")
@@ -31,7 +34,7 @@ current=$(sed -nE 's/^  digest: "(sha256:[0-9a-f]{64})".*/\1/p' "$FILE")
 # The platform checkout beside this one, as scripts/lib/platform.sh finds it. VERIFY: tests only.
 verified=$("${VERIFY:-${PLATFORM_DIR:-$ROOT/../../../platform}/scripts/verify-image.sh}" "$REPO@$DIGEST")
 echo "$verified"
-version=$(sed -nE 's|.*refs/tags/(v[0-9][^ ]*).*|\1|p' <<<"$verified" | head -n 1)
+version=$(sed -nE 's|.*refs/tags/([a-z0-9-]+/)?(v[0-9][^ ]*).*|\2|p' <<<"$verified" | head -n 1)
 [[ -n "$version" ]] || { echo "could not read the release tag from verify-image.sh" >&2; exit 1; }
 
 if [[ "$ENV" == prod ]]; then
@@ -46,9 +49,11 @@ if [[ "$ENV" == prod ]]; then
   fi
 fi
 
-sed -i.bak -E "s|^  digest: \"sha256:[0-9a-f]{64}\".*|  digest: \"$DIGEST\" # $version|" "$FILE" && rm -f "$FILE.bak"
+sed -i.bak -E -e "s|^  repository: ghcr\.io/[^ ]+|  repository: $REPO|" \
+  -e "s|^  digest: \"sha256:[0-9a-f]{64}\".*|  digest: \"$DIGEST\" # $version|" "$FILE" && rm -f "$FILE.bak"
 grep -q "^  digest: \"$DIGEST\"" "$FILE" || { echo "no image.digest line updated in $FILE" >&2; exit 1; }
-echo "$FILE: $version ($DIGEST)"
+grep -q "^  repository: $REPO\b" "$FILE" || { echo "no image.repository line updated in $FILE" >&2; exit 1; }
+echo "$FILE: $version ($REPO@$DIGEST)"
 
 if [[ "$PR" == --pr ]]; then
   branch="promote-$ENV-$version"

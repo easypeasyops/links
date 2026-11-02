@@ -20,6 +20,12 @@ import yaml
 ROOT = Path(__file__).resolve().parent.parent
 ENVS = ("staging", "prod")
 DIGEST_LINE = re.compile(r'^  digest: "(sha256:[0-9a-f]{64})"', re.M)
+REPOS = ("ghcr.io/easypeasyops/links/shortly", "ghcr.io/statsguy/shortly")  # new, up to v0.7.1
+
+
+def _env_image(env: str) -> str:
+    image = yaml.safe_load((ROOT / f"deploy/envs/{env}.yaml").read_text())["image"]
+    return f"{image['repository']}@{image['digest']}"
 
 
 def _env_digest(env: str, text: str | None = None) -> str:
@@ -34,8 +40,10 @@ def test_env_files_name_a_release_digest_and_nothing_else(env: str) -> None:
     values = yaml.safe_load((ROOT / f"deploy/envs/{env}.yaml").read_text())
     image = values["image"]
     assert image["digest"] == _env_digest(env)
-    # The repository comes from the chart default; a tag would be mutable, so never here.
-    assert set(image) == {"digest"}, f"{env}: only image.digest belongs in an env file"
+    # Each release's own repository (they moved in platform plan 3.5), and a digest: a tag
+    # would be mutable, so never here.
+    assert set(image) == {"repository", "digest"}, f"{env}: image.repository and .digest only"
+    assert image["repository"] in REPOS, image["repository"]
 
 
 def _git(*args: str) -> str:
@@ -87,13 +95,14 @@ def repo(tmp_path: Path) -> Path:
     shutil.copy(ROOT / "scripts/promote.sh", work / "scripts/promote.sh")
     for env in ENVS:
         (work / f"deploy/envs/{env}.yaml").write_text(
-            f'# {env}\nimage:\n  digest: "{STAGED}" # v1.0.0\nreplicaCount: 1\n'
+            f"# {env}\nimage:\n  repository: ghcr.io/statsguy/shortly\n"
+            f'  digest: "{STAGED}" # v1.0.0\nreplicaCount: 1\n'
         )
     verify = tmp_path / "verify"
     verify.write_text(
         '#!/usr/bin/env bash\n[[ "$1" == *cccc* ]] || { echo refused >&2; exit 1; }\n'
-        "echo 'verified: built by https://github.com/statsguy/shortly/.github/workflows/"
-        "release.yml@refs/tags/v1.1.0'\n"
+        "echo 'verified: built by https://github.com/easypeasyops/links/.github/workflows/"
+        "release.yml@refs/tags/shortly/v1.1.0'\n"
     )
     verify.chmod(0o755)
     git = ["git", "-C", str(work), "-c", "user.name=t", "-c", "user.email=t@t"]
@@ -115,12 +124,21 @@ def _promote(repo: Path, env: str, ref: str) -> subprocess.CompletedProcess[str]
     )
 
 
-def test_promote_writes_a_verified_digest_with_its_version(repo: Path) -> None:
-    result = _promote(repo, "staging", f"ghcr.io/statsguy/shortly@{NEW}")
+@pytest.mark.parametrize("ref", [f"ghcr.io/easypeasyops/links/shortly@{NEW}", NEW])
+def test_promote_writes_a_verified_release_with_its_version(repo: Path, ref: str) -> None:
+    """A release's repository and digest (a bare digest: links' own repository)."""
+    result = _promote(repo, "staging", ref)
     assert result.returncode == 0, result.stderr
     text = (repo / "deploy/envs/staging.yaml").read_text()
-    assert f'  digest: "{NEW}" # v1.1.0\n' in text
+    assert "  repository: ghcr.io/easypeasyops/links/shortly\n" in text
+    assert f'  digest: "{NEW}" # v1.1.0\n' in text  # the version, from shortly/v1.1.0
     assert "replicaCount: 1" in text  # nothing else touched
+
+
+def test_promote_refuses_another_apps_image(repo: Path) -> None:
+    result = _promote(repo, "staging", f"ghcr.io/easypeasyops/links/other@{NEW}")
+    assert result.returncode == 1
+    assert "not a shortly image" in result.stderr
 
 
 def test_promote_refuses_a_digest_without_provenance(repo: Path) -> None:
@@ -200,6 +218,6 @@ def test_deploy_refuses_an_environment_argo_cd_manages(tmp_path: Path, stub_plat
 @pytest.mark.integration
 @pytest.mark.parametrize("env", ENVS)
 def test_env_digests_have_release_provenance(env: str, locked_verify_image: Path) -> None:
-    ref = f"ghcr.io/statsguy/shortly@{_env_digest(env)}"
+    ref = _env_image(env)
     result = subprocess.run([str(locked_verify_image), ref], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
