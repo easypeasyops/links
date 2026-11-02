@@ -87,12 +87,12 @@ rate(code_collisions_total[1h])                                              # c
 # 1. bump `version` in pyproject.toml in a PR, merge it
 # 2. tag the merge commit
 git switch main && git pull
-git tag vX.Y.Z && git push origin vX.Y.Z      # e.g. v0.3.0
+git tag shortly/vX.Y.Z && git push origin shortly/vX.Y.Z   # e.g. shortly/v0.7.2
 ```
 
-`.github/workflows/release.yml` then: checks the tag matches `pyproject.toml`, builds and
+`.github/workflows/release.yml` (at the repo root) then: checks the tag matches `pyproject.toml`, builds and
 **scans before publishing**, pushes a multi-arch (amd64 + arm64) image to
-`ghcr.io/statsguy/shortly` with an SBOM and provenance, signs a provenance attestation
+`ghcr.io/easypeasyops/links/shortly` with an SBOM and provenance, signs a provenance attestation
 (Sigstore, keyless), and creates a GitHub Release whose notes contain the image **digest**.
 
 ```bash
