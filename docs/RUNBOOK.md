@@ -215,8 +215,8 @@ Steps and thresholds are chart values (`canary:` in `values.yaml`). An aborted c
 | Message | Cause | Fix |
 | --- | --- | --- |
 | `no valid provenance from …release.yml` | Wrong or mistyped digest, an image from somewhere else, or the registry or Sigstore unreachable | Copy the digest from the GitHub Release notes again; check network access to `ghcr.io` and `tuf-repo-cdn.sigstore.dev` |
-| `not from a release tag` | The image was built by `release.yml` but from a branch | Deploy a tagged release |
-| `is not one of statsguy's images` / `is not a ghcr.io/<owner>/<repo> image` | The image isn't ours, so no source repository can vouch for it | Deploy a release of one of our repos; set `VERIFY_OWNER` only for a different owner |
+| `not from a release tag` | The image was built by `release.yml` but from a branch, or from another app's tag (an app image needs `<app>/vX.Y.Z`) | Deploy a tagged release of that app |
+| `is not one of easypeasyops's images` / `is not one of statsguy's images` / `is not a ghcr.io/<owner>/<repo>/<app> image` | The image isn't ours, or not in its owner's form (`ghcr.io/easypeasyops/<repo>/<app>`; the old `ghcr.io/statsguy/<repo>`), so no source repository can vouch for it | Deploy a release of one of our repos; set `VERIFY_OWNER` / `VERIFY_LEGACY_OWNER` only for a different owner |
 | `is a tag; outside kind, deploy a released digest` | A tag was passed against a non-kind cluster | Use the digest from the release notes |
 | `gh (GitHub CLI) is required` | `gh` isn't installed | `brew install gh` |
 
@@ -607,9 +607,10 @@ kubectl get imagevalidatingpolicy,validatingpolicy     # READY must be true
 
 | Message | Cause | Fix |
 | --- | --- | --- |
-| `ghcr.io/statsguy images must be a release digest with provenance…` | An unreleased or unattested image: a CI build, a fork, or a per-platform child digest instead of the release's index digest | Deploy the digest from the GitHub Release notes. `../platform/scripts/verify-image.sh <ref>` tells you why it fails |
+| `our images must be a release digest with provenance…` | An unreleased or unattested image: a CI build, a fork, or a per-platform child digest instead of the release's index digest | Deploy the digest from the GitHub Release notes. `../platform/scripts/verify-image.sh <ref>` tells you why it fails |
 | `image ghcr.io/statsguy/shortly:… does not have a digest` | A tag was used | Use `@sha256:…`; tags are never verified |
-| `provenance names a different repository than the image's` | The image was built and signed by another of our repos' release workflows (`ghcr.io/statsguy/<repo>` must come from `statsguy/<repo>`) | Treat as suspicious: an image pushed under another repo's name. Find who pushed it |
+| `provenance names a different repository than the image's` | The image was built and signed by another of our repos' release workflows (`ghcr.io/easypeasyops/<repo>/<app>` must come from `easypeasyops/<repo>`) | Treat as suspicious: an image pushed under another repo's name. Find who pushed it |
+| `an app image must be ghcr.io/easypeasyops/<repo>/<app>, built from a <app>/vX.Y.Z tag` | An app image built from another app's tag, or a name without the app part | Treat as suspicious unless it's a mistyped name: one app's release published as another |
 | `provenance is not from a GitHub Actions workflow build` | The attestation exists but describes a different build | Treat as suspicious: who produced this image? |
 | `failed calling webhook "…kyverno…"` or `context deadline exceeded` | Kyverno is down or slow, or it can't reach `ghcr.io` / Sigstore (Rekor, TUF). The policy fails closed, so **every** new Pod in `staging` and `prod`, Postgres included, is refused | `kubectl -n kyverno logs deploy/kyverno-admission-controller --tail=50`; `kubectl -n kyverno rollout restart deploy/kyverno-admission-controller` |
 
