@@ -96,23 +96,24 @@ A `trace_id` in a log line opens the full trace in Jaeger (`http://localhost:166
 
 ## Cut a release
 
-A release is a pushed `vX.Y.Z` tag on a `main` commit whose `pyproject.toml` version matches; the workflow does the rest.
+A release is a pushed `shortly/vX.Y.Z` tag (the app, then its version: platform plan 3.5) on a `main` commit whose `apps/shortly/pyproject.toml` version matches; the workflow does the rest, publishing `ghcr.io/easypeasyops/links/shortly`. Releases up to v0.7.1 were plain `vX.Y.Z` tags and `ghcr.io/statsguy/shortly`.
 
 1. Open a PR that bumps `version` in `pyproject.toml` (semver: patch for fixes, minor for features, major for breaking API changes). Merge it once CI is green.
 2. Tag the merge commit and push the tag:
 
    ```bash
    git switch main && git pull
-   git tag v0.3.0 && git push origin v0.3.0
+   git tag shortly/v0.7.2 && git push origin shortly/v0.7.2
    ```
-3. Watch **Actions → Release**. It fails before publishing if the tag and version differ or the image scan finds a fixable HIGH/CRITICAL vulnerability.
+3. Watch **Actions → Release**. It fails before publishing if the tag names no app, the tag and version differ or the image scan finds a fixable HIGH/CRITICAL vulnerability.
 4. Copy the digest from the GitHub Release notes. Every deploy uses this digest.
+   An app's **first** release creates its package (`links/shortly`) as private, so the cluster can't pull it: make it public once, under the org's **Packages → links/shortly → Package settings → Change visibility**.
 5. Check the provenance. `promote.sh` and CI do this themselves for every promotion, but you can run the same check by hand:
 
    ```bash
    D=sha256:<digest from the release notes>
-   ../../../platform/scripts/verify-image.sh ghcr.io/statsguy/shortly@$D
-   # verified: built by …/release.yml@refs/tags/v0.3.0, from … refs/tags/v0.3.0 @ <commit>
+   ../../../platform/scripts/verify-image.sh ghcr.io/easypeasyops/links/shortly@$D
+   # verified: built by …/release.yml@refs/tags/shortly/v0.7.2, from … refs/tags/shortly/v0.7.2 @ <commit>
    ```
 
    It must exit 0. Then record the digest in the Quick reference above (`tests/test_deploy_gate.py` verifies the digest documented there), and promote it: Deploy, below.

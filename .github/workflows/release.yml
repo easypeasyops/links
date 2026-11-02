@@ -1,10 +1,13 @@
 name: Release
 
-# Cut a release:  bump `version` in pyproject.toml (via PR), merge, then
-#   git tag v0.2.0 && git push origin v0.2.0
+# Releases per app (platform plan 3.5): an app lives in apps/<app>/ and is released from a
+# <app>/vX.Y.Z tag as the image ghcr.io/<owner>/<repo>/<app>, which the platform's deploy gate
+# and admission policy accept only with this workflow's provenance at that app's tag.
+# Cut one:  bump `version` in apps/<app>/pyproject.toml (via PR), merge, then
+#   git tag shortly/v0.7.2 && git push origin shortly/v0.7.2
 on:
   push:
-    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+    tags: ["*/v[0-9]+.[0-9]+.[0-9]+"] # `*` stops at `/`: exactly <app>/vX.Y.Z
 
 permissions: {} # nothing by default; the job asks for exactly what it needs
 
@@ -22,23 +25,29 @@ jobs:
       packages: write # push the image to ghcr.io
       id-token: write # OIDC identity for keyless Sigstore signing of the attestation
       attestations: write # store the provenance attestation
-    env:
-      IMAGE: ghcr.io/${{ github.repository }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      # One source of truth for the version. A tag that disagrees with pyproject.toml is
-      # a mistake (tagged the wrong commit, forgot the bump) — stop before publishing.
-      - name: Tag must match pyproject version
+      # The tag names the app and its version. One source of truth for the version: a tag
+      # that disagrees with the app's pyproject.toml is a mistake (tagged the wrong commit,
+      # forgot the bump), so stop before publishing.
+      - name: Which app, and the tag must match its pyproject version
+        id: app
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("apps/shortly/pyproject.toml","rb"))["project"]["version"])')
+          app="${GITHUB_REF_NAME%%/v*}" tag="${GITHUB_REF_NAME##*/v}"
+          # An app name the admission policy accepts in a tag: lowercase, digits and dashes.
+          [[ "$app" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo "::error::$app is not a valid app name"; exit 1; }
+          [[ -f "apps/$app/pyproject.toml" ]] || { echo "::error::no app apps/$app/ for tag $GITHUB_REF_NAME"; exit 1; }
+          version=$(python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "apps/$app/pyproject.toml")
           if [[ "$tag" != "$version" ]]; then
-            echo "::error::tag v$tag does not match pyproject.toml version $version"
+            echo "::error::tag $GITHUB_REF_NAME does not match apps/$app/pyproject.toml version $version"
             exit 1
           fi
+          echo "app=$app" >>"$GITHUB_OUTPUT"
+          echo "version=$version" >>"$GITHUB_OUTPUT"
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}/$app" >>"$GITHUB_ENV"
 
       - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -48,16 +57,16 @@ jobs:
       - name: Build for scanning
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: apps/shortly
+          context: apps/${{ steps.app.outputs.app }}
           load: true
-          tags: shortly:scan
+          tags: ${{ steps.app.outputs.app }}:scan
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Scan image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: shortly:scan
+          image-ref: ${{ steps.app.outputs.app }}:scan
           version: v0.70.0
           scanners: vuln
           severity: HIGH,CRITICAL
@@ -78,9 +87,10 @@ jobs:
           images: ${{ env.IMAGE }}
           # 0.2.0 and 0.2 — no `latest`: deploys reference digests, and a moving `latest`
           # makes "what's running in prod?" unanswerable.
+          # The tag is <app>/vX.Y.Z, not a bare semver: give the version itself.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}},value=${{ steps.app.outputs.version }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ steps.app.outputs.version }}
 
       # amd64 for servers/CI, arm64 for Apple Silicon laptops and Graviton/Ampere nodes.
       # SBOM + max provenance are attached to the image in the registry by BuildKit.
@@ -88,7 +98,7 @@ jobs:
         id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: apps/shortly
+          context: apps/${{ steps.app.outputs.app }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
@@ -99,7 +109,7 @@ jobs:
 
       # Signed (Sigstore, keyless via this workflow's OIDC identity) statement of which
       # repo, commit, and workflow produced this exact digest. Verify with:
-      #   gh attestation verify oci://ghcr.io/statsguy/shortly@<digest> --owner statsguy
+      #   gh attestation verify oci://ghcr.io/easypeasyops/links/shortly@<digest> --owner easypeasyops
       - name: Attest build provenance
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:

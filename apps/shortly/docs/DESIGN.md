@@ -554,7 +554,7 @@ flowchart TB
     k8s[Jobs: kind e2e ×2, in parallel<br/>platform · delivery: rollback · canary · GitOps · HPA · monitoring · admission]
   end
 
-  subgraph release [Release · release.yml · only on tag vX.Y.Z]
+  subgraph release [Release · release.yml · only on tag app/vX.Y.Z]
     match[Tag == pyproject version]
     scan2[Build + Trivy again]
     pushImg[Multi-arch push + SBOM + provenance]
@@ -575,7 +575,7 @@ flowchart TB
   check --> merge[merge to main]
   image --> merge
   k8s --> merge
-  merge --> tag[git tag vX.Y.Z]
+  merge --> tag[git tag shortly/vX.Y.Z]
   tag --> match --> scan2 --> pushImg --> attest --> ghRel
   ghRel --> verify --> stg --> prod
   stg --> admit
@@ -657,11 +657,11 @@ The canary drills (PR #40) brought it back to **8–10 minutes** (8m19s and 9m59
 
 ### Release workflow — “Publish one immutable, attributable artifact”
 
-Triggered only by tags matching `v[0-9]+.[0-9]+.[0-9]+`. CI on main never publishes; publishing is an explicit human act (tag after merge).
+Triggered only by an app's tag, `<app>/vX.Y.Z` (`shortly/v0.7.2`): the repo holds its apps under `apps/<app>/` and releases each on its own (platform plan 3.5). The tag names the app; the image is `ghcr.io/easypeasyops/links/<app>`, the form the platform's deploy gate and admission policy accept only with this workflow's provenance at that app's tag. CI on main never publishes; publishing is an explicit human act (tag after merge). Until 3.5 finishes, prod and staging may still run v0.7.1, the last release in the old form (`ghcr.io/statsguy/shortly`, tag `v0.7.1`).
 
 | Piece | Why |
 | --- | --- |
-| Tag must equal `pyproject.toml` version | Stops "tagged the wrong commit" / "forgot the bump" before anything reaches GHCR |
+| Tag must name an app (`apps/<app>/`) and equal its `pyproject.toml` version | Stops "tagged the wrong commit" / "forgot the bump" before anything reaches GHCR |
 | Scan **before** login/push | A vulnerable image never lands in the registry (even briefly) |
 | Multi-arch (`amd64` + `arm64`) | Servers/CI and Apple Silicon / Graviton share one digest manifest |
 | No `latest` tag | Deploys use digests; a moving `latest` makes "what is in prod?" unanswerable |
@@ -853,7 +853,7 @@ Since chart 0.10.0, nobody runs `helm upgrade` against staging or prod. **Argo C
 
 ```mermaid
 flowchart LR
-  R[release.yml<br/>tag vX.Y.Z → digest] --> P1[scripts/promote.sh staging<br/>verify provenance, write digest]
+  R[release.yml<br/>tag shortly/vX.Y.Z → digest] --> P1[scripts/promote.sh staging<br/>verify provenance, write digest]
   P1 --> PR1[PR: deploy/envs/staging.yaml] --> CI1{CI: provenance,<br/>chart, e2e}
   CI1 -->|merge| M1[main] -->|≤ 60 s| A1[Argo CD syncs staging]
   A1 --> P2[scripts/promote.sh prod<br/>+ staging ran it?] --> PR2[PR: deploy/envs/prod.yaml] --> CI2{CI: same,<br/>+ staging first}
