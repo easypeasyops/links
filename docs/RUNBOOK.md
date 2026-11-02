@@ -22,7 +22,6 @@ Operational procedures for shortly. Commands assume you are in the repo root wit
 | Environments | kind cluster `shortly`; staging in namespace `shortly-staging` (Deployment, 1 replica), prod in `shortly-prod` (Argo Rollout, canary releases, HPA 2–4 replicas). Scripts take the environment (`staging`, `prod`); `scripts/lib/namespaces.sh` maps it to the namespace |
 | Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
 | Helm release | `shortly` in each namespace; the platform's service chart (digest in its `apps/shortly/envs/<env>.yaml`), values in `deploy/service/` and `deploy/envs/` |
-| Database | `postgres` StatefulSet per namespace; URL in Secret `shortly-db` key `url` |
 | Canary (prod) | New versions get 10%, then 50% of the Gateway's traffic, each step judged by Prometheus (traffic, 5xx ≤ 1%, redirect p99 ≤ 250 ms), then 100%: about 7 min. A failed step aborts and `deploy.sh` rolls back. Rollbacks to the last 3 revisions are immediate. See Deploy |
 | Deploys | GitOps: Argo CD (namespace `argocd`) syncs each environment from `deploy/envs/<env>.yaml` on `main` within 60 s. Promote with `scripts/promote.sh`; roll back by reverting the promotion PR. UI: http://argocd.localhost:8090 (front door) |
 | Front door | Gateway `gateway/shortly` (Envoy Gateway); prod = `sho.rt.localhost`, staging = `staging.sho.rt.localhost`. Locally, always on: `http://sho.rt.localhost:8080/<code>`; the dev tools at `http://{argocd,grafana,prometheus,alertmanager}.localhost:8090` (the front door, Local cluster operations) |
@@ -293,7 +292,7 @@ If a migration itself broke something and the old code cannot run on the new sch
 
 ## The database: CloudNativePG
 
-Since platform plan 4.3, each environment runs on a CloudNativePG Cluster, `shortly-db` in `shortly-<env>`, rendered by the service chart from `deploy/envs/<env>.yaml` (staging since links #119, prod since links #121). The old StatefulSet `postgres` still runs in each until 4.3 removes it, but nothing reads it.
+Since platform plan 4.3, each environment runs on a CloudNativePG Cluster, `shortly-db` in `shortly-<env>`, rendered by the service chart from `deploy/envs/<env>.yaml` (staging since links #119, prod since links #121). The old StatefulSet `postgres` they replaced was removed at the end of 4.3.
 
 ```bash
 kubectl -n shortly-prod get cluster shortly-db                    # STATUS "Cluster in healthy state", PRIMARY
@@ -303,14 +302,14 @@ kubectl -n shortly-prod get backups,scheduledbackups              # base backups
 ```
 
 - The app reads `shortly-db-app` (key `uri`), which the operator writes for the `shortly` user. Services: `shortly-db-rw` (the primary), `shortly-db-ro`.
-- It was filled once, when the Cluster was created, by importing the old Postgres's database (`bootstrap.initdb.import`, type microservice): the old StatefulSet `postgres` still runs in staging until the end of 4.3, but nothing reads it.
-- WAL is archived continuously and a base backup taken hourly (:23), by the Barman Cloud plugin, to the bucket; the old hourly `pg_dump` CronJob still dumps the old, unused database until it's removed.
+- It was filled once, when the Cluster was created, by importing the old Postgres's database (`bootstrap.initdb.import`, type microservice).
+- WAL is archived continuously and a base backup taken hourly (:23), by the Barman Cloud plugin, to the bucket.
 - **Prove the backups restore:** `SOURCE=shortly-prod scripts/restore-drill-cnpg.sh` recovers the newest base backup and every archived WAL segment after it into a scratch Cluster (namespace `restore-drill`, deleted afterwards; `KEEP=1` keeps it, `BACKUP=1` takes a base backup first) and prints how long it took. It never touches the source. CI runs it against prod on every PR (e2e step 11) with a link written after the base backup, which only WAL replay can bring back.
 - Argo CD never deletes the Cluster (`Prune=false,Delete=false`): removing it is a deliberate `kubectl -n shortly-staging delete cluster shortly-db`, and its volumes go with it.
 
 | Symptom | Likely cause | Check / fix |
 | --- | --- | --- |
-| `shortly-<env>` stuck Progressing on `Cluster/shortly-db` | The import or initdb Job is failing or slow | `kubectl -n shortly-<env> get pods -l cnpg.io/cluster=shortly-db`; the `*-import-*` / `*-initdb-*` pod's logs. Can't reach `postgres:5432`: the old Postgres's NetworkPolicy must admit `cnpg.io/cluster` pods (`cluster.sh up` applies it) |
+| `shortly-<env>` stuck Progressing on `Cluster/shortly-db` | The import or initdb Job is failing or slow | `kubectl -n shortly-<env> get pods -l cnpg.io/cluster=shortly-db`; the `*-import-*` / `*-initdb-*` pod's logs. Can't reach the database it imports from: that database's NetworkPolicy must admit `cnpg.io/cluster` pods |
 | Cluster healthy, but WAL archiving fails (`kubectl get cluster shortly-db -o jsonpath='{.status.conditions}'`, `ContinuousArchiving` False) | The bucket's keys (`shortly-db-backup`, an ExternalSecret from the `backup-bucket` store) or the bucket isn't reachable | `kubectl -n shortly-<env> describe externalsecret shortly-db-backup`; the bucket's NetworkPolicy admits `cnpg.io/cluster` pods |
 | Migration Job waits | It runs after the Cluster is healthy (an Argo CD Sync hook, wave -1), so it waits for the row above | As above |
 
