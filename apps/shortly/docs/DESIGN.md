@@ -600,7 +600,7 @@ The generic jobs are the platform's reusable workflows, which any app's CI calls
 | Chart golden files (the platform's `charts/service/tests/shortly/`) | Any change in what the service chart renders for shortly's staging or prod: a template edit, a values default, an env setting | Refactors of the chart that quietly change what reaches the cluster; reviewers reading templates instead of the manifests Argo CD applies |
 | promtool / amtool / Kyverno CLI tests | Alert rules that never fire; policies that never deny; dashboard PromQL that selects nothing | Silent monitoring: the first time you learn an alert is broken is during an incident |
 
-Toolchain: Python 3.14 (`.python-version`), uv + committed `uv.lock`, `src/` layout. The same ruff/mypy/pytest stack runs in pre-commit locally so developers see failures before the PR.
+Toolchain: Python 3.15 (`.python-version`), uv + committed `uv.lock`, `src/` layout. The same ruff/mypy/pytest stack runs in pre-commit locally so developers see failures before the PR.
 
 #### Job `image` — “Is the artifact we ship safe and runnable?”
 
@@ -681,7 +681,7 @@ gh attestation verify oci://ghcr.io/statsguy/shortly@<digest> --owner statsguy \
 | What is pinned | How | Why |
 | --- | --- | --- |
 | Python deps | `uv.lock` with hashes | Reproducible builds; blocks unexpected transitive upgrades |
-| Base / uv images | Digest in Dockerfile | Tags like `python:3.14` move; digests do not |
+| Base / uv images | Digest in Dockerfile | Tags like `python:3.15` move; digests do not |
 | GitHub Actions | Commit SHA (not floating tag) | A compromised or retagged action cannot silently change CI |
 | Workflow tokens | Least-privilege `permissions`; `persist-credentials: false` | Stolen job tokens should not push code or packages they do not need |
 
