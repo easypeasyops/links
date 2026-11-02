@@ -171,7 +171,9 @@ def test_runbook_links_point_at_real_sections() -> None:
     anchors = {slug(h) for h in re.findall(r"^#{2,4} (.+)$", runbook, re.MULTILINE)}
     links = {r["annotations"]["runbook_url"] for r in _rules() if "alert" in r}
     for link in links:
-        assert link.startswith("https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#")
+        assert link.startswith(
+            "https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#"
+        )
         assert link.split("#", 1)[1] in anchors, f"no RUNBOOK section for {link}"
 
 

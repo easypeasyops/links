@@ -18,7 +18,7 @@ K6_IMAGE="${K6_IMAGE:-grafana/k6:2.3.0}"
 NETWORK="${NETWORK:-$(basename "$ROOT")_default}"
 TARGET="${TARGET:-http://app:8000}"
 
-app=$(docker compose --profile app ps -q app)
+app=$(docker compose -f "$ROOT/compose.yaml" --profile app ps -q app)
 [[ -n "$app" ]] || { echo "app container not running: docker compose --profile app up -d --wait" >&2; exit 1; }
 docker update --cpus "$APP_CPUS" "$app" >/dev/null
 
