@@ -70,6 +70,23 @@ fi
 pass() { echo "ok   $*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
+# A canary aborted by its analysis: what each metric measured, what the synthetic traffic
+# saw, and what Prometheus has for prod's pods now. Tells too little traffic from a pod not
+# yet scraped (the GitOps canary's `traffic` check failed twice after links #126).
+canary_diagnostics() {
+  kubectl -n "$PROD_NS" get analysisrun >/dev/null 2>&1 || return 0
+  echo "--- canary analysis (prod) ---"
+  kubectl -n "$PROD_NS" get analysisrun --sort-by=.metadata.creationTimestamp -o jsonpath='{range .items[*]}{.metadata.name} {.status.phase}{"\n"}{range .status.metricResults[*]}  {.name} {.phase}:{range .measurements[*]} {.phase}={.value}@{.startedAt}{end}{"\n"}{end}{end}' || true
+  kubectl -n "$PROD_NS" logs -l app.kubernetes.io/name=canary-traffic --tail=20 --prefix 2>/dev/null || true
+  local q
+  for q in 'up{namespace="'"$PROD_NS"'"}' \
+    'sum by (pod) (rate(http_requests_total{namespace="'"$PROD_NS"'", route!~"/healthz|/readyz"}[1m]))'; do
+    echo "prometheus: $q"
+    kubectl get --raw "/api/v1/namespaces/monitoring/services/http:kps-prometheus:9090/proxy/api/v1/query?query=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1]))' "$q")" 2>/dev/null \
+      | python3 -c 'import json, sys; [print("  ", r["metric"].get("pod", r["metric"]), r["value"][1]) for r in json.load(sys.stdin)["data"]["result"]]' || true
+  done
+}
+
 on_exit() {
   status=$?
   for pid in "${PF_PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
@@ -90,6 +107,7 @@ on_exit() {
       kubectl -n "$ns" get rollout,analysisrun -o wide 2>/dev/null || true
     done
     kubectl -n gateway get gateway shortly -o wide || true
+    canary_diagnostics
   fi
   for env in "${ENVS[@]}"; do kubectl -n "$(ns_of "$env")" delete pod client --wait=false >/dev/null 2>&1 || true; done
   exit "$status"
