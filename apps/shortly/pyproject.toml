@@ -3,7 +3,7 @@ name = "shortly"
 version = "0.7.2"
 description = "URL shortener — a hands-on DevOps practice project"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.15"
 dependencies = [
     "alembic>=1.20.0",
     "anyio>=4.15.1",
@@ -43,7 +43,7 @@ dev = [
 
 [tool.ruff]
 line-length = 100
-target-version = "py314"
+target-version = "py315"
 
 [tool.ruff.lint]
 select = [
