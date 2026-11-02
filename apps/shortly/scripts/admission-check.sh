@@ -12,12 +12,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=scripts/lib/platform.sh
 source "$(dirname "$0")/lib/platform.sh"
 NS="${NS:-$STAGING_NS}"
-REPO=ghcr.io/statsguy/shortly # the old releases' repository: its v0.2.0 child is a real, unattested image
+REPO=ghcr.io/easypeasyops/links/shortly
 # The release the runbook documents (also checked by tests/test_deploy_gate.py).
 RELEASE=$(sed -nE 's/^\| Current release \| v[0-9.]+, `([^`@ ]+@sha256:[0-9a-f]{64})`.*/\1/p' "$ROOT/docs/RUNBOOK.md")
 [[ -n "$RELEASE" ]] || { echo "FAIL: no 'Current release' image in RUNBOOK" >&2; exit 1; }
-# v0.2.0's linux/amd64 manifest: a real image, but the attestation names the index only.
-UNATTESTED=sha256:7025c409513225aeb5e473d2e08951cfd8cbbe9d1f574a0ac042ad8e3aa0d4ec
+# v0.7.2's linux/amd64 manifest: a real image, but the attestation names the index only.
+UNATTESTED=sha256:d4a610fb8ad3fa48a8df0089935b5d465e54001cf82daad4a47abaf06a4e95f9
 MISSING="sha256:$(printf '0%.0s' {1..64})"
 
 pass() { echo "ok   $*"; }

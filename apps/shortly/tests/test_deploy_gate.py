@@ -16,7 +16,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 DEPLOY = ROOT / "scripts/deploy.sh"
 DIGEST = "a" * 64
-IMAGE = f"ghcr.io/statsguy/shortly@sha256:{DIGEST}"
+IMAGE = f"ghcr.io/easypeasyops/links/shortly@sha256:{DIGEST}"
 
 
 @pytest.fixture
@@ -79,7 +79,7 @@ def test_digest_the_gate_refuses_is_not_deployed(stubs: tuple[Path, Path]) -> No
 
 def test_tag_outside_kind_is_refused(stubs: tuple[Path, Path]) -> None:
     code, out, calls = _deploy(
-        stubs, "ghcr.io/statsguy/shortly:latest", FAKE_CONTEXT="prod-cluster"
+        stubs, "ghcr.io/easypeasyops/links/shortly:latest", FAKE_CONTEXT="prod-cluster"
     )
     assert code != 0
     assert "is a tag" in out

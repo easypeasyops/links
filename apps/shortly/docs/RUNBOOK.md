@@ -1,6 +1,6 @@
 # shortly — Runbook
 
-> Last updated 2026-10-23 for v0.7.1 / chart 0.10.0. Mirrored at
+> Last updated 2026-11-02 for v0.7.2 / chart 1.1.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/6bjjkcg6hjcAW2HbkHnUzV). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -16,7 +16,7 @@ Operational procedures for shortly. shortly lives in `apps/shortly/` of the link
 
 | Item | Value |
 | --- | --- |
-| Repo | [github.com/statsguy/shortly](https://github.com/statsguy/shortly) |
+| Repo | [github.com/easypeasyops/links](https://github.com/easypeasyops/links), in `apps/shortly/` |
 | Image | `ghcr.io/easypeasyops/links/shortly` since v0.7.2 (released per app from links: platform plan 3.5); `ghcr.io/statsguy/shortly` up to v0.7.1. Each environment's file names its release's repository and digest. Deploy by digest, never by tag |
 | Current release | v0.7.2, `ghcr.io/easypeasyops/links/shortly@sha256:656822ee670d160ebde14c40308a411c9b3d1f1aa18d0935fb6cc580ddafa950` (previous: v0.7.1, `ghcr.io/statsguy/shortly@sha256:f8e4982b3a4197e0d68b83ef7bd06f0213bd54afffd65f4a088c21fd0852e046`) |
 | Environments | kind cluster `shortly`; staging in namespace `shortly-staging` (Deployment, 1 replica), prod in `shortly-prod` (Argo Rollout, canary releases, HPA 2–4 replicas). Scripts take the environment (`staging`, `prod`); `scripts/lib/namespaces.sh` maps it to the namespace |
@@ -217,7 +217,7 @@ Steps and thresholds are chart values (`canary:` in `values.yaml`). An aborted c
 | --- | --- | --- |
 | `no valid provenance from …release.yml` | Wrong or mistyped digest, an image from somewhere else, or the registry or Sigstore unreachable | Copy the digest from the GitHub Release notes again; check network access to `ghcr.io` and `tuf-repo-cdn.sigstore.dev` |
 | `not from a release tag` | The image was built by `release.yml` but from a branch, or from another app's tag (an app image needs `<app>/vX.Y.Z`) | Deploy a tagged release of that app |
-| `is not one of easypeasyops's images` / `is not one of statsguy's images` / `is not a ghcr.io/<owner>/<repo>/<app> image` | The image isn't ours, or not in its owner's form (`ghcr.io/easypeasyops/<repo>/<app>`; the old `ghcr.io/statsguy/<repo>`), so no source repository can vouch for it | Deploy a release of one of our repos; set `VERIFY_OWNER` / `VERIFY_LEGACY_OWNER` only for a different owner |
+| `is not one of easypeasyops's images` / `is not a ghcr.io/<owner>/<repo>/<app> image` | The image isn't ours, or not in the form `ghcr.io/easypeasyops/<repo>/<app>` (the old `ghcr.io/statsguy/shortly`, up to v0.7.1, is refused since platform plan 3.5), so no source repository can vouch for it | Deploy a release of one of our apps; set `VERIFY_OWNER` only for a different owner |
 | `is a tag; outside kind, deploy a released digest` | A tag was passed against a non-kind cluster | Use the digest from the release notes |
 | `gh (GitHub CLI) is required` | `gh` isn't installed | `brew install gh` |
 
@@ -225,7 +225,7 @@ Steps and thresholds are chart values (`canary:` in `values.yaml`). An aborted c
 
 ```bash
 kubectl -n argocd patch application shortly-prod --type merge -p '{"spec":{"syncPolicy":{"automated":null}}}'
-ARGOCD_OVERRIDE=1 scripts/deploy.sh prod ghcr.io/statsguy/shortly@$D
+ARGOCD_OVERRIDE=1 scripts/deploy.sh prod ghcr.io/easypeasyops/links/shortly@$D
 # afterwards: put the same digest in deploy/envs/prod.yaml via a PR, merge, then restore
 # auto-sync: delete the Application; the platform's ApplicationSet recreates it from git
 # within seconds (no finalizer, so shortly keeps running while it does)
@@ -609,7 +609,7 @@ kubectl get imagevalidatingpolicy,validatingpolicy     # READY must be true
 | Message | Cause | Fix |
 | --- | --- | --- |
 | `our images must be a release digest with provenance…` | An unreleased or unattested image: a CI build, a fork, or a per-platform child digest instead of the release's index digest | Deploy the digest from the GitHub Release notes. `../../../platform/scripts/verify-image.sh <ref>` tells you why it fails |
-| `image ghcr.io/statsguy/shortly:… does not have a digest` | A tag was used | Use `@sha256:…`; tags are never verified |
+| `image ghcr.io/easypeasyops/links/shortly:… does not have a digest` | A tag was used | Use `@sha256:…`; tags are never verified |
 | `provenance names a different repository than the image's` | The image was built and signed by another of our repos' release workflows (`ghcr.io/easypeasyops/<repo>/<app>` must come from `easypeasyops/<repo>`) | Treat as suspicious: an image pushed under another repo's name. Find who pushed it |
 | `an app image must be ghcr.io/easypeasyops/<repo>/<app>, built from a <app>/vX.Y.Z tag` | An app image built from another app's tag, or a name without the app part | Treat as suspicious unless it's a mistyped name: one app's release published as another |
 | `provenance is not from a GitHub Actions workflow build` | The attestation exists but describes a different build | Treat as suspicious: who produced this image? |
@@ -852,7 +852,7 @@ The local environments are disposable: `../../../platform/scripts/cluster.sh up`
 | Tear down everything | `../../../platform/scripts/cluster.sh down` |
 | Reset one environment's data | `kubectl -n shortly-<env> delete cluster shortly-db` (its volumes go with it): Argo CD recreates it empty, and the migration recreates the schema. Its backups stay in the bucket, and a new Cluster refuses to archive into the same folder until they're deleted |
 | Deploy a local build (kind only; tags are refused elsewhere) | `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev` |
-| Check an image's provenance | `../../../platform/scripts/verify-image.sh ghcr.io/statsguy/shortly@sha256:…` |
+| Check an image's provenance | `../../../platform/scripts/verify-image.sh ghcr.io/easypeasyops/links/shortly@sha256:…` |
 | Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step; `E2E_SUITE=platform` or `delivery` runs one CI half) |
 | Autoscaling drill only | `scripts/hpa-drill.sh` (stops once the HPA adds a ready pod; `RATE=1500 DURATION=240s FULL=1` for a longer push to the end, with k6's summary) |
 | Watch autoscaling | `kubectl -n shortly-prod get hpa shortly -w` |

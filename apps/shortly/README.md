@@ -1,6 +1,6 @@
 # shortly
 
-[![CI](https://github.com/statsguy/shortly/actions/workflows/ci.yml/badge.svg)](https://github.com/statsguy/shortly/actions/workflows/ci.yml)
+[![CI](https://github.com/easypeasyops/links/actions/workflows/ci.yml/badge.svg)](https://github.com/easypeasyops/links/actions/workflows/ci.yml)
 
 A URL shortener built as a hands-on DevOps practice project: uv, strict typing, tests, CI/CD, containers, and observability.
 
@@ -96,7 +96,7 @@ git tag shortly/vX.Y.Z && git push origin shortly/vX.Y.Z   # e.g. shortly/v0.7.2
 (Sigstore, keyless), and creates a GitHub Release whose notes contain the image **digest**.
 
 ```bash
-gh attestation verify oci://ghcr.io/statsguy/shortly@sha256:<digest> --owner statsguy
+gh attestation verify oci://ghcr.io/easypeasyops/links/shortly@sha256:<digest> --owner easypeasyops
 ```
 
 ## Deploy (local Kubernetes)
@@ -105,8 +105,8 @@ Requires Docker, [kind](https://kind.sigs.k8s.io), kubectl, and Helm 4.
 
 ```bash
 ../../../platform/scripts/cluster.sh up                                          # kind + metrics-server + monitoring + Kyverno + staging/prod + Postgres
-scripts/deploy.sh staging ghcr.io/statsguy/shortly@sha256:<digest>
-scripts/deploy.sh prod    ghcr.io/statsguy/shortly@sha256:<digest>   # same digest: build once, deploy many
+scripts/deploy.sh staging ghcr.io/easypeasyops/links/shortly@sha256:<digest>
+scripts/deploy.sh prod    ghcr.io/easypeasyops/links/shortly@sha256:<digest>   # same digest: build once, deploy many
 helm -n shortly-prod history shortly                                   # what can I roll back to?
 helm -n shortly-prod rollback shortly <revision>
 ```

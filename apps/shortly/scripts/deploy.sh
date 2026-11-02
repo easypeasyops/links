@@ -2,8 +2,8 @@
 # Deploy one image to one environment. The SAME image reference is promoted from staging
 # to prod — build once, deploy many; never rebuild for production.
 #
-#   scripts/deploy.sh staging ghcr.io/statsguy/shortly@sha256:...   # released image (preferred)
-#   scripts/deploy.sh prod    ghcr.io/statsguy/shortly@sha256:...
+#   scripts/deploy.sh staging ghcr.io/easypeasyops/links/shortly@sha256:...   # released image (preferred)
+#   scripts/deploy.sh prod    ghcr.io/easypeasyops/links/shortly@sha256:...
 #   scripts/deploy.sh staging shortly:dev                            # local image, kind only
 #
 # A digest is deployed only after the platform's scripts/verify-image.sh proves it was built by this repo's

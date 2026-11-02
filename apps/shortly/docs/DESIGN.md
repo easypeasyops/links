@@ -1,6 +1,6 @@
 # shortly — Design Document
 
-> Last updated 2026-10-23 for v0.7.1 / chart 0.10.0. Mirrored at
+> Last updated 2026-11-02 for v0.7.2 / chart 1.1.0. Mirrored at
 > [Claude Docs](https://claude.ai/artifact/1du93suG9M2oJJUvvQzYmS). Update both in the
 > same PR as the change they describe (see `CLAUDE.md`).
 
@@ -17,7 +17,7 @@
 
 shortly is a URL shortener: `POST /links` returns a 7-character code, and `GET /{code}` redirects to the target with a 307. It is built as a production-shaped reference service, so the operational machinery around it (CI, supply chain, observability, deploys, rollback) matters as much as the feature.
 
-**Status:** v0.7.1 released 2026-10-23 as `ghcr.io/statsguy/shortly@sha256:f8e4982b3a41…` (amd64 + arm64), with signed SLSA provenance (previous: v0.7.0, 2026-10-22). It deploys to local Kubernetes (kind) in `staging` and `prod` namespaces.
+**Status:** v0.7.2 released 2026-11-02 as `ghcr.io/easypeasyops/links/shortly@sha256:656822ee670d…` (amd64 + arm64), with signed SLSA provenance: the first release per app from links, the same code as v0.7.1 (2026-10-23, `ghcr.io/statsguy/shortly`). It deploys to local Kubernetes (kind) in `staging` and `prod` namespaces.
 
 **Goals**
 
@@ -657,7 +657,7 @@ The canary drills (PR #40) brought it back to **8–10 minutes** (8m19s and 9m59
 
 ### Release workflow — “Publish one immutable, attributable artifact”
 
-Triggered only by an app's tag, `<app>/vX.Y.Z` (`shortly/v0.7.2`): the repo holds its apps under `apps/<app>/` and releases each on its own (platform plan 3.5). The tag names the app; the image is `ghcr.io/easypeasyops/links/<app>`, the form the platform's deploy gate and admission policy accept only with this workflow's provenance at that app's tag. CI on main never publishes; publishing is an explicit human act (tag after merge). Until 3.5 finishes, prod and staging may still run v0.7.1, the last release in the old form (`ghcr.io/statsguy/shortly`, tag `v0.7.1`).
+Triggered only by an app's tag, `<app>/vX.Y.Z` (`shortly/v0.7.2`): the repo holds its apps under `apps/<app>/` and releases each on its own (platform plan 3.5). The tag names the app; the image is `ghcr.io/easypeasyops/links/<app>`, the form the platform's deploy gate and admission policy accept only with this workflow's provenance at that app's tag. CI on main never publishes; publishing is an explicit human act (tag after merge). Releases up to v0.7.1 were plain `vX.Y.Z` tags and `ghcr.io/statsguy/shortly`; since 3.5's contract (platform #49) the deploy gate and the admission policy refuse that form, so going back to them is no longer possible (v0.7.2 is the same code as v0.7.1).
 
 | Piece | Why |
 | --- | --- |
@@ -672,8 +672,8 @@ Triggered only by an app's tag, `<app>/vX.Y.Z` (`shortly/v0.7.2`): the repo hold
 Verify a published digest:
 
 ```bash
-gh attestation verify oci://ghcr.io/statsguy/shortly@<digest> --owner statsguy \
-  --signer-workflow statsguy/shortly/.github/workflows/release.yml --source-ref refs/tags/<tag>
+gh attestation verify oci://ghcr.io/easypeasyops/links/shortly@<digest> --owner easypeasyops \
+  --signer-workflow easypeasyops/links/.github/workflows/release.yml --source-ref refs/tags/<tag>
 ```
 
 ### Pinning and freshness
@@ -748,7 +748,7 @@ The attestation bundle is read from the registry (`--bundle-from-oci`), so the c
 
 | Policy | Kind | Rule | In kind |
 | --- | --- | --- | --- |
-| `require-release-provenance` | ImageValidatingPolicy | Keyed by identity, not by app: any `ghcr.io/easypeasyops/<repo>/<app>` image in `shortly-staging` or `shortly-prod` must be a digest with SLSA provenance signed by `easypeasyops/<repo>`'s `release.yml` at a `<app>/vX.Y.Z` tag, logged in Rekor, from a GitHub Actions workflow build. The signer check accepts any of our repos' release workflows; further checks require the repository named in the signed provenance to be the image's own and its tag to be the image's app's, so one repo can't vouch for another's images nor one app for another's, and a new app is covered with no policy edit (platform plan 1.5, 3.5). Until platform plan 3.5 finishes, the old form is accepted too: `ghcr.io/statsguy/<repo>` from `statsguy/<repo>`'s `release.yml` at a `vX.Y.Z` tag (shortly's releases up to v0.7.1). Pods, and the Pod templates of Deployments, StatefulSets, Jobs, CronJobs, ReplicaSets and DaemonSets. A Rollout's template isn't checked itself (Kyverno doesn't know the kind), but the ReplicaSets and Pods it creates are | Deny |
+| `require-release-provenance` | ImageValidatingPolicy | Keyed by identity, not by app: any `ghcr.io/easypeasyops/<repo>/<app>` image in `shortly-staging` or `shortly-prod` must be a digest with SLSA provenance signed by `easypeasyops/<repo>`'s `release.yml` at a `<app>/vX.Y.Z` tag, logged in Rekor, from a GitHub Actions workflow build. The signer check accepts any of our repos' release workflows; further checks require the repository named in the signed provenance to be the image's own and its tag to be the image's app's, so one repo can't vouch for another's images nor one app for another's, and a new app is covered with no policy edit (platform plan 1.5, 3.5). Pods, and the Pod templates of Deployments, StatefulSets, Jobs, CronJobs, ReplicaSets and DaemonSets. A Rollout's template isn't checked itself (Kyverno doesn't know the kind), but the ReplicaSets and Pods it creates are | Deny |
 | `shortly-allowed-images` | ValidatingPolicy | Pods in `shortly-staging` or `shortly-prod` may only run the shortly release (by digest), `postgres:17-alpine` or `grafana/k6` | Audit (PolicyReports) |
 
 The two policies need each other. The provenance policy only looks at shortly's repository, so on its own it can be dodged by running some other image. The allowlist closes that, but it is Audit-only in kind, because local builds (`shortly:dev`, `shortly:e2e`) are how the cluster is developed and tested. In a real cluster it would be Deny.
