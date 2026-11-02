@@ -161,13 +161,13 @@ pass "namespaces $STAGING_NS and $PROD_NS as the platform makes them ($ns_labels
 # like kubeconform don't check label syntax; the API server does. (v0.1.0 shipped a label
 # "sha256:..." that only the API server rejected.) The real release digest, because the
 # admission policy (step 8) refuses any shortly digest without release provenance.
-release_digest=$(sed -nE 's/^\| Current release \| v[0-9.]+, `(sha256:[0-9a-f]{64})`.*/\1/p' "$ROOT/docs/RUNBOOK.md")
-[[ -n "$release_digest" ]] || fail "no 'Current release' digest in docs/RUNBOOK.md"
+release_ref=$(sed -nE 's/^\| Current release \| v[0-9.]+, `([^`@ ]+@sha256:[0-9a-f]{64})`.*/\1/p' "$ROOT/docs/RUNBOOK.md")
+[[ -n "$release_ref" ]] || fail "no 'Current release' image in docs/RUNBOOK.md"
 for env in "${ENVS[@]}"; do
   ns=$(ns_of "$env")
   mapfile -t values < <(values_args "$env")
   helm template shortly "$(chart_ref "$env")" -n "$ns" "${values[@]}" \
-    --set image.repository=ghcr.io/statsguy/shortly --set "image.digest=$release_digest" \
+    --set "image.repository=${release_ref%@*}" --set "image.digest=${release_ref#*@}" \
     | kubectl -n "$ns" apply --dry-run=server -f - >/dev/null \
     || fail "API server rejected the digest-mode render for $ns"
 done

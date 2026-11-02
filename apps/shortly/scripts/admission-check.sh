@@ -12,10 +12,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=scripts/lib/platform.sh
 source "$(dirname "$0")/lib/platform.sh"
 NS="${NS:-$STAGING_NS}"
-REPO=ghcr.io/statsguy/shortly
+REPO=ghcr.io/statsguy/shortly # the old releases' repository: its v0.2.0 child is a real, unattested image
 # The release the runbook documents (also checked by tests/test_deploy_gate.py).
-RELEASE=$(sed -nE 's/^\| Current release \| v[0-9.]+, `(sha256:[0-9a-f]{64})`.*/\1/p' "$ROOT/docs/RUNBOOK.md")
-[[ -n "$RELEASE" ]] || { echo "FAIL: no 'Current release' digest in RUNBOOK" >&2; exit 1; }
+RELEASE=$(sed -nE 's/^\| Current release \| v[0-9.]+, `([^`@ ]+@sha256:[0-9a-f]{64})`.*/\1/p' "$ROOT/docs/RUNBOOK.md")
+[[ -n "$RELEASE" ]] || { echo "FAIL: no 'Current release' image in RUNBOOK" >&2; exit 1; }
 # v0.2.0's linux/amd64 manifest: a real image, but the attestation names the index only.
 UNATTESTED=sha256:7025c409513225aeb5e473d2e08951cfd8cbbe9d1f574a0ac042ad8e3aa0d4ec
 MISSING="sha256:$(printf '0%.0s' {1..64})"
@@ -81,7 +81,7 @@ $out"
 kubectl get imagevalidatingpolicy require-release-provenance >/dev/null 2>&1 \
   || fail "provenance policy not installed (POLICIES=0? see the platform's scripts/cluster.sh)"
 
-admitted pod "$REPO@$RELEASE" "the documented release"
+admitted pod "$RELEASE" "the documented release"
 refused pod "$REPO@$UNATTESTED" "a real image with no attestation of its own"
 refused pod "$REPO:0.2.0" "a tag: mutable, so never verified"
 refused pod "$REPO@$MISSING" "a digest that doesn't exist"

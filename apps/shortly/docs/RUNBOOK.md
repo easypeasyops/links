@@ -17,8 +17,8 @@ Operational procedures for shortly. shortly lives in `apps/shortly/` of the link
 | Item | Value |
 | --- | --- |
 | Repo | [github.com/statsguy/shortly](https://github.com/statsguy/shortly) |
-| Image | `ghcr.io/statsguy/shortly` — deploy by digest, never by tag |
-| Current release | v0.7.1, `sha256:f8e4982b3a4197e0d68b83ef7bd06f0213bd54afffd65f4a088c21fd0852e046` (previous: v0.7.0, `sha256:9df4c29bd25d9f69b0ce2f7776a0affeab4d2bca18c859668927e398f4a21670`) |
+| Image | `ghcr.io/easypeasyops/links/shortly` since v0.7.2 (released per app from links: platform plan 3.5); `ghcr.io/statsguy/shortly` up to v0.7.1. Each environment's file names its release's repository and digest. Deploy by digest, never by tag |
+| Current release | v0.7.2, `ghcr.io/easypeasyops/links/shortly@sha256:656822ee670d160ebde14c40308a411c9b3d1f1aa18d0935fb6cc580ddafa950` (previous: v0.7.1, `ghcr.io/statsguy/shortly@sha256:f8e4982b3a4197e0d68b83ef7bd06f0213bd54afffd65f4a088c21fd0852e046`) |
 | Environments | kind cluster `shortly`; staging in namespace `shortly-staging` (Deployment, 1 replica), prod in `shortly-prod` (Argo Rollout, canary releases, HPA 2–4 replicas). Scripts take the environment (`staging`, `prod`); `scripts/lib/namespaces.sh` maps it to the namespace |
 | Capacity | about 250 req/s per pod within SLO; HPA targets about 170 (70% of a 500m CPU request) |
 | Helm release | `shortly` in each namespace; the platform's service chart (digest in its `apps/shortly/envs/<env>.yaml`), values in `deploy/service/` and `deploy/envs/` |
@@ -131,7 +131,7 @@ Never move or re-use a published tag; cut a new patch version instead.
 
 ## Deploy
 
-Staging and prod are deployed by **Argo CD from git** (docs/DESIGN.md, GitOps with Argo CD). What runs in an environment is the `image.digest` in `deploy/envs/<env>.yaml` on `main`; a merged PR that changes it is the deploy, and Argo CD applies it within a minute. Promote the verified digest to staging, check it, then promote the identical digest to prod. Never rebuild for prod.
+Staging and prod are deployed by **Argo CD from git** (docs/DESIGN.md, GitOps with Argo CD). What runs in an environment is the `image.repository` and `image.digest` in `deploy/envs/<env>.yaml` on `main` (`promote.sh` writes both); a merged PR that changes it is the deploy, and Argo CD applies it within a minute. Promote the verified digest to staging, check it, then promote the identical digest to prod. Never rebuild for prod.
 
 1. Promote to staging. `promote.sh` verifies the digest's provenance, writes it into the env file with its version, and with `--pr` opens the PR:
 

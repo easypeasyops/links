@@ -14,7 +14,9 @@ app:
   partOf: shortly
 
 image:
-  repository: ghcr.io/statsguy/shortly
+  # Each environment names its release's repository with its digest (deploy/envs/), since
+  # releases moved from ghcr.io/statsguy/shortly to ghcr.io/easypeasyops/links/shortly (3.5).
+  repository: ghcr.io/easypeasyops/links/shortly
 
 # Non-secret config. Becomes SHORTLY_* environment variables.
 config:
