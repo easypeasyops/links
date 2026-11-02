@@ -247,16 +247,21 @@ create_as() {
 limits=$(helm -n "$PROD_NS" get values shortly --all -o json \
   | python3 -c 'import json,sys; r=json.load(sys.stdin)["config"]["rateLimit"]; print(r["burst"], r["createsPerMinute"])')
 read -r burst per_minute <<<"$limits"
-# GCRA refills while we send (one token per 60/per_minute s), and each kubectl exec takes
-# ~0.1 s, so time the run: allowed must be at least the burst, at most burst + refill.
+# GCRA refills while we send (one token per 60/per_minute s), so time the run: allowed must
+# be at least the burst, at most burst + refill. The requests go out in one loop inside the
+# client pod, not a kubectl exec each: at ~0.2 s an exec on a busy node, 25 of them took 5 s,
+# which refilled all 5 extra tokens, so nothing was refused (links #127's first run).
 client="203.0.113.$((RANDOM % 250 + 1))"
-created=0 refused=0 t0=$(date +%s.%N)
-for _ in $(seq 1 $((burst + 5))); do
-  case "$(create_as "$client")" in
-    201) created=$((created + 1)) ;;
-    429) refused=$((refused + 1)) ;;
-  esac
-done
+t0=$(date +%s.%N)
+# shellcheck disable=SC2016 # expanded by the pod's shell
+codes=$(kubectl -n "$PROD_NS" exec client -- sh -c '
+  for _ in $(seq 1 "$1"); do
+    wget -S -O /dev/null -T 3 --header "content-type: application/json" \
+      --header "X-Forwarded-For: $2" --post-data "{\"url\":\"https://example.com/rate\"}" \
+      http://shortly/links 2>&1 | grep -m1 -oE "HTTP/1\.[01] [0-9]{3}" | cut -d" " -f2
+  done' sh "$((burst + 5))" "$client")
+created=$(grep -cx 201 <<<"$codes" || true)
+refused=$(grep -cx 429 <<<"$codes" || true)
 max=$(python3 -c "import math,sys; print($burst + math.ceil(($(date +%s.%N) - $t0) * $per_minute / 60))")
 ((created >= burst)) || fail "rate limit: only $created creates succeeded, the burst is $burst"
 ((created <= max)) || fail "rate limit: $created creates succeeded, at most $max allowed (burst + refill)"
