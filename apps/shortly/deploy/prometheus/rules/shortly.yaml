@@ -15,7 +15,7 @@ groups:
         annotations:
           summary: No shortly target is being scraped
           description: Prometheus has no healthy shortly target, so the SLO alerts are blind. Treat it as a full outage until proven otherwise.
-          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#shortlydown
+          runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#shortlydown
 
       # Needs kube-state-metrics. One environment with zero available pods is down, even
       # though another one is still being scraped (ShortlyDown only catches "nothing anywhere").
@@ -29,7 +29,7 @@ groups:
         annotations:
           summary: shortly has no available pods
           description: The Deployment or Rollout has zero ready replicas in this namespace, so every request to it fails.
-          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#shortlynoavailablepods
+          runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#shortlynoavailablepods
 
       # Pods that fail readiness are removed from the Service. Users then get errors at the
       # load balancer, which the app never sees, so the availability SLI stays green.
@@ -43,7 +43,7 @@ groups:
         annotations:
           summary: Most readiness checks are failing
           description: Over half of /readyz checks return 503 (usually the database is unreachable). Pods are out of rotation; user requests fail before they reach the app.
-          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#pods-not-ready-readyz-returns-503
+          runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#pods-not-ready-readyz-returns-503
 
       # 503 + Retry-After because no DB connection freed up in time. Usually a slow database.
       # It also burns the availability budget; this alert names the cause.
@@ -58,7 +58,7 @@ groups:
         annotations:
           summary: Requests are being shed with 503 ({{ $labels.reason }})
           description: Requests have been shed for 5 minutes, reason {{ $labels.reason }}. concurrency means pods at their in-flight limit (traffic above capacity); pool or db_timeout mean a slow database. Check the database before adding replicas.
-          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
+          runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
 
       # Needs kube-state-metrics in the cluster (not part of the local stack). At max, the
       # next traffic increase becomes latency: raise maxReplicas or add capacity.
@@ -72,7 +72,7 @@ groups:
         annotations:
           summary: The HPA has been at maxReplicas for 15 minutes
           description: Autoscaling has no headroom left. See Capacity in the design doc for the sizing rule and the DB connection budget.
-          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
+          runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
 
       # 429s are the limiter working, so they never burn the availability SLO. A large,
       # sustained share is still worth a look: one client hammering creates (abuse, or a
@@ -88,7 +88,7 @@ groups:
         annotations:
           summary: Over 10% of link creations are rate limited
           description: For 30 minutes, more than 1 in 10 POST /links requests got 429. Find out whether it is abuse or a limit that is too tight for legitimate clients.
-          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#rate-limiting-429-on-post-links
+          runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#rate-limiting-429-on-post-links
 
       # Fault injection is for drills, which last minutes. Still on after 15 minutes means a
       # drill was abandoned or the setting leaked into a release: users are getting 500s on
@@ -101,7 +101,7 @@ groups:
         annotations:
           summary: Fault injection is failing requests on purpose
           description: SHORTLY_FAULT_ERROR_RATIO is set in {{ $labels.namespace }} and has been failing requests for 15 minutes. Remove config.faultErrorRatio and redeploy.
-          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#fault-injection-left-on
+          runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#fault-injection-left-on
 
       # Needs kube-state-metrics. A cron job that stops running fails silently: nothing
       # breaks for weeks, then the table is huge. Fires when the last success is over
@@ -120,7 +120,7 @@ groups:
         annotations:
           summary: Expired-link cleanup hasn't succeeded for over 3 hours
           description: The shortly-cleanup CronJob has missed at least 3 runs, or has never succeeded. Expired links pile up until it runs again.
-          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#cleanup-job-not-running
+          runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#cleanup-job-not-running
 
       # The databases' backups (CloudNativePG, platform plan 4.3), from each instance's
       # exporter (the service chart's PodMonitor, chart 1.1.0). Backups that silently stopped
@@ -135,7 +135,7 @@ groups:
         annotations:
           summary: Postgres base backups haven't succeeded for over 2 hours
           description: The newest base backup of the namespace's database is over 2 hours old, or there is none. A restore has to replay WAL from an older base backup, or has nothing to start from.
-          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backups-not-running
+          runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#backups-not-running
 
       # Between base backups, every change is in the WAL archive: when archiving fails, the
       # point a restore can reach stops moving, and unarchived WAL fills the database's
@@ -149,4 +149,4 @@ groups:
         annotations:
           summary: WAL archiving to the backup bucket is failing
           description: The database's last attempt to archive WAL failed and none has succeeded since. A restore can't reach past the last archived segment, and WAL piles up on the database's volume until it fills.
-          runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backups-not-running
+          runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#backups-not-running

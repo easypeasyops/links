@@ -1,5 +1,9 @@
 # Working on shortly
 
+This repo holds its apps under `apps/<app>/` (platform plan 3.5); shortly is `apps/shortly/`.
+Paths below are relative to `apps/shortly/`, except `.github/`, `platform.lock` and this file,
+which are at the repo root. Run shortly's commands from `apps/shortly/`.
+
 ## Docs are part of the change
 
 `docs/DESIGN.md` (how and why the system works) and `docs/RUNBOOK.md` (how to operate it)

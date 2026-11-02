@@ -2,7 +2,7 @@
 # End-to-end on Kubernetes, including the rollback drill. Runs in CI on every PR and the
 # same way on your laptop:
 #
-#   ../platform/scripts/cluster.sh up        # the platform repo, beside this one
+#   ../../../platform/scripts/cluster.sh up  # the platform repo, beside this one
 #   docker build -t shortly:e2e .
 #   IMAGE=shortly:e2e scripts/k8s-e2e.sh
 #

@@ -56,10 +56,15 @@ def test_prod_runs_only_what_staging_ran() -> None:
     merge = len(_git("rev-list", "--parents", "-n", "1", "HEAD").split()) == 3
     base = "HEAD^1" if merge else "HEAD"
     prod = _env_digest("prod")
-    base_prod = DIGEST_LINE.search(_git("show", f"{base}:deploy/envs/prod.yaml"))
+    # The file at the base: here, or at the repo root before shortly moved to apps/shortly/.
+    try:
+        base_text = _git("show", f"{base}:./deploy/envs/prod.yaml")
+    except subprocess.CalledProcessError:
+        base_text = _git("show", f"{base}:deploy/envs/prod.yaml")
+    base_prod = DIGEST_LINE.search(base_text)
     if base_prod and base_prod[1] == prod:
         return  # prod unchanged by this change
-    history = _git("log", "-p", "--format=", base, "--", "deploy/envs/staging.yaml")
+    history = _git("log", "-p", "--follow", "--format=", base, "--", "deploy/envs/staging.yaml")
     if 'digest: "sha256:' not in history:
         return  # the change that introduced digests in env files (GitOps): nothing to compare
     assert f'digest: "{prod}"' in history, (

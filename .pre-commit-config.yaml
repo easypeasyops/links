@@ -9,6 +9,6 @@ repos:
     hooks:
       - id: mypy
         name: mypy
-        entry: uv run mypy src tests
+        entry: bash -c 'cd apps/shortly && uv run mypy src tests'
         language: system
         pass_filenames: false

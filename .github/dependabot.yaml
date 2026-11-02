@@ -3,7 +3,7 @@
 version: 2
 updates:
   - package-ecosystem: uv
-    directory: /
+    directory: /apps/shortly
     schedule:
       interval: weekly
     groups:
@@ -20,6 +20,6 @@ updates:
       - dependency-name: easypeasyops/platform
 
   - package-ecosystem: docker # bumps the base image digest in the Dockerfile
-    directory: /
+    directory: /apps/shortly
     schedule:
       interval: weekly

@@ -29,7 +29,7 @@ current=$(sed -nE 's/^  digest: "(sha256:[0-9a-f]{64})".*/\1/p' "$FILE")
 [[ "$current" != "$DIGEST" ]] || { echo "$ENV already runs $DIGEST"; exit 0; }
 
 # The platform checkout beside this one, as scripts/lib/platform.sh finds it. VERIFY: tests only.
-verified=$("${VERIFY:-${PLATFORM_DIR:-$ROOT/../platform}/scripts/verify-image.sh}" "$REPO@$DIGEST")
+verified=$("${VERIFY:-${PLATFORM_DIR:-$ROOT/../../../platform}/scripts/verify-image.sh}" "$REPO@$DIGEST")
 echo "$verified"
 version=$(sed -nE 's|.*refs/tags/(v[0-9][^ ]*).*|\1|p' <<<"$verified" | head -n 1)
 [[ -n "$version" ]] || { echo "could not read the release tag from verify-image.sh" >&2; exit 1; }
@@ -39,7 +39,7 @@ if [[ "$ENV" == prod ]]; then
   # Into a variable, not `git log | grep -q`: with pipefail, grep -q quitting at the first
   # match kills git log with SIGPIPE, and the pipeline fails exactly when staging DID run
   # the digest (seen promoting v0.7.1 once the history outgrew the pipe buffer).
-  staging_history=$(git log -p origin/main -- deploy/envs/staging.yaml)
+  staging_history=$(git log -p --follow origin/main -- deploy/envs/staging.yaml) # --follow: across the move to apps/shortly/
   if ! grep -q "^[+ ]  digest: \"$DIGEST\"" <<<"$staging_history"; then
     echo "REFUSED: staging has not run $DIGEST ($version) on main. Promote it to staging first." >&2
     exit 1

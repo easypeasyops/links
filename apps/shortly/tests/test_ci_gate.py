@@ -10,7 +10,7 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
-WORKFLOW = ROOT / ".github/workflows/ci.yml"
+WORKFLOW = ROOT.parents[1] / ".github/workflows/ci.yml"  # the repo root: shortly is apps/shortly/
 # Jobs that only report others' results.
 REPORTERS = {"gate"}
 

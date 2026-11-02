@@ -34,7 +34,7 @@ jobs:
       - name: Tag must match pyproject version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("apps/shortly/pyproject.toml","rb"))["project"]["version"])')
           if [[ "$tag" != "$version" ]]; then
             echo "::error::tag v$tag does not match pyproject.toml version $version"
             exit 1
@@ -48,7 +48,7 @@ jobs:
       - name: Build for scanning
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: .
+          context: apps/shortly
           load: true
           tags: shortly:scan
           cache-from: type=gha
@@ -88,7 +88,7 @@ jobs:
         id: push
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
-          context: .
+          context: apps/shortly
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}

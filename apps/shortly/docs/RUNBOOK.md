@@ -8,9 +8,9 @@
 > (platform plan 3.4). Paths below under `deploy/argocd/platform`, `deploy/kind/`,
 > `deploy/platform/`, `deploy/policies/`, `scripts/cluster.sh`, `scripts/lib/namespaces.sh` and
 > `scripts/verify-image.sh` (the deploy gate) are in that repo, at the commit `platform.lock` names; so are the tests that check them.
-> Run `cluster.sh` from a platform checkout beside this one (`../platform/scripts/cluster.sh`).
+> Run `cluster.sh` from a platform checkout beside this one (`../../../platform/scripts/cluster.sh`).
 
-Operational procedures for shortly. Commands assume you are in the repo root with `kubectl` pointed at `kind-shortly`. Design rationale lives in [DESIGN.md](DESIGN.md).
+Operational procedures for shortly. shortly lives in `apps/shortly/` of the links repo (platform plan 3.5): commands and paths here assume you are in `apps/shortly/`, with `kubectl` pointed at `kind-shortly` and the platform repo cloned beside links (`../../../platform`). Design rationale lives in [DESIGN.md](DESIGN.md).
 
 ## Quick reference
 
@@ -111,7 +111,7 @@ A release is a pushed `vX.Y.Z` tag on a `main` commit whose `pyproject.toml` ver
 
    ```bash
    D=sha256:<digest from the release notes>
-   ../platform/scripts/verify-image.sh ghcr.io/statsguy/shortly@$D
+   ../../../platform/scripts/verify-image.sh ghcr.io/statsguy/shortly@$D
    # verified: built by …/release.yml@refs/tags/v0.3.0, from … refs/tags/v0.3.0 @ <commit>
    ```
 
@@ -202,13 +202,13 @@ git revert <its merge commit> && git push   # via a PR, as for any change to mai
 
 Steps and thresholds are chart values (`canary:` in `values.yaml`). An aborted canary leaves the Application **Degraded** until the revert is merged; that's expected (Argo CD and git agree, the Rollout refused the version).
 
-**First upgrade onto chart 0.10.0** (Argo CD takes over): `../platform/scripts/cluster.sh up` installs Argo CD and applies `deploy/argocd/`. Each Application adopts the resources `deploy.sh` created (same names) and syncs `main`; nothing restarts unless `main` differs from what runs. Then delete Helm's release records, so that a stray `helm` command can't act on resources Argo CD owns: `kubectl -n shortly-staging delete secret -l owner=helm,name=shortly` and the same for `prod`. From then on, `deploy.sh` refuses both environments.
+**First upgrade onto chart 0.10.0** (Argo CD takes over): `../../../platform/scripts/cluster.sh up` installs Argo CD and applies `deploy/argocd/`. Each Application adopts the resources `deploy.sh` created (same names) and syncs `main`; nothing restarts unless `main` differs from what runs. Then delete Helm's release records, so that a stray `helm` command can't act on resources Argo CD owns: `kubectl -n shortly-staging delete secret -l owner=helm,name=shortly` and the same for `prod`. From then on, `deploy.sh` refuses both environments.
 
 **First upgrade onto chart 0.9.0** (prod becomes a Rollout): `deploy.sh` keeps the old Deployment serving (it annotates it `helm.sh/resource-policy: keep`), waits for the Rollout to be Healthy, then deletes the Deployment, and prints `migrated`. Meanwhile it shows `first version, no canary`: the first Rollout version starts at 100% (there is no stable version yet), so this one deploy has no canary. If it fails, the rollback brings the Deployment back under Helm; check `kubectl -n shortly-prod get deploy,rollout`.
 
 **First upgrade onto chart 0.2.0** (the HPA arrives): the chart stops setting `replicas`, so Kubernetes may briefly set an existing prod Deployment to 1 replica until the HPA restores its minimum of 2, typically within 15 s. Do this upgrade at a quiet time, then check `kubectl -n shortly-prod get hpa,deploy shortly`. Fresh installs are not affected.
 
-**`deploy.sh` (CI's e2e and break glass only).** It refuses an environment that Argo CD manages (`REFUSED: … deployed by Argo CD from git`). For a digest, it first verifies the image's provenance (`../platform/scripts/verify-image.sh`) and stops if that fails; a tag is accepted only on a `kind-*` context. Then it runs `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the chart and values Argo CD uses for that environment: the platform's service chart at the digest its `apps/shortly/envs/<env>.yaml` pins, and the values files listed there (`deploy/service/values.yaml`, `deploy/service/slo-rules.values.yaml`, then the environment's file). It reads both from the platform checkout (`../platform` or `PLATFORM_DIR`), so it needs network access to `ghcr.io` for the chart (prod: `--wait=legacy`, then it follows the canary). Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
+**`deploy.sh` (CI's e2e and break glass only).** It refuses an environment that Argo CD manages (`REFUSED: … deployed by Argo CD from git`). For a digest, it first verifies the image's provenance (`../../../platform/scripts/verify-image.sh`) and stops if that fails; a tag is accepted only on a `kind-*` context. Then it runs `helm upgrade --install --rollback-on-failure --wait --timeout 3m` with the chart and values Argo CD uses for that environment: the platform's service chart at the digest its `apps/shortly/envs/<env>.yaml` pins, and the values files listed there (`deploy/service/values.yaml`, `deploy/service/slo-rules.values.yaml`, then the environment's file). It reads both from the platform checkout (`../../../platform` or `PLATFORM_DIR`), so it needs network access to `ghcr.io` for the chart (prod: `--wait=legacy`, then it follows the canary). Override the timeout with `DEPLOY_TIMEOUT=5m`. Extra arguments go to Helm, for example `--set config.logLevel=DEBUG`.
 
 **If `deploy.sh` says REFUSED**, nothing was deployed:
 
@@ -551,7 +551,7 @@ kubectl -n argocd logs deploy/argocd-repo-server --tail=50
 
 ### Handing shortly to the platform's ApplicationSet
 
-Once per cluster set up before platform plan 3.3, when `deploy/argocd/applications.yaml` still made `shortly-staging` and `shortly-prod`. `../platform/scripts/cluster.sh up` does it (`take_over_apps`), and you run it as for any other change:
+Once per cluster set up before platform plan 3.3, when `deploy/argocd/applications.yaml` still made `shortly-staging` and `shortly-prod`. `../../../platform/scripts/cluster.sh up` does it (`take_over_apps`), and you run it as for any other change:
 
 1. It upgrades Argo CD with the ApplicationSet controller on (`deploy/kind/argocd-values.yaml`).
 2. For each `shortly-<env>` the ApplicationSet doesn't own, it **deletes the Application**: it has no finalizer, so its resources keep running, unmanaged, for a few seconds.
@@ -607,7 +607,7 @@ kubectl get imagevalidatingpolicy,validatingpolicy     # READY must be true
 
 | Message | Cause | Fix |
 | --- | --- | --- |
-| `our images must be a release digest with provenance…` | An unreleased or unattested image: a CI build, a fork, or a per-platform child digest instead of the release's index digest | Deploy the digest from the GitHub Release notes. `../platform/scripts/verify-image.sh <ref>` tells you why it fails |
+| `our images must be a release digest with provenance…` | An unreleased or unattested image: a CI build, a fork, or a per-platform child digest instead of the release's index digest | Deploy the digest from the GitHub Release notes. `../../../platform/scripts/verify-image.sh <ref>` tells you why it fails |
 | `image ghcr.io/statsguy/shortly:… does not have a digest` | A tag was used | Use `@sha256:…`; tags are never verified |
 | `provenance names a different repository than the image's` | The image was built and signed by another of our repos' release workflows (`ghcr.io/easypeasyops/<repo>/<app>` must come from `easypeasyops/<repo>`) | Treat as suspicious: an image pushed under another repo's name. Find who pushed it |
 | `an app image must be ghcr.io/easypeasyops/<repo>/<app>, built from a <app>/vX.Y.Z tag` | An app image built from another app's tag, or a name without the app part | Treat as suspicious unless it's a mistyped name: one app's release published as another |
@@ -623,10 +623,10 @@ kubectl delete imagevalidatingpolicy require-release-provenance
 kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations | grep -i kyverno
 kubectl delete validatingwebhookconfiguration <name>      # each kyverno one listed above
 # 3. Restore as soon as possible (reinstalls Kyverno if needed and waits for the policies):
-../platform/scripts/cluster.sh up
+../../../platform/scripts/cluster.sh up
 ```
 
-Afterwards, check that everything running is a release: `../platform/scripts/verify-image.sh` on each image from `kubectl -n shortly-prod get pods -o jsonpath='{..image}'`.
+Afterwards, check that everything running is a release: `../../../platform/scripts/verify-image.sh` on each image from `kubectl -n shortly-prod get pods -o jsonpath='{..image}'`.
 
 **Allowlist reports** (Audit in kind, so nothing is refused):
 
@@ -707,7 +707,7 @@ kubectl -n shortly-prod logs job/<the latest one> --tail=30        # one JSON li
 | Jobs fail with `cleanup failed` and a connection error | Postgres unreachable, or the network policy doesn't admit the Job (labels changed) | Database first (Pods not Ready playbook); else compare the pod's labels with the `postgres` NetworkPolicy |
 | Jobs fail with a timeout (`DeadlineExceeded`) | A huge backlog, or a slow database: 900 s wasn't enough | Check the DB; the next runs continue where it stopped. To catch up faster, run it by hand (below) |
 | No Jobs at all; `SUSPEND` is `True` | Someone suspended it | `kubectl -n shortly-prod patch cronjob shortly-cleanup -p '{"spec":{"suspend":false}}'` |
-| No failed Jobs; `LAST SCHEDULE` hours old; on the laptop | The Mac slept: the CronJob controller's timers stall while Docker's VM is paused | `../platform/scripts/cluster.sh wake` (below) |
+| No failed Jobs; `LAST SCHEDULE` hours old; on the laptop | The Mac slept: the CronJob controller's timers stall while Docker's VM is paused | `../../../platform/scripts/cluster.sh wake` (below) |
 | No Jobs, not suspended | Created by Kyverno? Check events: an image without release provenance is refused | `kubectl -n shortly-prod get events --sort-by=.lastTimestamp \| grep -i cleanup`; see Admission policy refuses pods |
 | Jobs succeed but the alert fires | kube-state-metrics down or not scraping | `kubectl -n monitoring get pods`; the alert can't see successes without it |
 
@@ -793,7 +793,7 @@ Every CI step can be reproduced locally with the same command; reproduce before 
 
 The kind e2e runs as two jobs in parallel, `kind e2e (platform)` and `kind e2e (delivery)`; the one required check, `ci`, fails if either does (or any other job): its log lists every job's result, so open the one it names. Platform covers steps 3b, 3c and 6–12 (rate limit, front door, HPA, monitoring, admission, network policies, cleanup, backups, GitOps); delivery covers 4, 5 and 5b (rollbacks and canaries). To rerun just one half locally: `E2E_SUITE=delivery IMAGE=shortly:e2e scripts/k8s-e2e.sh`.
 
-Both jobs install the platform from `easypeasyops/platform` at the commit in `platform.lock` (step "Which platform"). A failure that appears right after a PR moved the lock is the new platform's: compare with the PR before it, and fix in the platform repo or move the lock back. Locally the scripts use the platform clone beside this repo (`../platform`, or `PLATFORM_DIR`) and print a note when it isn't at the locked commit.
+Both jobs install the platform from `easypeasyops/platform` at the commit in `platform.lock` (step "Which platform"). A failure that appears right after a PR moved the lock is the new platform's: compare with the PR before it, and fix in the platform repo or move the lock back. Locally the scripts use the platform clone beside this repo (`../../../platform`, or `PLATFORM_DIR`) and print a note when it isn't at the locked commit.
 
 A slow or stuck platform install: the kind job's progress lines name what holds each Application back (`[Degraded Deployment/…: message]`), and the step "Platform start-up report" lists image pulls and the slowest pods to become Ready.
 
@@ -822,7 +822,7 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 | k8s → monitoring checks | `scrapes 0 healthy prod pods` (ServiceMonitor or labels), `rule groups loaded` (PrometheusRule missing: is `monitoring.clusterWide` on for prod?), `rules not evaluating cleanly` (a PromQL error), or `a dashboard query is invalid` | `ALERT_DRILL=0 scripts/monitoring-check.sh` against kind |
 | k8s → alert drill | `alert drill (scripts/alert-drill.sh)` with its output indented above it: the staging alert never reached Alertmanager, or went to the wrong receiver. It ran in the background from step 3a, so it's reported at step 7 | `scripts/alert-drill.sh` against kind; check Prometheus → Alerts, then Alertmanager → Status → Config |
 | test → `test_every_dashboard_query_matches_something_the_app_exports` | A dashboard query selects a metric or label the app doesn't export | Fix the query in `monitoring.dashboards` in `deploy/service/values.yaml` |
-| test → `test_documented_release_verifies` | The Quick reference digest is wrong, or the registry or Sigstore is unreachable from CI | `../platform/scripts/verify-image.sh <that digest>`; fix the digest in the Quick reference, or re-run if it was a network blip |
+| test → `test_documented_release_verifies` | The Quick reference digest is wrong, or the registry or Sigstore is unreachable from CI | `../../../platform/scripts/verify-image.sh <that digest>`; fix the digest in the Quick reference, or re-run if it was a network blip |
 | test → `test_ratelimit.py` | The limiter's semantics changed (burst, sustained rate, retry time), or the in-memory and Postgres limiters disagree | `uv run pytest tests/test_ratelimit.py -v`; the contract tests run both limiters on the same fake clock |
 | test → other `test_deploy_gate.py` tests | `deploy.sh` stopped calling the platform's gate, or deployed what it refused | Read the failing case: each one names the image that must be refused |
 | k8s → Lint and schema-validate | A chart manifest fails its schema | Run the step's `kubeconform` command locally; the error names the field |
@@ -833,7 +833,7 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 | k8s → admission checks | `was ADMITTED, expected refused` (the policy isn't enforcing), `was refused, expected admitted` (the release no longer verifies in-cluster: often no network to Sigstore), `not by the provenance policy` (Pod Security or a manifest error), or no allowlist reports | `scripts/admission-check.sh` against kind; `kubectl -n kyverno logs deploy/kyverno-admission-controller` |
 | k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready); `load too light` (CPU never got 10% past the target: raise the drill's `RATE`); or no scale-up despite high CPU (a real HPA problem) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
 | k8s → rate limit | `only N creates succeeded, the burst is 20` (limit lower than the chart says, or DB errors), `at most N allowed` or `none refused` (limit missing, or counted per pod instead of shared; the check allows for the tokens that refill while it runs), `another client was refused` (the limit isn't per client: check `forwardedAllowIps`) | `kubectl -n shortly-prod logs -l app.kubernetes.io/name=shortly \| grep 'rate limited'`; the step's `wget` command from the `client` pod |
-| k8s → drill | Deploy, promotion or rollback broke | `../platform/scripts/cluster.sh up && docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh`; diagnostics print on failure (a canary aborted by analysis: each metric's measurements, the synthetic traffic's log, and Prometheus's `up` and request rate per prod pod) |
+| k8s → drill | Deploy, promotion or rollback broke | `../../../platform/scripts/cluster.sh up && docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh`; diagnostics print on failure (a canary aborted by analysis: each metric's measurements, the synthetic traffic's log, and Prometheus's `up` and request rate per prod pod) |
 
 The platform's own checks (admission policies and their Kyverno CLI verdicts, Alertmanager routing, the platform chart, the front door) run in easypeasyops/platform's CI, with its own `ci` gate; its README says what each job checks.
 
@@ -841,29 +841,29 @@ A test that fails with warnings as errors (`filterwarnings = error`) usually mea
 
 ## Local cluster operations
 
-The local environments are disposable: `../platform/scripts/cluster.sh up` rebuilds them from nothing in a few minutes. The scripts take an environment (`staging`, `prod`) and look up its namespace in `scripts/lib/namespaces.sh`; a namespace argument (`NS=`, `SOURCE=`) is the namespace itself.
+The local environments are disposable: `../../../platform/scripts/cluster.sh up` rebuilds them from nothing in a few minutes. The scripts take an environment (`staging`, `prod`) and look up its namespace in `scripts/lib/namespaces.sh`; a namespace argument (`NS=`, `SOURCE=`) is the namespace itself.
 
 **Prerequisites:** Docker Desktop running, plus `brew install kind kubectl helm` (Helm 4 or newer).
 
 | Task | Command |
 | --- | --- |
-| Create (idempotent) | `../platform/scripts/cluster.sh up` |
-| Tear down everything | `../platform/scripts/cluster.sh down` |
+| Create (idempotent) | `../../../platform/scripts/cluster.sh up` |
+| Tear down everything | `../../../platform/scripts/cluster.sh down` |
 | Reset one environment's data | `kubectl -n shortly-<env> delete cluster shortly-db` (its volumes go with it): Argo CD recreates it empty, and the migration recreates the schema. Its backups stay in the bucket, and a new Cluster refuses to archive into the same folder until they're deleted |
 | Deploy a local build (kind only; tags are refused elsewhere) | `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev` |
-| Check an image's provenance | `../platform/scripts/verify-image.sh ghcr.io/statsguy/shortly@sha256:…` |
+| Check an image's provenance | `../../../platform/scripts/verify-image.sh ghcr.io/statsguy/shortly@sha256:…` |
 | Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step; `E2E_SUITE=platform` or `delivery` runs one CI half) |
 | Autoscaling drill only | `scripts/hpa-drill.sh` (stops once the HPA adds a ready pod; `RATE=1500 DURATION=240s FULL=1` for a longer push to the end, with k6's summary) |
 | Watch autoscaling | `kubectl -n shortly-prod get hpa shortly -w` |
 | Platform state | `kubectl -n argocd get applications -l app.kubernetes.io/part-of=platform`, or the Argo CD UI |
-| Try a platform change before merging it | Push the branch, then `PLATFORM_REVISION=$(git rev-parse HEAD) ../platform/scripts/cluster.sh up`; `../platform/scripts/cluster.sh up` (back to `main`) when done |
-| Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 ../platform/scripts/cluster.sh up` (on a fresh cluster: switching it off later removes the Application but leaves its resources running, by design) |
-| Create without Kyverno and the admission policies | `POLICIES=0 ../platform/scripts/cluster.sh up` |
-| Create without the backup bucket and backup CronJobs | `BACKUPS=0 ../platform/scripts/cluster.sh up` |
-| After the laptop slept (backup or cleanup alerts, gaps in Grafana) | `../platform/scripts/cluster.sh wake`. To stop it happening while plugged in: `caffeinate -s` in a spare terminal, or System Settings → Battery → prevent sleep on power adapter |
-| Create without the front door (ports 8080 and 8090 left free) | `FRONT_DOOR=0 ../platform/scripts/cluster.sh up`; then port-forward by hand, e.g. `kubectl -n monitoring port-forward svc/grafana 3000:80` |
+| Try a platform change before merging it | Push the branch, then `PLATFORM_REVISION=$(git rev-parse HEAD) ../../../platform/scripts/cluster.sh up`; `../../../platform/scripts/cluster.sh up` (back to `main`) when done |
+| Create without the monitoring stack (saves about 1 GB of RAM) | `MONITORING=0 ../../../platform/scripts/cluster.sh up` (on a fresh cluster: switching it off later removes the Application but leaves its resources running, by design) |
+| Create without Kyverno and the admission policies | `POLICIES=0 ../../../platform/scripts/cluster.sh up` |
+| Create without the backup bucket and backup CronJobs | `BACKUPS=0 ../../../platform/scripts/cluster.sh up` |
+| After the laptop slept (backup or cleanup alerts, gaps in Grafana) | `../../../platform/scripts/cluster.sh wake`. To stop it happening while plugged in: `caffeinate -s` in a spare terminal, or System Settings → Battery → prevent sleep on power adapter |
+| Create without the front door (ports 8080 and 8090 left free) | `FRONT_DOOR=0 ../../../platform/scripts/cluster.sh up`; then port-forward by hand, e.g. `kubectl -n monitoring port-forward svc/grafana 3000:80` |
 | Open the app through the Gateway | http://sho.rt.localhost:8080 (prod) or http://staging.sho.rt.localhost:8080, always on (the front door, below) |
-| Front door down? (a UI or the app doesn't answer on 8080 / 8090) | `docker ps --filter name=shortly-front-door` (two, `Up`); `../platform/scripts/cluster.sh up` recreates them. A port taken by an old `kubectl port-forward` is the usual cause: it says so; stop that one |
+| Front door down? (a UI or the app doesn't answer on 8080 / 8090) | `docker ps --filter name=shortly-front-door` (two, `Up`); `../../../platform/scripts/cluster.sh up` recreates them. A port taken by an old `kubectl port-forward` is the usual cause: it says so; stop that one |
 | Is the Gateway routing? | `kubectl -n gateway get gateway shortly` (`PROGRAMMED True`); `kubectl get httproute -A` |
 | Admission checks only | `scripts/admission-check.sh` (server-side dry runs; creates nothing) |
 | Admission policies and their state | `kubectl get imagevalidatingpolicy,validatingpolicy`; reports: `kubectl get policyreport -A` |
@@ -872,7 +872,7 @@ The local environments are disposable: `../platform/scripts/cluster.sh up` rebui
 | Grafana (dashboard "shortly / SLOs") | http://grafana.localhost:8090, user `admin` |
 | Argo CD UI | http://argocd.localhost:8090, user `admin`; password: `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' \| base64 -d` |
 | Grafana password | `kubectl -n monitoring get secret grafana-admin -o jsonpath='{.data.admin-password}' \| base64 -d` |
-| Rotate a platform secret (it leaked) | Delete its source in the store (it is immutable: deleting is the only way to replace it), `kubectl -n secret-store delete secret <grafana-admin\|seaweedfs-s3>`, and the generator makes a new one; then pull it out at once with `kubectl -n <monitoring\|backups> annotate externalsecret <name> force-sync=$(date +%s) --overwrite` and restart what reads it at start (`kubectl -n monitoring rollout restart deploy/grafana`, or `kubectl -n backups rollout restart statefulset/seaweedfs` plus `kubectl -n <app ns> delete secret backup-s3` and `../platform/scripts/cluster.sh up` to copy the new keys) |
+| Rotate a platform secret (it leaked) | Delete its source in the store (it is immutable: deleting is the only way to replace it), `kubectl -n secret-store delete secret <grafana-admin\|seaweedfs-s3>`, and the generator makes a new one; then pull it out at once with `kubectl -n <monitoring\|backups> annotate externalsecret <name> force-sync=$(date +%s) --overwrite` and restart what reads it at start (`kubectl -n monitoring rollout restart deploy/grafana`, or `kubectl -n backups rollout restart statefulset/seaweedfs` plus `kubectl -n <app ns> delete secret backup-s3` and `../../../platform/scripts/cluster.sh up` to copy the new keys) |
 | Back up a database now, and prove it restores | `BACKUP=1 SOURCE=shortly-prod scripts/restore-drill-cnpg.sh` (`KEEP=1` keeps the scratch Cluster) |
 | List backups | `kubectl -n shortly-prod get backups` (base backups; WAL in between is archived continuously) |
 | Run the expired-link cleanup now | `kubectl -n shortly-prod create job cleanup-manual-$(date +%s) --from=cronjob/shortly-cleanup` |
@@ -940,7 +940,7 @@ Don't run load tests against prod. The drill runs against the kind `prod` namesp
 
 ## Change an SLO or an alert
 
-1. SLOs: edit `deploy/prometheus/slos.yaml`, then run `uv run python scripts/gen_slo_rules.py`. Then the values file: `uv run --script ../platform/scripts/gen_slo_rules.py --spec deploy/prometheus/slos.yaml --values --out deploy/service/slo-rules.values.yaml`. Never edit either generated file by hand. Cause-based alerts: edit `deploy/prometheus/rules/shortly.yaml` and the same text in `deploy/service/values.yaml` (`monitoring.rules.shortly`; a test fails if they differ). Argo CD renders shortly from `main`, so a rule change reaches the cluster when it merges.
+1. SLOs: edit `deploy/prometheus/slos.yaml`, then run `uv run python scripts/gen_slo_rules.py`. Then the values file: `uv run --script ../../../platform/scripts/gen_slo_rules.py --spec deploy/prometheus/slos.yaml --values --out deploy/service/slo-rules.values.yaml`. Never edit either generated file by hand. Cause-based alerts: edit `deploy/prometheus/rules/shortly.yaml` and the same text in `deploy/service/values.yaml` (`monitoring.rules.shortly`; a test fails if they differ). Argo CD renders shortly from `main`, so a rule change reaches the cluster when it merges.
 2. Add or update a promtool test in `deploy/prometheus/tests/alerts_test.yaml`. It needs one case where the alert fires and one where it must stay quiet.
 3. Give every alert a `runbook_url` pointing at a section of this runbook. Write the section first.
 4. Run `uv run pytest tests/test_alert_rules.py`; it needs Docker for the promtool step.

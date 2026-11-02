@@ -40,12 +40,12 @@ tests:
             exp_annotations:
               summary: 'redirect-availability: error budget burning fast (14.4x over 1h or 6x over 6h)'
               description: 'GET /{code} answers without a server error: objective 0.999 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
           - exp_labels: {severity: ticket, slo: redirect-availability}
             exp_annotations:
               summary: 'redirect-availability: error budget burning steadily (3x over 1d or 1x over 3d)'
               description: 'GET /{code} answers without a server error: objective 0.999 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
 
   # 0.05% errors: half the budget rate. Nothing fires.
   - name: redirect errors within budget stay quiet
@@ -95,7 +95,7 @@ tests:
             exp_annotations:
               summary: 'redirect-availability: error budget burning steadily (3x over 1d or 1x over 3d)'
               description: 'GET /{code} answers without a server error: objective 0.999 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
 
   # 20% of redirects slower than 50 ms (the bucket edge the SLO uses).
   - name: slow redirects page on latency
@@ -113,12 +113,12 @@ tests:
             exp_annotations:
               summary: 'redirect-latency: error budget burning fast (14.4x over 1h or 6x over 6h)'
               description: 'GET /{code} answers in under 50 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
           - exp_labels: {severity: ticket, slo: redirect-latency}
             exp_annotations:
               summary: 'redirect-latency: error budget burning steadily (3x over 1d or 1x over 3d)'
               description: 'GET /{code} answers in under 50 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
 
   # A quiet hour: 3 creates an hour, 1 of them slow (33%, far over any burn threshold). One
   # slow request is not an incident: below MIN_BAD_EVENTS (5) in the long window, nothing
@@ -141,12 +141,12 @@ tests:
             exp_annotations:
               summary: 'create-latency: error budget burning fast (14.4x over 1h or 6x over 6h)'
               description: 'POST /links answers in under 100 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
           - exp_labels: {severity: ticket, slo: create-latency}
             exp_annotations:
               summary: 'create-latency: error budget burning steadily (3x over 1d or 1x over 3d)'
               description: 'POST /links answers in under 100 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
 
   # The v0.7.1 canary on the kind cluster (2026-10-24): about 44 creates a minute, 7% over
   # 100 ms, on an otherwise idle prod. A real tail, so the guard must not hide it: it pages.
@@ -165,12 +165,12 @@ tests:
             exp_annotations:
               summary: 'create-latency: error budget burning fast (14.4x over 1h or 6x over 6h)'
               description: 'POST /links answers in under 100 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
           - exp_labels: {namespace: prod, severity: ticket, slo: create-latency}
             exp_annotations:
               summary: 'create-latency: error budget burning steadily (3x over 1d or 1x over 3d)'
               description: 'POST /links answers in under 100 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
 
   # Staging and prod are separate budgets: an outage in staging must not page for prod.
   - name: budgets are per namespace
@@ -188,12 +188,12 @@ tests:
             exp_annotations:
               summary: 'create-availability: error budget burning fast (14.4x over 1h or 6x over 6h)'
               description: 'POST /links answers without a server error: objective 0.995 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
           - exp_labels: {namespace: staging, severity: ticket, slo: create-availability}
             exp_annotations:
               summary: 'create-availability: error budget burning steadily (3x over 1d or 1x over 3d)'
               description: 'POST /links answers without a server error: objective 0.995 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
 
   - name: every target down pages
     interval: 1m
@@ -210,7 +210,7 @@ tests:
             exp_annotations: &down
               summary: No shortly target is being scraped
               description: Prometheus has no healthy shortly target, so the SLO alerts are blind. Treat it as a full outage until proven otherwise.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#shortlydown
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#shortlydown
 
   - name: one target down is not an outage
     interval: 1m
@@ -259,7 +259,7 @@ tests:
             exp_annotations:
               summary: shortly has no available pods
               description: The Deployment or Rollout has zero ready replicas in this namespace, so every request to it fails.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#shortlynoavailablepods
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#shortlynoavailablepods
 
   - name: failing readiness pages
     interval: 1m
@@ -276,7 +276,7 @@ tests:
             exp_annotations:
               summary: Most readiness checks are failing
               description: Over half of /readyz checks return 503 (usually the database is unreachable). Pods are out of rotation; user requests fail before they reach the app.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#pods-not-ready-readyz-returns-503
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#pods-not-ready-readyz-returns-503
 
   - name: sustained load shedding opens a ticket
     interval: 1m
@@ -296,7 +296,7 @@ tests:
             exp_annotations:
               summary: Requests are being shed with 503 (concurrency)
               description: Requests have been shed for 5 minutes, reason concurrency. concurrency means pods at their in-flight limit (traffic above capacity); pool or db_timeout mean a slow database. Check the database before adding replicas.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
 
   - name: HPA pinned at max opens a ticket
     interval: 1m
@@ -313,7 +313,7 @@ tests:
             exp_annotations:
               summary: The HPA has been at maxReplicas for 15 minutes
               description: Autoscaling has no headroom left. See Capacity in the design doc for the sizing rule and the DB connection budget.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#saturation-load-shed-or-hpa-at-max
 
   - name: half of creates rate limited for 30 minutes opens a ticket
     interval: 1m
@@ -335,7 +335,7 @@ tests:
             exp_annotations:
               summary: Over 10% of link creations are rate limited
               description: For 30 minutes, more than 1 in 10 POST /links requests got 429. Find out whether it is abuse or a limit that is too tight for legitimate clients.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#rate-limiting-429-on-post-links
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#rate-limiting-429-on-post-links
       # Even at 50%: a 429 is a client error, so the create availability SLO doesn't burn.
       - eval_time: 60m
         alertname: CreateAvailabilityBudgetBurn
@@ -374,7 +374,7 @@ tests:
             exp_annotations:
               summary: Expired-link cleanup hasn't succeeded for over 3 hours
               description: The shortly-cleanup CronJob has missed at least 3 runs, or has never succeeded. Expired links pile up until it runs again.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#cleanup-job-not-running
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#cleanup-job-not-running
 
   - name: cleanup that never succeeded opens a ticket
     interval: 1m
@@ -392,7 +392,7 @@ tests:
             exp_annotations:
               summary: Expired-link cleanup hasn't succeeded for over 3 hours
               description: The shortly-cleanup CronJob has missed at least 3 runs, or has never succeeded. Expired links pile up until it runs again.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#cleanup-job-not-running
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#cleanup-job-not-running
 
   - name: cleanup succeeding every hour stays quiet
     interval: 1m
@@ -424,7 +424,7 @@ tests:
             exp_annotations:
               summary: Postgres base backups haven't succeeded for over 2 hours
               description: The newest base backup of the namespace's database is over 2 hours old, or there is none. A restore has to replay WAL from an older base backup, or has nothing to start from.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backups-not-running
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#backups-not-running
 
   - name: hourly base backups stay quiet
     interval: 1m
@@ -455,7 +455,7 @@ tests:
             exp_annotations:
               summary: WAL archiving to the backup bucket is failing
               description: The database's last attempt to archive WAL failed and none has succeeded since. A restore can't reach past the last archived segment, and WAL piles up on the database's volume until it fills.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#backups-not-running
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#backups-not-running
 
   - name: WAL archiving that recovered stays quiet
     interval: 1m
@@ -486,7 +486,7 @@ tests:
             exp_annotations:
               summary: Fault injection is failing requests on purpose
               description: SHORTLY_FAULT_ERROR_RATIO is set in prod and has been failing requests for 15 minutes. Remove config.faultErrorRatio and redeploy.
-              runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#fault-injection-left-on
+              runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#fault-injection-left-on
 
   - name: a drill's short burst of injected faults stays quiet
     interval: 1m

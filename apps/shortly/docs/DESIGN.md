@@ -8,7 +8,10 @@
 > (platform plan 3.4). Paths below under `deploy/argocd/platform`, `deploy/kind/`,
 > `deploy/platform/`, `deploy/policies/`, `scripts/cluster.sh`, `scripts/lib/namespaces.sh` and
 > `scripts/verify-image.sh` (the deploy gate) are in that repo, at the commit `platform.lock` names; so are the tests that check them.
-> Run `cluster.sh` from a platform checkout beside this one (`../platform/scripts/cluster.sh`).
+> Run `cluster.sh` from a platform checkout beside this one (`../../../platform/scripts/cluster.sh`).
+>
+> **shortly lives in `apps/shortly/`** of the links repo (platform plan 3.5): other paths below are
+> relative to it, except `.github/` and `platform.lock` at the repo root.
 
 ## Overview
 

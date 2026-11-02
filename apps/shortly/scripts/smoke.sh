@@ -7,7 +7,8 @@ set -euo pipefail
 
 export SHORTLY_IMAGE="${SHORTLY_IMAGE:-shortly:dev}"
 BASE="http://127.0.0.1:8000"
-compose() { docker compose --profile app "$@"; }
+# The app's compose.yaml, wherever this runs from (CI runs it from the repo root).
+compose() { docker compose -f "$(dirname "$0")/../compose.yaml" --profile app "$@"; }
 
 cleanup() {
   status=$?

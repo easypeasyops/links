@@ -78,7 +78,7 @@ groups:
     annotations:
       summary: 'redirect-availability: error budget burning fast (14.4x over 1h or 6x over 6h)'
       description: 'GET /{code} answers without a server error: objective 0.999 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
-      runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+      runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
   - alert: RedirectAvailabilityBudgetBurn
     expr: |-
       (slo:sli_error:ratio_rate1d{slo="redirect-availability"} > 0.003 and slo:sli_error:ratio_rate2h{slo="redirect-availability"} > 0.003 and slo:sli_error:ratio_rate1d{slo="redirect-availability"} * slo:sli_events:increase1d{slo="redirect-availability"} >= 5)
@@ -90,7 +90,7 @@ groups:
     annotations:
       summary: 'redirect-availability: error budget burning steadily (3x over 1d or 1x over 3d)'
       description: 'GET /{code} answers without a server error: objective 0.999 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
-      runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+      runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
 - name: slo-redirect-latency
   rules:
   - record: slo:objective:ratio
@@ -168,7 +168,7 @@ groups:
     annotations:
       summary: 'redirect-latency: error budget burning fast (14.4x over 1h or 6x over 6h)'
       description: 'GET /{code} answers in under 50 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
-      runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+      runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
   - alert: RedirectLatencyBudgetBurn
     expr: |-
       (slo:sli_error:ratio_rate1d{slo="redirect-latency"} > 0.03 and slo:sli_error:ratio_rate2h{slo="redirect-latency"} > 0.03 and slo:sli_error:ratio_rate1d{slo="redirect-latency"} * slo:sli_events:increase1d{slo="redirect-latency"} >= 5)
@@ -180,7 +180,7 @@ groups:
     annotations:
       summary: 'redirect-latency: error budget burning steadily (3x over 1d or 1x over 3d)'
       description: 'GET /{code} answers in under 50 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
-      runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+      runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
 - name: slo-create-availability
   rules:
   - record: slo:objective:ratio
@@ -258,7 +258,7 @@ groups:
     annotations:
       summary: 'create-availability: error budget burning fast (14.4x over 1h or 6x over 6h)'
       description: 'POST /links answers without a server error: objective 0.995 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
-      runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+      runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
   - alert: CreateAvailabilityBudgetBurn
     expr: |-
       (slo:sli_error:ratio_rate1d{slo="create-availability"} > 0.015 and slo:sli_error:ratio_rate2h{slo="create-availability"} > 0.015 and slo:sli_error:ratio_rate1d{slo="create-availability"} * slo:sli_events:increase1d{slo="create-availability"} >= 5)
@@ -270,7 +270,7 @@ groups:
     annotations:
       summary: 'create-availability: error budget burning steadily (3x over 1d or 1x over 3d)'
       description: 'POST /links answers without a server error: objective 0.995 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
-      runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+      runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
 - name: slo-create-latency
   rules:
   - record: slo:objective:ratio
@@ -348,7 +348,7 @@ groups:
     annotations:
       summary: 'create-latency: error budget burning fast (14.4x over 1h or 6x over 6h)'
       description: 'POST /links answers in under 100 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 2 to 5 days.'
-      runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+      runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
   - alert: CreateLatencyBudgetBurn
     expr: |-
       (slo:sli_error:ratio_rate1d{slo="create-latency"} > 0.03 and slo:sli_error:ratio_rate2h{slo="create-latency"} > 0.03 and slo:sli_error:ratio_rate1d{slo="create-latency"} * slo:sli_events:increase1d{slo="create-latency"} >= 5)
@@ -360,4 +360,4 @@ groups:
     annotations:
       summary: 'create-latency: error budget burning steadily (3x over 1d or 1x over 3d)'
       description: 'POST /links answers in under 100 ms: objective 0.99 over 30 days. At this pace the whole budget lasts only 10 to 30 days.'
-      runbook_url: https://github.com/statsguy/shortly/blob/main/docs/RUNBOOK.md#slo-burn-rate-alerts
+      runbook_url: https://github.com/easypeasyops/links/blob/main/apps/shortly/docs/RUNBOOK.md#slo-burn-rate-alerts
