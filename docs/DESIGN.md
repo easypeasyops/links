@@ -766,7 +766,7 @@ The probes, and `/metrics`, never wait in the request threadpool. FastAPI runs s
 
 **Pod hardening.** Pod and Job run as UID/GID 10001, `runAsNonRoot`, `readOnlyRootFilesystem` (a 16 Mi `emptyDir` at `/tmp`), all capabilities dropped, no privilege escalation, `seccompProfile: RuntimeDefault`, `automountServiceAccountToken: false`. Both namespaces **enforce** the restricted Pod Security Standard, so the API server rejects a regression.
 
-**Network policies.** Traffic inside a namespace is allowed, not assumed. The chart's NetworkPolicy covers the app pods and the migration Job, and `deploy/kind/network-policies.yaml` covers the rest of each namespace:
+**Network policies.** Traffic inside a namespace is allowed, not assumed. The chart's NetworkPolicy covers the app pods and the migration Job, and the platform's `deploy/app-namespace/default-deny.yaml` (each namespace's baseline, which comes with the namespace) covers the rest of each namespace:
 
 | From | To | Port | Why |
 | --- | --- | --- | --- |
@@ -892,7 +892,7 @@ flowchart LR
 
 ### The platform under Argo CD
 
-Since PR #60 everything under the app comes from git too. Only Argo CD itself and each environment's namespace (its Pod Security labels and default-deny policy) are still put there by `scripts/cluster.sh`. Since platform plan 4.1 the platform's own secrets come from the secret store, through External Secrets, and since 4.3 each environment's database comes with the app, a CloudNativePG Cluster rendered by the service chart, with its credentials and backups. A merged change to a platform chart's values, a policy or the Gateway reaches the cluster within a minute, as a promotion does, and a hand edit is reverted.
+Since PR #60 everything under the app comes from git too. Each environment's namespace comes with its Application: the platform's ApplicationSet creates it (`CreateNamespace`) with the restricted Pod Security labels (`managedNamespaceMetadata`) and applies its baseline, the default-deny policy in the platform's `deploy/app-namespace/`, so shortly's AppProject may create exactly its two namespaces and nothing else cluster-scoped. `scripts/cluster.sh` still makes the same namespaces until the platform drops that step, after which only Argo CD itself is put there by hand. The e2e, which deploys without Argo CD, makes them as the ApplicationSet would (the labels read from it, the baseline applied from the platform checkout). Since platform plan 4.1 the platform's own secrets come from the secret store, through External Secrets, and since 4.3 each environment's database comes with the app, a CloudNativePG Cluster rendered by the service chart, with its credentials and backups. A merged change to a platform chart's values, a policy or the Gateway reaches the cluster within a minute, as a promotion does, and a hand edit is reverted.
 
 ```mermaid
 flowchart TB

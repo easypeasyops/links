@@ -6,6 +6,8 @@
 Reads the ApplicationSet as JSON on stdin, prints it changed in exactly these ways:
   - the generator reads only shortly's prod env file, at the locked platform commit;
   - the values repo is read at <revision> (the commit under test) instead of the env file's;
+  - the namespace's baseline (deploy/app-namespace) is read at the locked platform commit,
+    not main;
   - the platform's deploy/kind/e2e-values.yaml is layered after the app's values files (CI
     clocks, as deploy.sh), then the local build and a lower HPA ceiling as valuesObject;
   - applicationsSync: create-only, so an edit to the generated Application sticks.
@@ -16,6 +18,7 @@ import json
 import sys
 
 VALUES_REVISION = "targetRevision: {{ .values.revision | quote }}"
+PLATFORM_REVISION = "targetRevision: main\n"
 VALUE_FILES_END = "        {{- end }}\n"
 
 
@@ -26,7 +29,7 @@ def adjust(appset: dict, lock: str, revision: str, platform_repo: str, repo: str
     spec["syncPolicy"]["applicationsSync"] = "create-only"
 
     patch = spec["templatePatch"]
-    for anchor in (VALUES_REVISION, VALUE_FILES_END):
+    for anchor in (VALUES_REVISION, VALUE_FILES_END, PLATFORM_REVISION):
         if patch.count(anchor) != 1:
             sys.exit(f"e2e-appset: the platform's templatePatch changed, no single {anchor!r}")
     values_object = {
@@ -37,6 +40,7 @@ def adjust(appset: dict, lock: str, revision: str, platform_repo: str, repo: str
         "autoscaling": {"maxReplicas": 2},
     }
     patch = patch.replace(VALUES_REVISION, f"targetRevision: {json.dumps(revision)}")
+    patch = patch.replace(PLATFORM_REVISION, f"targetRevision: {json.dumps(lock)}\n")
     patch = patch.replace(
         VALUE_FILES_END,
         VALUE_FILES_END

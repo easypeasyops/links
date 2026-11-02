@@ -121,6 +121,22 @@ deployed_image() { kubectl -n "$(ns_of "$1")" get "$(workload "$1")" -o jsonpath
 pod_env() { kubectl -n "$(ns_of "$1")" get "$(workload "$1")" -o jsonpath="{.spec.template.spec.containers[0].env[?(@.name==\"$2\")].value}"; }
 ro() { kubectl -n "$PROD_NS" get rollout shortly -o jsonpath="$1"; }
 
+# ---------------------------------------------------------------- namespaces
+# Each environment's namespace, as the platform's ApplicationSet makes it on a cluster: its
+# Pod Security labels (managedNamespaceMetadata in apps/applicationset.yaml) and its
+# baseline, deploy/app-namespace/ (default-deny ingress). This e2e deploys without Argo CD
+# (deploy.sh), so it makes them itself; where they exist already, nothing changes.
+ns_labels=$(kubectl create --dry-run=client -o json -f "$PLATFORM_DIR/apps/applicationset.yaml" \
+  | python3 -c 'import json,sys; m=json.load(sys.stdin)["spec"]["template"]["spec"]["syncPolicy"]["managedNamespaceMetadata"]; print(" ".join(f"{k}={v}" for k, v in m["labels"].items()))')
+for env in "${ENVS[@]}"; do
+  ns=$(ns_of "$env")
+  kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  # shellcheck disable=SC2086 # one argument per label
+  kubectl label namespace "$ns" --overwrite $ns_labels >/dev/null
+  kubectl -n "$ns" apply -f "$PLATFORM_DIR/deploy/app-namespace/" >/dev/null
+done
+pass "namespaces $STAGING_NS and $PROD_NS as the platform makes them ($ns_labels; default-deny)"
+
 # ---------------------------------------------------------------- 0. digest-mode render
 # Releases deploy by digest, but this test deploys a local image by tag. Render the digest
 # path too and let the real API server validate it (server-side dry run). JSON-schema tools
@@ -586,7 +602,8 @@ if suite platform && [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applicat
     | python3 -c '
 import json, sys
 project = json.load(sys.stdin)
-project["spec"]["sourceRepos"].append(sys.argv[1])  # CI only: the platform e2e-values
+if sys.argv[1] not in project["spec"]["sourceRepos"]:  # it reads the platform e2e-values
+    project["spec"]["sourceRepos"].append(sys.argv[1])
 print(json.dumps(project))
 ' "$platform_repo" | kubectl apply -f - >/dev/null
   kubectl create --dry-run=client -o json -f "$PLATFORM_DIR/apps/applicationset.yaml" \
