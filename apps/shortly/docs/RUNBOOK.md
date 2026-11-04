@@ -456,6 +456,7 @@ kubectl -n shortly-prod run probe --rm -i --restart=Never --image=postgres:17-al
 | --- | --- | --- |
 | Gateway not `Programmed` | The controller is down, or the EnvoyProxy/GatewayClass is invalid | Controller logs; `kubectl get gatewayclass envoy -o yaml` |
 | Route not `Accepted` | Its namespace isn't allowed on the listener, or `hostnames` conflict with another route | Compare with `allowedRoutes` in `deploy/kind/gateway.yaml`; one hostname per environment |
+| Route not `Accepted`, `NotAllowedByListeners` | The namespace lacks the `easypeasyops.github.io/app` label the app listener selects (a namespace Argo CD hasn't synced since the label was added) | `kubectl get ns -l easypeasyops.github.io/app`. Missing: label both now (`kubectl label namespace shortly-<env> --overwrite easypeasyops.github.io/app=shortly easypeasyops.github.io/env=<env>`), then sync each Application so Argo CD owns them (`kubectl -n argocd patch app shortly-<env> --type merge -p '{"operation":{"sync":{}}}'`). The same missing label also stops WAL archiving (the bucket's policy) and takes the namespace out of the admission policies |
 | `ResolvedRefs: False` | The route points at a Service or port that doesn't exist (a renamed release) | `kubectl -n shortly-prod get svc`; the route's `backendRefs` |
 | Direct `wget http://shortly/readyz` works, through the Gateway it doesn't | The proxy can't reach the pods: a NetworkPolicy change narrowed `httpFrom` | Allow the proxy's namespace (`envoy-gateway-system`) on port 8000 |
 
