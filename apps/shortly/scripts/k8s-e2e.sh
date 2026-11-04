@@ -141,19 +141,26 @@ ro() { kubectl -n "$PROD_NS" get rollout shortly -o jsonpath="$1"; }
 
 # ---------------------------------------------------------------- namespaces
 # Each environment's namespace, as the platform's ApplicationSet makes it on a cluster: its
-# Pod Security labels (managedNamespaceMetadata in apps/applicationset.yaml) and its
-# baseline, deploy/app-namespace/ (default-deny ingress). This e2e deploys without Argo CD
-# (deploy.sh), so it makes them itself; where they exist already, nothing changes.
-ns_labels=$(kubectl create --dry-run=client -o json -f "$PLATFORM_DIR/apps/applicationset.yaml" \
-  | python3 -c 'import json,sys; m=json.load(sys.stdin)["spec"]["template"]["spec"]["syncPolicy"]["managedNamespaceMetadata"]; print(" ".join(f"{k}={v}" for k, v in m["labels"].items()))')
+# labels (managedNamespaceMetadata in apps/applicationset.yaml: Pod Security, and the app and
+# environment the platform's policies select by; a value may template {{ .app }} and
+# {{ .env }}, as the ApplicationSet does) and its baseline, deploy/app-namespace/
+# (default-deny ingress). This e2e deploys without Argo CD (deploy.sh), so it makes them
+# itself; where they exist already, nothing changes.
+ns_labels() { # <env>: the ApplicationSet's namespace labels for shortly in <env>, as k=v words
+  kubectl create --dry-run=client -o json -f "$PLATFORM_DIR/apps/applicationset.yaml" | python3 -c '
+import json, sys
+labels = json.load(sys.stdin)["spec"]["template"]["spec"]["syncPolicy"]["managedNamespaceMetadata"]["labels"]
+fill = lambda v: v.replace("{{ .app }}", "shortly").replace("{{ .env }}", sys.argv[1])
+print(" ".join(f"{k}={fill(v)}" for k, v in labels.items()))' "$1"
+}
 for env in "${ENVS[@]}"; do
   ns=$(ns_of "$env")
   kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
-  # shellcheck disable=SC2086 # one argument per label
-  kubectl label namespace "$ns" --overwrite $ns_labels >/dev/null
+  # shellcheck disable=SC2046 # one argument per label
+  kubectl label namespace "$ns" --overwrite $(ns_labels "$env") >/dev/null
   kubectl -n "$ns" apply -f "$PLATFORM_DIR/deploy/app-namespace/" >/dev/null
 done
-pass "namespaces $STAGING_NS and $PROD_NS as the platform makes them ($ns_labels; default-deny)"
+pass "namespaces $STAGING_NS and $PROD_NS as the platform makes them ($(ns_labels prod); default-deny)"
 
 # ---------------------------------------------------------------- 0. digest-mode render
 # Releases deploy by digest, but this test deploys a local image by tag. Render the digest
