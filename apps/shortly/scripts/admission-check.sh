@@ -95,7 +95,8 @@ for _ in $(seq 1 36); do
 import json, sys
 items = json.load(sys.stdin).get("items", [])
 print(sum(1 for r in items for res in r.get("results", [])
-          if res.get("policy") == "shortly-allowed-images" and res.get("result") == "fail"))')
+          if res.get("policy") in ("shortly-allowed-images", "app-allowed-images")
+          and res.get("result") == "fail"))')
   ((failed > 0)) && break
   sleep 5
 done
