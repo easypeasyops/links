@@ -38,7 +38,7 @@ jobs:
   # below) is required, so the names are free to change.
   check:
     needs: scope
-    uses: easypeasyops/platform/.github/workflows/reusable-python-check.yml@6acaf57b22fe2ae9b101db3846c148f93e325354 # platform.lock
+    uses: easypeasyops/platform/.github/workflows/reusable-python-check.yml@cce3eacbfab382372835c764aeef92f216f23ec3 # platform.lock
     with:
       run: ${{ needs.scope.outputs.full == 'true' }}
       working-directory: apps/shortly # shortly's project (platform plan 3.5)
@@ -48,7 +48,7 @@ jobs:
 
   image:
     needs: scope
-    uses: easypeasyops/platform/.github/workflows/reusable-image.yml@6acaf57b22fe2ae9b101db3846c148f93e325354 # platform.lock
+    uses: easypeasyops/platform/.github/workflows/reusable-image.yml@cce3eacbfab382372835c764aeef92f216f23ec3 # platform.lock
     with:
       run: ${{ needs.scope.outputs.full == 'true' }}
       context: apps/shortly
