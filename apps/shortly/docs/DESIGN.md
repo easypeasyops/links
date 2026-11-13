@@ -10,6 +10,11 @@
 > `scripts/verify-image.sh` (the deploy gate) are in that repo, at the commit `platform.lock` names; so are the tests that check them.
 > Run `cluster.sh` from a platform checkout beside this one (`../../../platform/scripts/cluster.sh`).
 >
+> **The platform's design is in its own doc**, [easypeasyops/platform `docs/DESIGN.md`](https://github.com/easypeasyops/platform/blob/main/docs/DESIGN.md):
+> the service chart, the reusable workflows, the platform under Argo CD, the admission policies
+> and the secret store. This doc keeps what is shortly's: how it uses them, what its e2e proves
+> about them, and what was measured and learned here.
+>
 > **shortly lives in `apps/shortly/`** of the links repo (platform plan 3.5): other paths below are
 > relative to it, except `.github/` and `platform.lock` at the repo root.
 
@@ -720,18 +725,9 @@ flowchart LR
   E -->|HTTPRoute staging| S[staging: Service shortly]
 ```
 
-| Choice | Why |
-| --- | --- |
-| Gateway API, not Ingress | The Kubernetes successor to Ingress: typed routes, weights and header matching in the spec instead of controller-specific annotations. Weighted backends are what prod's canary uses |
-| Envoy Gateway | A maintained, conformant Gateway API implementation, from the Envoy project. It ships the Gateway API CRDs itself (v1.6.1), so the two can't drift. ingress-nginx, the usual default, was retired in March 2026 and gets no security fixes |
-| One Gateway, routes per namespace | The platform owns the Gateway (namespace `gateway`); each environment owns its route. Only `staging` and `prod` may attach routes, so nothing else can capture a hostname |
-| `*.localhost` hostnames | They resolve to 127.0.0.1 everywhere, so the front door gives real URLs in a browser (`http://sho.rt.localhost:8080/<code>`) |
-| A second listener, `tools`, for the dev UIs | Argo CD, Grafana, Prometheus and Alertmanager at `http://<tool>.localhost:8090`. Its own port and its own namespace allowlist (`argocd`, `monitoring`), so a tool can't be reached on the users' listener and no tool route can capture an app hostname (`tests/test_front_door.py`, e2e step 3c). On a real cluster these would sit behind a separate internal load balancer with SSO |
-| The front door: forwarder containers, not port-forwards | The proxy's Service is a NodePort with pinned ports (30080, 30081); `scripts/cluster.sh` runs one `socat` container per port beside the kind node, publishing `127.0.0.1:8080` and `127.0.0.1:8090`. A `kubectl port-forward` dies with its terminal, the laptop's sleep, or the pod it pinned; these restart with Docker and outlive every release. Containers rather than kind's `extraPortMappings`, which only apply when a cluster is created, so an existing cluster gets them with `scripts/cluster.sh up`. Bound to 127.0.0.1 only, because Prometheus and Alertmanager have no login |
+Why Gateway API and Envoy Gateway, why one Gateway with two listeners (users on :8080, the dev UIs on :8090) and why forwarder containers instead of port-forwards: the platform's design doc, [The platform chart](https://github.com/easypeasyops/platform/blob/main/docs/DESIGN.md#the-platform-chart). shortly's part is its route and its hostnames: `*.localhost` names resolve to 127.0.0.1 everywhere, so the front door gives real URLs in a browser (`http://sho.rt.localhost:8080/<code>`).
 
 The `shortly` Service still exists and still serves in-cluster callers (probes, the e2e's direct checks, Prometheus scrapes). The Gateway is the user path. e2e step 3a proves that each hostname reaches its own environment, that a prod link doesn't resolve through staging's hostname, and that unknown hostnames get 404.
-
-**Argo Rollouts** is installed alongside (chart 2.43.6, Argo Rollouts v1.10.0) with its Gateway API traffic-router plugin (v0.17.0). The controller downloads the plugin when it starts and refuses it unless the checksum matches. The project publishes no checksums, so the pinned values were computed from the release binaries. That protects against a later swap, not against a bad original.
 
 **Build once, deploy many.** `scripts/deploy.sh <env> <image-ref>` deploys exactly what Argo CD would render for that environment (since platform plan 3.4): the platform's service chart at the digest pinned in its `apps/shortly/envs/<env>.yaml`, with the values files listed there. So CI's e2e tests the chart that runs, not a copy. It takes a digest reference (`repo@sha256:…`) for released images; the bits tested in staging are the bits promoted to prod. A tag reference is accepted only on a `kind-*` context, for local images, which are loaded into kind first. The chart refuses to render with neither digest nor tag.
 
@@ -744,20 +740,9 @@ The `shortly` Service still exists and still serves in-cluster callers (probes, 
 
 The attestation bundle is read from the registry (`--bundle-from-oci`), so the check doesn't depend on GitHub's API. It fails closed: no `gh`, no network or no attestation means no deploy. The break-glass flag `INSECURE_SKIP_VERIFY=1` skips the check with a loud warning, for when the registry or Sigstore is down mid-incident. `tests/test_deploy_gate.py` runs `deploy.sh` against stub tools and asserts that helm is never called for a refused image. It also verifies the release digest the runbook documents, against the real registry.
 
-**Admission policy.** `deploy.sh` protects the normal path; the cluster protects every other one. Argo CD installs Kyverno 1.19.1 (chart 3.9.1, pinned by digest) and then `deploy/policies/`, one sync wave later:
+**Admission policy.** `deploy.sh` protects the normal path; the cluster protects every other one. The platform's two Kyverno policies do that: `require-release-provenance` refuses any of our images that isn't a release digest with provenance from its own repo's `release.yml` at its app's tag (the same rule as `verify-image.sh`), and `app-allowed-images` reports any image in shortly's namespaces that is neither shortly's release nor one the chart brings (Audit in kind, because local builds like `shortly:dev` and `shortly:e2e` are how the cluster is developed). What they check, why there are two, and why the provenance policy runs at admission only: the platform's design doc, [Admission policies and the deploy gate](https://github.com/easypeasyops/platform/blob/main/docs/DESIGN.md#admission-policies-and-the-deploy-gate).
 
-| Policy | Kind | Rule | In kind |
-| --- | --- | --- | --- |
-| `require-release-provenance` | ImageValidatingPolicy | Keyed by identity, not by app: any `ghcr.io/easypeasyops/<repo>/<app>` image in an app's namespaces (`easypeasyops.github.io/app`) must be a digest with SLSA provenance signed by `easypeasyops/<repo>`'s `release.yml` at a `<app>/vX.Y.Z` tag, logged in Rekor, from a GitHub Actions workflow build. The signer check accepts any of our repos' release workflows; further checks require the repository named in the signed provenance to be the image's own and its tag to be the image's app's, so one repo can't vouch for another's images nor one app for another's, and a new app is covered with no policy edit (platform plan 1.5, 3.5). Pods, and the Pod templates of Deployments, StatefulSets, Jobs, CronJobs, ReplicaSets and DaemonSets. A Rollout's template isn't checked itself (Kyverno doesn't know the kind), but the ReplicaSets and Pods it creates are | Deny |
-| `app-allowed-images` | ValidatingPolicy | Pods in an app's namespaces may only run that app's own release (by digest, the app taken from the namespace's label: shortly's namespaces run shortly, never another app), `postgres:17-alpine`, `grafana/k6`, Redis 8, or CloudNativePG's images | Audit (PolicyReports) |
-
-The two policies need each other. The provenance policy only looks at our images, so on its own it can be dodged by running some other image. The allowlist closes that, but it is Audit-only in kind, because local builds (`shortly:dev`, `shortly:e2e`) are how the cluster is developed and tested. In a real cluster it would be Deny.
-
-The rules are the same as `verify-image.sh`, and a test asserts the two agree on the signer. Tags are refused, not resolved (`mutateDigest: false`), so what was verified is what runs. All containers count, init and ephemeral ones included. The policy fails closed (`failurePolicy: Fail`): if Kyverno, the registry or Rekor can't be reached, the API server refuses new Pods instead of admitting them unchecked. Running pods are not affected.
-
-**Admission only, never in the background.** The provenance policy sets `evaluation.background.enabled: false`. Otherwise Kyverno's reports controller re-verifies every running shortly image against the registry and Rekor, again and again. On the kind node that cost about 1.1 cores on average, with bursts of up to 9.7, and those bursts slowed every request in the cluster (Known limitations). An image can't change after admission, so a background re-check adds nothing. The reports controller also has a CPU limit (500m), as background work should: the app has none, because a limit throttles a latency-sensitive process even on an idle node.
-
-It is tested at two levels. The platform's `tests/test_admission_policies.py` runs the same Kyverno engine (the CLI image, pinned by digest) against the real registry: the documented release passes, and a tag, an unattested digest and an unattested init container fail. Two mutated copies of the policy, one expecting `ci.yml` as signer and one a different build type, must refuse the real release, which proves the checks aren't passing everything. `scripts/admission-check.sh` (e2e step 8) then sends server-side dry runs through the live API server. It also proves that a digest that doesn't exist and a Deployment template are refused, and that the allowlist reports the local build.
+shortly proves them in the cluster: `scripts/admission-check.sh` (e2e step 8) sends server-side dry runs through the live API server. The documented release passes; a tag, an unattested digest, a digest that doesn't exist and a Deployment template are refused; and the allowlist reports the local build.
 
 **Rollout.** Staging: `helm upgrade --install --rollback-on-failure --wait --timeout 3m`. `RollingUpdate` with `maxUnavailable: 0, maxSurge: 1` never drops below desired capacity: a new pod that never becomes ready stalls the rollout while old pods keep serving, Helm times out and rolls back. Prod: a canary (above). A canary pod that never becomes ready gets no traffic (the weight moves only once its pods are available), and the release is aborted and rolled back. The drill measures the prod case: 0 failed requests, through the Service and through the Gateway, during a broken release.
 
@@ -897,62 +882,11 @@ flowchart LR
 
 Since PR #60 everything under the app comes from git too. Each environment's namespace comes with its Application: the platform's ApplicationSet creates it (`CreateNamespace`) with the restricted Pod Security labels (`managedNamespaceMetadata`) and applies its baseline, the default-deny policy in the platform's `deploy/app-namespace/`, so shortly's AppProject may create exactly its two namespaces and nothing else cluster-scoped. Since platform #43 `scripts/cluster.sh` makes none of them: only Argo CD itself is put there by hand (with Helm), and the two roots it then applies. The e2e, which deploys without Argo CD, makes them as the ApplicationSet would (the labels read from it, with `{{ .app }}` and `{{ .env }}` filled in where a value templates them, the baseline applied from the platform checkout). Since platform plan 4.1 the platform's own secrets come from the secret store, through External Secrets, and since 4.3 each environment's database comes with the app, a CloudNativePG Cluster rendered by the service chart, with its credentials and backups. A merged change to a platform chart's values, a policy or the Gateway reaches the cluster within a minute, as a promotion does, and a hand edit is reverted.
 
-```mermaid
-flowchart TB
-  CS["scripts/cluster.sh up<br/>Helm: Argo CD (bootstrap)"] --> Root
-  Root["Application platform (root)<br/>deploy/argocd/platform, a Helm chart<br/>parameters: arch, revision, components"]
-  Root --> WP
-  Root --> WB
-  Root --> W0
-  Root --> W1
-  subgraph WP["wave -2: what the children may deploy"]
-    PP[platform-project<br/>the AppProject, from git]
-  end
-  subgraph WB["wave -1: what wave 0's Secrets need"]
-    ES[external-secrets<br/>External Secrets Operator]
-    CM[cert-manager]
-  end
-  subgraph W0["wave 0: charts and their CRDs, and what needs only fast CRDs"]
-    direction LR
-    SS[secret-store<br/>store namespace, ClusterSecretStore,<br/>generated values]
-    PG[cloudnative-pg<br/>+ barman-cloud plugin]
-    MS[metrics-server<br/>vendored manifest]
-    EG[envoy-gateway]
-    GW[gateway<br/>Gateway, listeners]
-    TR[tool-routes]
-    AR[argo-rollouts<br/>+ plugin for arch]
-    KPS[monitoring<br/>kube-prometheus-stack]
-    KY[kyverno]
-    BK[backups<br/>SeaweedFS]
-  end
-  subgraph W1["wave 1: what needs a slow chart running"]
-    direction LR
-    KP[kyverno-policies<br/>Kyverno's webhook]
-    AM[Argo CD alerts<br/>monitoring CRDs]
-  end
-  WP -->|"all Healthy"| WB
-  WB -->|"all Healthy"| W0
-  W0 -->|"all Healthy"| W1
-```
+How the platform itself is laid out under Argo CD (the root chart, its sync waves, the two AppProjects, the secret store, the operator for the databases) and why is in the platform's design doc: [The platform chart](https://github.com/easypeasyops/platform/blob/main/docs/DESIGN.md#the-platform-chart) and [The secret store](https://github.com/easypeasyops/platform/blob/main/docs/DESIGN.md#the-secret-store). What follows is what shortly's CI and shortly's move onto it showed.
 
-| Choice | Why |
-| --- | --- |
-| The root is a Helm chart that renders the children | Git can't know a cluster's CPU architecture (the Argo Rollouts plugin is a per-architecture binary) or which commit CI is testing. The root takes them as Helm parameters, which `cluster.sh` sets from the node and from `PLATFORM_REVISION` (`main` on a laptop, the PR's commit in CI) |
-| Charts pulled by digest, natively from OCI | `targetRevision` is the chart's digest, the version a comment beside it. The platform's `tests/test_platform.py` (integration) checks each version still resolves to its digest, so a re-pushed tag is caught before anyone trusts it |
-| Values files stay in git, beside the chart's source | Each chart Application is multi-source: the chart from its registry, `$values` from this repository at the root's revision |
-| metrics-server vendored, not fetched | The release manifest is checked into `deploy/platform/metrics-server/` with its SHA-256; a kustomize patch adds the kind-only flag |
-| Two sync waves, with Application health on | The policies need Kyverno's webhook serving, and the alerts on Argo CD need kube-prometheus-stack's CRDs: both come from slow charts, so they wait in wave 1. The Gateway and the tool routes need only Envoy Gateway's CRDs, which arrive within seconds, so they stay in wave 0 and the sync retry covers the race. In wave 1 they waited for the slowest chart, and the Envoy proxy's 2-minute start stopped overlapping with it: the platform job's install went from about 2.5 to 7.5 minutes (CI, PR #60). Argo CD only waits for a wave's Applications to be Healthy if it reports Application health, which `argocd-cm` turns back on (`deploy/kind/argocd-values.yaml`) |
-| The AppProject comes from git too | `cluster.sh` applies `platform-project.yaml` once, to bootstrap (the root itself is in that project); after that the `platform-project` child keeps it in sync. Before, a change that added a chart registry or namespace reached a running cluster's Applications but not the project, and the new child stayed Unknown until someone re-ran `cluster.sh up` (platform #20, #23) |
-| Waves overlap on a fresh cluster; retries order them | Argo CD holds a wave only for children that report Progressing, and a child that has never synced reports Missing, so every wave's children are created at once. A child whose dependency isn't ready (a webhook, a CRD, the store) fails its sync and retries every 5 s, doubling to 30 s, 20 times: it starts at most 30 s after it could. With retries up to 2 minutes apart, a chain of them (External Secrets' webhook, the store, the bucket's keys, the policies) cost CI 2 to 4 minutes (links #113). What remains is Argo CD's cluster cache lagging: on every event for any CRD its controller re-downloads and re-parses the cluster's whole OpenAPI schema under the cache's lock (gitops-engine, v3.5.6), and the platform installs about 100 CRDs, so on a fresh cluster its view trails the API server by minutes. (Raising the controller's CPU request didn't help, and left no room for a canary pod on CI's node: platform #30, reverted.) The root retries the same way: its sync fails while a child of its wave is Degraded, and with Argo CD's default backoff it idled about 80 s after everything was ready. A CRD whose Established condition Argo CD's cached copy lacks (for a minute or two after a re-apply, while the API server has it established) counts as Progressing, not Degraded (`argocd-cm`), so it holds the wave instead of failing it |
-| A wave before the charts (platform plan 4.1) | External Secrets Operator syncs in wave -1, so its CRDs and controller exist before wave 0, whose charts will read Secrets it makes (Grafana's admin password, the bucket's keys) |
-| An operator for the databases (platform plan 4.2) | CloudNativePG runs Postgres from a `Cluster` object: failover, base backups and WAL archiving (point-in-time recovery) come from the operator instead of a hand-rolled StatefulSet and an hourly `pg_dump`. Backups go through the Barman Cloud plugin: the operator's built-in `barmanObjectStore` is deprecated and removed in CloudNativePG 1.31. The plugin talks to the operator over mutual TLS with certificates from cert-manager, which is why cert-manager syncs in wave -1. The service chart renders an app's database when its values set `database.cluster.enabled` (a `Cluster` `<release>-db`, never pruned by Argo CD; its backups to `s3://cnpg-backups/<namespace>`; the bucket's keys from the `backup-bucket` ClusterSecretStore, which may hand out that one Secret to the app namespaces only). shortly sets it in both environments since platform plan 4.3 |
-| Each environment moved by importing, then switching in the same sync (platform plan 4.3) | Staging's values turn on `database.cluster`, bootstrapped by `initdb.import` (microservice) from the running Postgres, and point the app at `shortly-db-app` in one PR. Argo CD's waves do the rest in order: the Cluster (held until healthy, so the import is done), the migration, then the app's rollout. No dump to copy by hand, and writes are lost only for the minute the import runs (staging: acceptable). Prod moved the same way, with the old database made read-only just before (RUNBOOK, "Move an environment's database"): redirects kept working, creates failed for a minute or two, and no write was left behind; during the canary only the new database could take writes. `bootstrap` is read only when the Cluster is created, so it can stay in the values; the old StatefulSet stayed until the end of 4.3 |
-| A secret store inside the cluster | The `secret-store` namespace holds the source of each platform secret; the `platform` ClusterSecretStore (External Secrets' Kubernetes provider) reads it through a ServiceAccount that may only read Secrets there, for the namespaces it names. No secrets server to run, unseal or back up on a laptop; a real cluster points the ClusterSecretStore at a secret manager and nothing else changes |
-| Each value generated once, in the store, and immutable | A Password generator per secret, written into the store by an ExternalSecret with `refreshPolicy: CreatedOnce` (never refreshed, so a resync can't rotate a password everything uses) and `immutable: true`. `CreatedOnce` alone isn't enough: an ExternalSecret's first sync writes even over an existing Secret, so a recreated ExternalSecret would silently rotate every consumer's password; with an immutable target it fails loudly instead, and a value is replaced only by deleting it. Consumers (`grafana-admin` in `monitoring`, `seaweedfs-s3` in `backups`) are ExternalSecrets synced with the Application that reads them; their templates derive the rest (the user name, `s3.json`) |
-| A separate `platform` AppProject | The platform must create CRDs, ClusterRoles and webhooks. The app's project may create only its own namespaces, by name, nothing else cluster-scoped, and neither project may deploy into the other's namespaces |
-| No resources-finalizer on the children | Deleting a child Application, or the root, orphans its resources instead of deleting the monitoring stack or the admission webhook along with it |
-| Server-side apply and server-side diff | The kube-prometheus-stack, Kyverno and Envoy Gateway CRDs are too big for client-side apply, and fields that other controllers write (webhook CA bundles) are not drift |
-| Release names kept | Each chart keeps the release name `cluster.sh` used, so on an existing cluster Argo CD adopts the running resources instead of recreating them, and `cluster.sh` deletes the old Helm records once it has |
+**What the waves cost in CI.** The Gateway and the tool routes need only Envoy Gateway's CRDs, which arrive within seconds, so they share wave 0 with the charts and the sync retry covers the race. In wave 1 they waited for the slowest chart, and the Envoy proxy's 2-minute start stopped overlapping with it: the platform job's install went from about 2.5 to 7.5 minutes (PR #60). On a fresh cluster the waves overlap anyway (a child that has never synced doesn't hold its wave), and retries order them: with retries up to 2 minutes apart, a chain of them (External Secrets' webhook, the store, the bucket's keys, the policies) cost CI 2 to 4 minutes (links #113), so a child now retries every 5 s, doubling to 30 s. What remains is Argo CD's cluster cache lagging: on every event for any CRD its controller re-downloads and re-parses the cluster's whole OpenAPI schema under the cache's lock (gitops-engine, v3.5.6), and the platform installs about 100 CRDs, so on a fresh cluster its view trails the API server by minutes. Raising the controller's CPU request didn't help, and left no room for a canary pod on CI's node (platform #30, reverted).
+
+**How shortly's databases moved (platform plan 4.3).** Each environment moved by importing, then switching in the same sync. Staging's values turn on `database.cluster`, bootstrapped by `initdb.import` (microservice) from the running Postgres, and point the app at `shortly-db-app` in one PR. Argo CD's waves do the rest in order: the Cluster (held until healthy, so the import is done), the migration, then the app's rollout. No dump to copy by hand, and writes are lost only for the minute the import runs (staging: acceptable). Prod moved the same way, with the old database made read-only just before (RUNBOOK, "Move an environment's database"): redirects kept working, creates failed for a minute or two, and no write was left behind; during the canary only the new database could take writes. `bootstrap` is read only when the Cluster is created, so it can stay in the values; the old StatefulSet stayed until the end of 4.3.
 
 **CI installs the platform the same way.** Both kind jobs check out the platform repo (`easypeasyops/platform`) at the commit `platform.lock` names, and run *its* `cluster.sh up` with that commit as `PLATFORM_REVISION`, so what CI tests is what a laptop runs; there is no Helm-only shortcut that could pass while the Argo CD path is broken.
 
