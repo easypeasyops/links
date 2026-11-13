@@ -48,7 +48,7 @@ jobs:
 
   image:
     needs: scope
-    uses: easypeasyops/platform/.github/workflows/reusable-image.yml@cce3eacbfab382372835c764aeef92f216f23ec3 # platform.lock
+    uses: easypeasyops/platform/.github/workflows/reusable-image.yml@4b9b77d86ce00941081b0b9de74c11f523353169 # platform.lock
     with:
       run: ${{ needs.scope.outputs.full == 'true' }}
       context: apps/shortly
