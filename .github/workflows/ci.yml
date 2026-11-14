@@ -111,14 +111,19 @@ jobs:
 
       # The canary's synthetic traffic and the HPA drill run k6 from Docker Hub. A kind node
       # pulling it anonymously once timed out on Docker Hub's token endpoint: no traffic, so
-      # analysis aborted a healthy canary (PR #81's first run). Pull it on the runner, with
-      # retries, and load it into the node; pods use it as is (IfNotPresent).
+      # analysis aborted a healthy canary (PR #81's first run). Pull it ahead of time, with
+      # retries; pods use it as is (IfNotPresent). The node pulls it itself: `kind load` of
+      # an image the runner pulled fails since the runner's Docker keeps images in
+      # containerd (Docker 29), whose export names layers of platforms it never pulled.
       - name: Preload k6 into kind
         if: needs.scope.outputs.full == 'true'
         run: |
           image=$(source apps/shortly/scripts/lib/platform.sh && k6_image) # the one hpa-drill.sh uses
-          for attempt in 1 2 3; do docker pull -q "$image" && break; sleep $((attempt * 15)); done
-          kind load docker-image "$image" --name shortly
+          for attempt in 1 2 3; do
+            docker exec shortly-control-plane crictl pull "$image" && exit 0
+            sleep $((attempt * 15))
+          done
+          exit 1
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         if: needs.scope.outputs.full == 'true'
