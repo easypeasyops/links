@@ -1,0 +1,27 @@
+# shortly's Argo CD project, as the platform's apps/<app>/project.yaml (it lives here since
+# platform #80; CI's e2e step 12 applies it): what its Applications may deploy, and where.
+# Least privilege:
+# the platform's service chart, shortly's own repo (its values) and the platform's repo (the
+# namespace's baseline, deploy/app-namespace), its two namespaces, and one cluster-scoped
+# thing: those two namespaces themselves, which its Applications create (CreateNamespace in
+# apps/applicationset.yaml; Argo CD checks the namespace it creates against this project).
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: shortly
+  namespace: argocd
+spec:
+  description: shortly's environments (deploy/application/envs)
+  sourceRepos:
+    - oci://ghcr.io/easypeasyops/charts/service
+    - https://github.com/easypeasyops/links.git
+    - https://github.com/easypeasyops/platform.git
+  destinations:
+    # One namespace per app and environment.
+    - { server: https://kubernetes.default.svc, namespace: shortly-staging }
+    - { server: https://kubernetes.default.svc, namespace: shortly-prod }
+  clusterResourceWhitelist: # by name: its own namespaces, no other
+    - { group: "", kind: Namespace, name: shortly-staging }
+    - { group: "", kind: Namespace, name: shortly-prod }
+  namespaceResourceWhitelist:
+    - { group: "*", kind: "*" }

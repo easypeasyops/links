@@ -1,10 +1,12 @@
 """The platform's ApplicationSet, adjusted for CI's GitOps drill (scripts/k8s-e2e.sh, step 12).
 
     kubectl create --dry-run=client -o json -f <platform>/apps/applicationset.yaml \\
-      | python3 scripts/lib/e2e-appset.py <lock> <revision> <platform repo> <image repo> <tag>
+      | python3 scripts/lib/e2e-appset.py <lock> <revision> <platform repo> <image repo> <tag> \\
+          <links repo>
 
 Reads the ApplicationSet as JSON on stdin, prints it changed in exactly these ways:
-  - the generator reads only shortly's prod env file, at the locked platform commit;
+  - the generator reads only shortly's prod env file, from <links repo> at <revision> (the
+    platform holds no shortly env files since its #80; they are in deploy/application/envs/);
   - the values repo is read at <revision> (the commit under test) instead of the env file's;
   - the namespace's baseline (deploy/app-namespace) is read at the locked platform commit,
     not main;
@@ -22,10 +24,13 @@ PLATFORM_REVISION = "targetRevision: main\n"
 VALUE_FILES_END = "        {{- end }}\n"
 
 
-def adjust(appset: dict, lock: str, revision: str, platform_repo: str, repo: str, tag: str) -> dict:
+def adjust(
+    appset: dict, lock: str, revision: str, platform_repo: str, repo: str, tag: str, links_repo: str
+) -> dict:
     spec = appset["spec"]
     git = spec["generators"][0]["git"]
-    git["revision"], git["files"] = lock, [{"path": "apps/shortly/envs/prod.yaml"}]
+    git["repoURL"], git["revision"] = links_repo, revision
+    git["files"] = [{"path": "apps/shortly/deploy/application/envs/prod.yaml"}]
     spec["syncPolicy"]["applicationsSync"] = "create-only"
 
     patch = spec["templatePatch"]
@@ -57,4 +62,4 @@ def adjust(appset: dict, lock: str, revision: str, platform_repo: str, repo: str
 
 
 if __name__ == "__main__":
-    print(json.dumps(adjust(json.load(sys.stdin), *sys.argv[1:6])))
+    print(json.dumps(adjust(json.load(sys.stdin), *sys.argv[1:7])))

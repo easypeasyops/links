@@ -25,19 +25,26 @@ PATCH = (
     "      targetRevision: main\n      path: deploy/app-namespace\n"
 )
 LOCK = "e" * 40
+LINKS = "https://github.com/easypeasyops/links.git"
 
 
 def run(patch: str) -> subprocess.CompletedProcess[str]:
     appset = {
         "spec": {
             "generators": [
-                {"git": {"revision": "main", "files": [{"path": "apps/*/envs/*.yaml"}]}}
+                {
+                    "git": {
+                        "repoURL": "https://github.com/easypeasyops/platform.git",
+                        "revision": "main",
+                        "files": [{"path": "apps/*/envs/*.yaml"}],
+                    }
+                }
             ],
             "syncPolicy": {"preserveResourcesOnDeletion": True},
             "templatePatch": patch,
         }
     }
-    args = [LOCK, "c0ffee", "https://github.com/easypeasyops/platform.git", "shortly", "e2e"]
+    args = [LOCK, "c0ffee", "https://github.com/easypeasyops/platform.git", "shortly", "e2e", LINKS]
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         input=json.dumps(appset),
@@ -46,12 +53,15 @@ def run(patch: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_prod_only_at_the_lock_and_create_only() -> None:
+def test_prod_only_from_this_repo_at_the_commit_under_test_and_create_only() -> None:
     spec = json.loads(run(PATCH).stdout)["spec"]
+    env_file = "apps/shortly/deploy/application/envs/prod.yaml"
     assert spec["generators"][0]["git"] == {
-        "revision": LOCK,
-        "files": [{"path": "apps/shortly/envs/prod.yaml"}],
+        "repoURL": LINKS,
+        "revision": "c0ffee",
+        "files": [{"path": env_file}],
     }
+    assert (ROOT.parents[1] / env_file).is_file()
     assert spec["syncPolicy"] == {
         "preserveResourcesOnDeletion": True,
         "applicationsSync": "create-only",

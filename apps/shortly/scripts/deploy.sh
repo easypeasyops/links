@@ -9,7 +9,7 @@
 # A digest is deployed only after the platform's scripts/verify-image.sh proves it was built by this repo's
 # release workflow from a release tag. A tag is accepted only on a kind-* kube context.
 #
-# Where Argo CD manages an environment (the platform's ApplicationSet, apps/shortly/envs/), releases
+# Where Argo CD manages an environment (the platform's ApplicationSet), releases
 # go through git instead (scripts/promote.sh) and this script refuses. It remains the way
 # CI's e2e deploys local builds, and the break-glass path.
 #
@@ -71,7 +71,8 @@ fi
 extra_values=()
 [[ -n "${DEPLOY_EXTRA_VALUES:-}" ]] && extra_values=(--values "$DEPLOY_EXTRA_VALUES")
 # The chart and values Argo CD renders for this environment (platform plan 3.4): the
-# platform's service chart at the digest its env file pins, with this repo's values files
+# platform's service chart at the digest shortly's env file pins (deploy/application/envs/),
+# with this repo's values files
 # in the same order (scripts/lib/platform.sh).
 CHART=$(chart_ref "$ENV")
 mapfile -t values < <(values_args "$ENV")
