@@ -805,7 +805,7 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 
 | Job → step | Usual cause | Reproduce and fix |
 | --- | --- | --- |
-| k8s → "a healthy canary was not promoted", events show `ErrImagePull` for `grafana/k6` | Docker Hub was slow or refused the pull (the canary's synthetic traffic never ran) | Re-run the job. CI preloads k6 (step "Preload k6 into kind"); if that step failed, Docker Hub is down: wait |
+| k8s → "a healthy canary was not promoted", events show `ErrImagePull` for `grafana/k6` | Docker Hub was slow or refused the pull (the canary's synthetic traffic never ran) | Re-run the job. CI preloads k6 (step "Preload k6 into kind"); if that step failed after its three tries, Docker Hub is down: wait |
 | test → `test_service_values.py` | `deploy/prometheus/rules/` and the rule text in `deploy/service/` differ | Copy the rule file's text into `monitoring.rules` (cause alerts), or regenerate `slo-rules.values.yaml` (SLO rules) |
 | test → `test_generated_slo_rules_are_current` | `slos.yaml` or the generator changed without regenerating | `uv run python scripts/gen_slo_rules.py`, commit `deploy/prometheus/rules/slo.yaml`; regenerate `deploy/service/slo-rules.values.yaml` too (Change an SLO or an alert, below) |
 | test → `test_every_rule_selector_matches_something_the_app_exports` | A metric, route, label or histogram bucket changed, and an alert now selects nothing | Update the rule (or `slos.yaml`) to the new name, or revert the rename |
