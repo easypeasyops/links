@@ -55,7 +55,7 @@ def run(patch: str) -> subprocess.CompletedProcess[str]:
 
 def test_prod_only_from_this_repo_at_the_commit_under_test_and_create_only() -> None:
     spec = json.loads(run(PATCH).stdout)["spec"]
-    env_file = "apps/shortly/deploy/platform/envs/prod.yaml"
+    env_file = "apps/shortly/deploy/application/envs/prod.yaml"
     assert spec["generators"][0]["git"] == {
         "repoURL": LINKS,
         "revision": "c0ffee",

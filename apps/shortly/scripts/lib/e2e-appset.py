@@ -6,7 +6,7 @@
 
 Reads the ApplicationSet as JSON on stdin, prints it changed in exactly these ways:
   - the generator reads only shortly's prod env file, from <links repo> at <revision> (the
-    platform holds no shortly env files since its #80; they are in deploy/platform/envs/);
+    platform holds no shortly env files since its #80; they are in deploy/application/envs/);
   - the values repo is read at <revision> (the commit under test) instead of the env file's;
   - the namespace's baseline (deploy/app-namespace) is read at the locked platform commit,
     not main;
@@ -30,7 +30,7 @@ def adjust(
     spec = appset["spec"]
     git = spec["generators"][0]["git"]
     git["repoURL"], git["revision"] = links_repo, revision
-    git["files"] = [{"path": "apps/shortly/deploy/platform/envs/prod.yaml"}]
+    git["files"] = [{"path": "apps/shortly/deploy/application/envs/prod.yaml"}]
     spec["syncPolicy"]["applicationsSync"] = "create-only"
 
     patch = spec["templatePatch"]

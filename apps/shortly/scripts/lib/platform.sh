@@ -26,11 +26,11 @@ source "$PLATFORM_DIR/scripts/lib/namespaces.sh"
 # shortly's chart and values for an environment, exactly as the platform's ApplicationSet
 # renders them from an env file: the service chart pinned by digest, and the listed values
 # files from this repo, layered in order. shortly's env files are in this repo
-# (deploy/platform/envs/<env>.yaml) since the platform stopped deploying it (platform #80).
+# (deploy/application/envs/<env>.yaml) since the platform stopped deploying it (platform #80).
 #   chart_ref <env>      -> oci://ghcr.io/easypeasyops/charts/service@sha256:...
 #   values_args <env>    -> --values <file> ... (one per line, for mapfile)
 _env_file() {
-  local f="$_app_root/deploy/platform/envs/$1.yaml"
+  local f="$_app_root/deploy/application/envs/$1.yaml"
   [[ -f "$f" ]] || { echo "no $f: shortly has no environment $1" >&2; return 1; }
   echo "$f"
 }

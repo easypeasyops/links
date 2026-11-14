@@ -71,7 +71,7 @@ fi
 extra_values=()
 [[ -n "${DEPLOY_EXTRA_VALUES:-}" ]] && extra_values=(--values "$DEPLOY_EXTRA_VALUES")
 # The chart and values Argo CD renders for this environment (platform plan 3.4): the
-# platform's service chart at the digest shortly's env file pins (deploy/platform/envs/),
+# platform's service chart at the digest shortly's env file pins (deploy/application/envs/),
 # with this repo's values files
 # in the same order (scripts/lib/platform.sh).
 CHART=$(chart_ref "$ENV")

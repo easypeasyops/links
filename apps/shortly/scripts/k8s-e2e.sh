@@ -610,10 +610,10 @@ fi # 6-11
 
 # ---------------------------------------------------------------- 12. GitOps (Argo CD)
 # Prod's Application as the platform makes it: its ApplicationSet (apps/applicationset.yaml at
-# platform.lock) and shortly's AppProject (deploy/platform/project.yaml), applied as they
+# platform.lock) and shortly's AppProject (deploy/application/project.yaml), applied as they
 # are, with three CI-only changes:
 #   - the generator reads only shortly's prod env file, from this repo at this commit
-#     (deploy/platform/envs/prod.yaml: the platform has no shortly since its #80);
+#     (deploy/application/envs/prod.yaml: the platform has no shortly since its #80);
 #   - the values come from this commit (GITOPS_REVISION) instead of main, plus the
 #     platform's e2e-values (CI clocks, as deploy.sh) and the local build instead of the
 #     release digest; the project also allows the platform repo, for that values file;
@@ -631,7 +631,7 @@ if suite platform && [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applicat
   platform_repo=https://github.com/easypeasyops/platform.git
   links_repo=https://github.com/easypeasyops/links.git
   # shortly's project, as JSON (kubectl converts; the runner's python has no YAML module).
-  kubectl create --dry-run=client -o json -f "$ROOT/deploy/platform/project.yaml" \
+  kubectl create --dry-run=client -o json -f "$ROOT/deploy/application/project.yaml" \
     | python3 -c '
 import json, sys
 project = json.load(sys.stdin)

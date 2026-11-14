@@ -11,7 +11,7 @@ metadata:
   name: shortly
   namespace: argocd
 spec:
-  description: shortly's environments (deploy/platform/envs)
+  description: shortly's environments (deploy/application/envs)
   sourceRepos:
     - oci://ghcr.io/easypeasyops/charts/service
     - https://github.com/easypeasyops/links.git

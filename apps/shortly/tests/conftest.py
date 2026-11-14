@@ -58,7 +58,7 @@ def scripted_codes(*codes: str) -> Callable[[], str]:
 def stub_platform(tmp_path: Path) -> Path:
     """A stand-in platform checkout for scripts that load it (scripts/lib/platform.sh): the
     namespace map they source. Set PLATFORM_DIR to it; CI's check job has no checkout.
-    shortly's env files are this repo's own (deploy/platform/envs/)."""
+    shortly's env files are this repo's own (deploy/application/envs/)."""
     namespaces = tmp_path / "platform/scripts/lib/namespaces.sh"
     namespaces.parent.mkdir(parents=True)
     namespaces.write_text('ENVS=(staging prod)\nns_of() { echo "shortly-$1"; }\n')

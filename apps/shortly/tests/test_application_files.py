@@ -1,4 +1,4 @@
-"""deploy/platform/: shortly's env files and AppProject, in the platform's format.
+"""deploy/application/: shortly's env files and AppProject, in the platform's format.
 
 The platform stopped deploying shortly (platform #80), so they live here. deploy.sh and the
 kind e2e read them through scripts/lib/platform.sh; a mistake would otherwise show only in
