@@ -17,7 +17,9 @@ updates:
     ignore:
       # The platform's reusable workflows move with platform.lock, in a PR whose kind e2e
       # proves the new platform (DESIGN, "Platform changes arrive in waves"), never alone.
-      - dependency-name: easypeasyops/platform
+      # Dependabot names each one by its path (easypeasyops/platform/.github/workflows/…),
+      # so the bare repo name matched nothing (#150, #152).
+      - dependency-name: "easypeasyops/platform/*"
 
   - package-ecosystem: docker # bumps the base image digest in the Dockerfile
     directory: /apps/shortly
