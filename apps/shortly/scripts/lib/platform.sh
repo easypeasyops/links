@@ -4,7 +4,7 @@
 # clone beside this repo (../platform from the repo root). Sourcing this sets PLATFORM_DIR and loads the
 # platform's environment-to-namespace map (ENVS, ns_of, STAGING_NS, PROD_NS).
 # shortly lives in apps/shortly/ of this repo (platform plan 3.5); platform.lock, and the
-# paths in the platform's env files, are relative to the repo root.
+# paths in shortly's env files, are relative to the repo root.
 _app_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 _repo_root="$(cd "$_app_root/../.." && pwd)"
 PLATFORM_DIR="${PLATFORM_DIR:-$_repo_root/../platform}"
@@ -24,13 +24,14 @@ fi
 source "$PLATFORM_DIR/scripts/lib/namespaces.sh"
 
 # shortly's chart and values for an environment, exactly as the platform's ApplicationSet
-# renders them (apps/shortly/envs/<env>.yaml at PLATFORM_DIR): the service chart pinned by
-# digest, and the listed values files from this repo, layered in order.
+# renders them from an env file: the service chart pinned by digest, and the listed values
+# files from this repo, layered in order. shortly's env files are in this repo
+# (deploy/platform/envs/<env>.yaml) since the platform stopped deploying it (platform #80).
 #   chart_ref <env>      -> oci://ghcr.io/easypeasyops/charts/service@sha256:...
 #   values_args <env>    -> --values <file> ... (one per line, for mapfile)
 _env_file() {
-  local f="$PLATFORM_DIR/apps/shortly/envs/$1.yaml"
-  [[ -f "$f" ]] || { echo "no $f: the platform at $PLATFORM_DIR has no shortly/$1" >&2; return 1; }
+  local f="$_app_root/deploy/platform/envs/$1.yaml"
+  [[ -f "$f" ]] || { echo "no $f: shortly has no environment $1" >&2; return 1; }
   echo "$f"
 }
 chart_ref() {

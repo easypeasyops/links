@@ -610,8 +610,10 @@ fi # 6-11
 
 # ---------------------------------------------------------------- 12. GitOps (Argo CD)
 # Prod's Application as the platform makes it: its ApplicationSet (apps/applicationset.yaml at
-# platform.lock) and shortly's AppProject, applied as they are, with three CI-only changes:
-#   - the generator reads only prod's env file, at the locked platform commit (not main);
+# platform.lock) and shortly's AppProject (deploy/platform/project.yaml), applied as they
+# are, with three CI-only changes:
+#   - the generator reads only shortly's prod env file, from this repo at this commit
+#     (deploy/platform/envs/prod.yaml: the platform has no shortly since its #80);
 #   - the values come from this commit (GITOPS_REVISION) instead of main, plus the
 #     platform's e2e-values (CI clocks, as deploy.sh) and the local build instead of the
 #     release digest; the project also allows the platform repo, for that values file;
@@ -627,8 +629,9 @@ if suite platform && [[ -n "${GITOPS_REVISION:-}" ]] && kubectl get crd applicat
     fail "GitOps: $2: application shortly-prod is $(app '{.status.sync.status}/{.status.health.status}')"
   }
   platform_repo=https://github.com/easypeasyops/platform.git
+  links_repo=https://github.com/easypeasyops/links.git
   # shortly's project, as JSON (kubectl converts; the runner's python has no YAML module).
-  kubectl create --dry-run=client -o json -f "$PLATFORM_DIR/apps/shortly/project.yaml" \
+  kubectl create --dry-run=client -o json -f "$ROOT/deploy/platform/project.yaml" \
     | python3 -c '
 import json, sys
 project = json.load(sys.stdin)
@@ -638,7 +641,7 @@ print(json.dumps(project))
 ' "$platform_repo" | kubectl apply -f - >/dev/null
   kubectl create --dry-run=client -o json -f "$PLATFORM_DIR/apps/applicationset.yaml" \
     | python3 "$ROOT/scripts/lib/e2e-appset.py" "$PLATFORM_LOCK" "$GITOPS_REVISION" \
-      "$platform_repo" "${IMAGE%:*}" "${IMAGE##*:}" \
+      "$platform_repo" "${IMAGE%:*}" "${IMAGE##*:}" "$links_repo" \
     | kubectl apply -f - >/dev/null
   for _ in $(seq 1 40); do [[ -n "$(app '{.metadata.name}')" ]] && break; sleep 3; done
   [[ "$(app '{.metadata.ownerReferences[0].name}')" == apps ]] \

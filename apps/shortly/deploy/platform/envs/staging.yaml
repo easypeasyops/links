@@ -1,0 +1,20 @@
+# shortly in staging: the Application shortly-staging, in namespace shortly-staging, in the
+# format of the platform's apps/<app>/envs/<env>.yaml. The platform no longer deploys
+# shortly (platform #80), so the file lives here: deploy.sh and CI's e2e read it
+# (scripts/lib/platform.sh), and e2e step 12 gives it to the platform's ApplicationSet.
+app: shortly
+env: staging
+# The platform's service chart, pinned by digest (the version is for people). Move a pin
+# only to a released digest whose provenance verifies (the release's notes say how); move
+# staging's first.
+chart:
+  version: 1.2.1
+  digest: sha256:ca3d68b758d57577660a870180415210590c9ed299d80756102debb502d012f4
+# shortly's values, from links at this revision, layered in this order.
+values:
+  repoURL: https://github.com/easypeasyops/links.git
+  revision: main
+  files:
+    - apps/shortly/deploy/service/values.yaml
+    - apps/shortly/deploy/service/slo-rules.values.yaml
+    - apps/shortly/deploy/envs/staging.yaml
