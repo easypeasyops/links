@@ -123,7 +123,7 @@ A release is a pushed `shortly/vX.Y.Z` tag (the app, then its version: platform 
 | Failing step | Cause | Fix |
 | --- | --- | --- |
 | Tag must match pyproject version | Tagged the wrong commit, or forgot the bump | `git push --delete origin vX.Y.Z && git tag -d vX.Y.Z`; fix; re-tag |
-| Scan image | New fixable CVE in a dependency or base image | Bump it (`uv lock --upgrade-package <pkg>` or merge the Dependabot PR), merge, re-tag |
+| Scan image | New fixable CVE in a dependency or base image | Bump it (`uv lock --upgrade-package <pkg>`, merge the Dependabot PR, or for a Debian package move `APT_UPGRADED` in the Dockerfile), merge, re-tag |
 | Build and push | Registry or network error | Re-run the job; nothing was published |
 | Attest / Create release | Permissions or API error | Re-run the job; the image is already pushed, so the digest is unchanged |
 
@@ -805,7 +805,7 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 
 | Job → step | Usual cause | Reproduce and fix |
 | --- | --- | --- |
-| k8s → "a healthy canary was not promoted", events show `ErrImagePull` for `grafana/k6` | Docker Hub was slow or refused the pull (the canary's synthetic traffic never ran) | Re-run the job. CI preloads k6 (step "Preload k6 into kind"); if that step failed, Docker Hub is down: wait |
+| k8s → "a healthy canary was not promoted", events show `ErrImagePull` for `grafana/k6` | Docker Hub was slow or refused the pull (the canary's synthetic traffic never ran) | Re-run the job. CI preloads k6 (step "Preload k6 into kind"); if that step failed after its three tries, Docker Hub is down: wait |
 | test → `test_service_values.py` | `deploy/prometheus/rules/` and the rule text in `deploy/service/` differ | Copy the rule file's text into `monitoring.rules` (cause alerts), or regenerate `slo-rules.values.yaml` (SLO rules) |
 | test → `test_generated_slo_rules_are_current` | `slos.yaml` or the generator changed without regenerating | `uv run python scripts/gen_slo_rules.py`, commit `deploy/prometheus/rules/slo.yaml`; regenerate `deploy/service/slo-rules.values.yaml` too (Change an SLO or an alert, below) |
 | test → `test_every_rule_selector_matches_something_the_app_exports` | A metric, route, label or histogram bucket changed, and an alert now selects nothing | Update the rule (or `slos.yaml`) to the new name, or revert the rename |
@@ -818,7 +818,7 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 | test → `test_models_match_migrations` | `db.py` changed without a migration | `uv run alembic revision --autogenerate -m "…"` |
 | test → coverage below 90% | New code without tests | `uv run pytest --cov-fail-under=90` with Docker running |
 | test → `Docker is required` | Integration tests can't reach Docker | CI only; re-run. Locally they skip instead |
-| image → Scan image | New fixable HIGH/CRITICAL CVE, often transitive | Find the package in the Trivy table; `uv lock --upgrade-package <pkg>` or bump the base digest |
+| image → Scan image | New fixable HIGH/CRITICAL CVE, often transitive | Find the package in the Trivy table; `uv lock --upgrade-package <pkg>` or bump the base digest. A Debian package (target `debian`) whose fix the newest base doesn't have: move `APT_UPGRADED` in the Dockerfile to today, which re-runs its `apt-get upgrade` layer |
 | image → Smoke test | The container misbehaves | `docker build -t shortly:dev . && scripts/smoke.sh`; on failure it prints container logs |
 | k8s → digest-mode render | API server rejects a manifest (e.g. an invalid label) | `helm template … --set image.digest=sha256:<64 hex> \| kubectl apply --dry-run=server -f -` against kind |
 | k8s → monitoring checks | `scrapes 0 healthy prod pods` (ServiceMonitor or labels), `rule groups loaded` (PrometheusRule missing: is `monitoring.clusterWide` on for prod?), `rules not evaluating cleanly` (a PromQL error), or `a dashboard query is invalid` | `ALERT_DRILL=0 scripts/monitoring-check.sh` against kind |
