@@ -34,6 +34,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # ---------------------------------------------------------------------------- runtime
 FROM python:3.15-slim-trixie@sha256:94d3426f1def7db4a106a232ac121bfd975393e5dfd40a619b955fae45fe7913 AS runtime
 
+# Debian's security fixes the base image doesn't carry yet (2026-11: zlib1g and apt, HIGH,
+# fixed in Debian but not in the newest python image, so the Trivy gate failed every PR).
+# The layer is cached: when the scan names a Debian package again, move the date to run it
+# again (RUNBOOK: CI failures).
+ARG APT_UPGRADED=2026-11-13
+RUN : "upgraded $APT_UPGRADED" \
+ && apt-get update \
+ && apt-get upgrade --yes \
+ && rm -rf /var/lib/apt/lists/*
+
 # Fixed, non-root UID/GID: predictable file ownership and compatible with
 # Kubernetes `runAsNonRoot`. No login shell, no home directory contents.
 RUN groupadd --system --gid 10001 app \

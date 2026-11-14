@@ -123,7 +123,7 @@ A release is a pushed `shortly/vX.Y.Z` tag (the app, then its version: platform 
 | Failing step | Cause | Fix |
 | --- | --- | --- |
 | Tag must match pyproject version | Tagged the wrong commit, or forgot the bump | `git push --delete origin vX.Y.Z && git tag -d vX.Y.Z`; fix; re-tag |
-| Scan image | New fixable CVE in a dependency or base image | Bump it (`uv lock --upgrade-package <pkg>` or merge the Dependabot PR), merge, re-tag |
+| Scan image | New fixable CVE in a dependency or base image | Bump it (`uv lock --upgrade-package <pkg>`, merge the Dependabot PR, or for a Debian package move `APT_UPGRADED` in the Dockerfile), merge, re-tag |
 | Build and push | Registry or network error | Re-run the job; nothing was published |
 | Attest / Create release | Permissions or API error | Re-run the job; the image is already pushed, so the digest is unchanged |
 
@@ -818,7 +818,7 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 | test → `test_models_match_migrations` | `db.py` changed without a migration | `uv run alembic revision --autogenerate -m "…"` |
 | test → coverage below 90% | New code without tests | `uv run pytest --cov-fail-under=90` with Docker running |
 | test → `Docker is required` | Integration tests can't reach Docker | CI only; re-run. Locally they skip instead |
-| image → Scan image | New fixable HIGH/CRITICAL CVE, often transitive | Find the package in the Trivy table; `uv lock --upgrade-package <pkg>` or bump the base digest |
+| image → Scan image | New fixable HIGH/CRITICAL CVE, often transitive | Find the package in the Trivy table; `uv lock --upgrade-package <pkg>` or bump the base digest. A Debian package (target `debian`) whose fix the newest base doesn't have: move `APT_UPGRADED` in the Dockerfile to today, which re-runs its `apt-get upgrade` layer |
 | image → Smoke test | The container misbehaves | `docker build -t shortly:dev . && scripts/smoke.sh`; on failure it prints container logs |
 | k8s → digest-mode render | API server rejects a manifest (e.g. an invalid label) | `helm template … --set image.digest=sha256:<64 hex> \| kubectl apply --dry-run=server -f -` against kind |
 | k8s → monitoring checks | `scrapes 0 healthy prod pods` (ServiceMonitor or labels), `rule groups loaded` (PrometheusRule missing: is `monitoring.clusterWide` on for prod?), `rules not evaluating cleanly` (a PromQL error), or `a dashboard query is invalid` | `ALERT_DRILL=0 scripts/monitoring-check.sh` against kind |

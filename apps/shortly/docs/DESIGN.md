@@ -1084,6 +1084,7 @@ The controls concentrate on the supply chain and the runtime blast radius; abuse
 | --- | --- | --- |
 | Milestone 3 | Coverage floor failed partial local runs | Floor enforced only in CI (`--cov-fail-under=90`) |
 | Milestone 4 | pip in base image carried 4 HIGH CVEs | pip removed from runtime image |
+| 2026-11 (PR #158) | The Trivy gate failed every PR for a week: zlib1g and apt had HIGH CVEs fixed in Debian, and the newest python base image still shipped the old packages | The runtime image runs `apt-get upgrade` on top of the pinned base (`APT_UPGRADED` in the Dockerfile re-runs the cached layer) |
 | Post-#5 | Dependabot moved image to Python 3.14; tests stayed on 3.13 | `tests/test_toolchain.py` |
 | Milestone 5 | SQLAlchemy instrumentation silently produced no spans | Integration test asserts SQL spans in the request trace |
 | Milestone 5 | certifi CRITICAL arrived transitively via `requests` | Image scan gate (caught it) |
