@@ -61,7 +61,10 @@ jobs:
     name: kind e2e (${{ matrix.suite }})
     needs: scope
     runs-on: ubuntu-latest
-    timeout-minutes: 20 # a hung drill shouldn't hold a runner
+    # A hung drill shouldn't hold a runner. The platform half takes 15 to 17 minutes since
+    # the platform grew and the HPA drill waits for its CPU to settle (#166); a slow runner
+    # took over 20 and was cancelled mid-drill (#163).
+    timeout-minutes: 25
     strategy:
       fail-fast: false # a failure in one half shouldn't hide the other half's result
       matrix:
