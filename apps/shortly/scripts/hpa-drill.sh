@@ -8,7 +8,8 @@
 #
 # It stops the load as soon as the HPA has added a ready pod: that is all it asserts, and
 # the rest of the load would only cost time (about a minute in CI). DURATION is the ceiling;
-# FULL=1 runs it out, to watch the HPA keep scaling and see k6's summary.
+# FULL=1 runs it out, to watch the HPA keep scaling and see k6's summary. Then it returns
+# the environment to the HPA's floor at once (maxReplicas lowered, then restored).
 #
 # It gates on scaling only. k6's latency thresholds are expected to fail during the first
 # seconds of the spike (that is the gap autoscaling has to close); they are printed, not
@@ -138,3 +139,16 @@ if ((peak <= min)); then
   fail "HPA never scaled past $min ready replicas although CPU reached ${max_cpu}% (target ${target}%)"
 fi
 pass "HPA scaled $min → $peak ready replicas; first new pod ready after ${first_scale}s"
+
+# 4. Back to the floor now, not after the HPA's scale-down window (5 minutes): the extra
+#    pods' CPU requests filled CI's node, and the next step's Job couldn't be scheduled
+#    (links #157). maxReplicas at the floor makes the HPA scale down at once; then it is
+#    put back, before any check can fail.
+kubectl -n "$NS" patch hpa shortly --type merge -p "{\"spec\":{\"maxReplicas\":$min}}" >/dev/null
+for _ in $(seq 1 60); do
+  settled && break
+  sleep 2
+done
+kubectl -n "$NS" patch hpa shortly --type merge -p "{\"spec\":{\"maxReplicas\":$max}}" >/dev/null
+settled || fail "$(ready) ready replicas 120 s after the drill, above the HPA floor $min"
+pass "back to $min ready replicas after the drill (maxReplicas $max again)"
