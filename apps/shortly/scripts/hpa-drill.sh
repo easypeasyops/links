@@ -145,11 +145,18 @@ pass "HPA scaled $min → $peak ready replicas; first new pod ready after ${firs
 #    (links #157). maxReplicas at the floor makes the HPA scale down at once. Then the HPA
 #    is recreated with its maxReplicas back: an HPA remembers its recommendations for the
 #    whole window, so the same one with maxReplicas restored scaled straight back up to the
-#    load's count (links #164). A new one starts from the CPU it reads now.
+#    load's count (links #164). A new one starts from the CPU it reads, so it is made only
+#    once that CPU is below the target: metrics-server averages over its window, and an HPA
+#    made right after the load still read the load's CPU and scaled up to 4 (links #166).
 kubectl -n "$NS" patch hpa shortly --type merge -p "{\"spec\":{\"maxReplicas\":$min}}" >/dev/null
 for _ in $(seq 1 60); do
   settled && break
   sleep 2
+done
+for _ in $(seq 1 60); do
+  cpu=$(hpa '{.status.currentMetrics[0].resource.current.averageUtilization}')
+  ((${cpu:-100} < target)) && break
+  sleep 3
 done
 kubectl -n "$NS" get hpa shortly -o json | python3 -c '
 import json, sys
