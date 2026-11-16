@@ -855,7 +855,7 @@ The local environments are disposable: `../../../platform/scripts/cluster.sh up`
 | Deploy a local build (kind only; tags are refused elsewhere) | `docker build -t shortly:dev . && scripts/deploy.sh staging shortly:dev` |
 | Check an image's provenance | `../../../platform/scripts/verify-image.sh ghcr.io/easypeasyops/links/shortly@sha256:…` |
 | Run the full e2e drill | `docker build -t shortly:e2e . && IMAGE=shortly:e2e scripts/k8s-e2e.sh` (`HPA_DRILL=0` skips the autoscaling step; `E2E_SUITE=platform` or `delivery` runs one CI half) |
-| Autoscaling drill only | `scripts/hpa-drill.sh` (stops once the HPA adds a ready pod, then scales back to the HPA's floor by lowering `maxReplicas` for a moment; `RATE=1500 DURATION=240s FULL=1` for a longer push to the end, with k6's summary) |
+| Autoscaling drill only | `scripts/hpa-drill.sh` (stops once the HPA adds a ready pod, then scales back to the HPA's floor by lowering `maxReplicas` and recreating the HPA; `RATE=1500 DURATION=240s FULL=1` for a longer push to the end, with k6's summary) |
 | Watch autoscaling | `kubectl -n shortly-prod get hpa shortly -w` |
 | Platform state | `kubectl -n argocd get applications -l app.kubernetes.io/part-of=platform`, or the Argo CD UI |
 | Try a platform change before merging it | Push the branch, then `PLATFORM_REVISION=$(git rev-parse HEAD) ../../../platform/scripts/cluster.sh up`; `../../../platform/scripts/cluster.sh up` (back to `main`) when done |
