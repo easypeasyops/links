@@ -107,6 +107,11 @@ on_exit() {
       kubectl -n "$ns" get rollout,analysisrun -o wide 2>/dev/null || true
     done
     kubectl -n gateway get gateway shortly -o wide || true
+    # What the node has given out, and to whom: a Pod Pending on "Insufficient cpu" doesn't
+    # say which pods hold the requests (links #164).
+    kubectl describe nodes | sed -n '/^Allocated resources:/,/^Events:/p' || true
+    kubectl get pods -A --field-selector=status.phase!=Succeeded,status.phase!=Failed \
+      -o custom-columns='NAMESPACE:.metadata.namespace,POD:.metadata.name,CPU:.spec.containers[*].resources.requests.cpu' || true
     canary_diagnostics
   fi
   for env in "${ENVS[@]}"; do kubectl -n "$(ns_of "$env")" delete pod client --wait=false >/dev/null 2>&1 || true; done
