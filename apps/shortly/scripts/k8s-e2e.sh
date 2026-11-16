@@ -106,7 +106,7 @@ on_exit() {
       kubectl -n "$ns" get httproute -o wide || true
       kubectl -n "$ns" get rollout,analysisrun -o wide 2>/dev/null || true
     done
-    kubectl -n gateway get gateway shortly -o wide || true
+    kubectl -n gateway get gateway front-door -o wide || true
     # What the node has given out, and to whom: a Pod Pending on "Insufficient cpu" doesn't
     # say which pods hold the requests (links #164).
     kubectl describe nodes | sed -n '/^Allocated resources:/,/^Events:/p' || true
@@ -230,7 +230,7 @@ in_cluster prod /readyz || fail "prod not reachable through its Service"
 # ---------------------------------------------------------------- 3a. through the gateway
 # Users come in through the Gateway (the platform's deploy/kind/gateway.yaml), routed by hostname. From a
 # pod, as a client would: the Envoy proxy's Service, with the Host header deciding where to.
-GW=http://shortly-gateway.envoy-gateway-system.svc
+GW=http://front-door.envoy-gateway-system.svc
 gw() { # host path [extra wget args...] -> prints "STATUS LOCATION"
   local host=$1 path=$2; shift 2
   kubectl -n "$PROD_NS" exec client -- wget -S -O /dev/null -T 5 --header "Host: $host" "$@" "$GW$path" 2>&1 \
