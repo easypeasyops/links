@@ -1009,7 +1009,7 @@ Only creates (10% of the mix) pay for the extra query, so the cost is small, and
 
   Without a limit, every request at 800 req/s took about 1.7 s, so a client with a 1 s timeout would have got almost nothing. With the limit, about 400 req/s succeed quickly and the rest get an immediate 503 they can retry on another pod. Shedding isn't free: each 503 still costs some CPU, so raw goodput falls by about 20–30% at heavy overload. Limits of 16, 32 and 64 were measured. 16 had by far the lowest latency (successful p99 108 ms at 800 req/s, against 209 and 358), and its goodput was within 2% of the best at every step (at 800 req/s: 412, against 389 for 32 and 420 for 64; at 1,200 req/s it was the highest). By Little's law a pod at its HPA target has under one request in flight, and about five even at ten times normal latency, so 16 sheds only real overload. `requests_in_flight` shows how close real pods get.
 - **CPU overload is the HPA's job, the limit only buys time.** Shedding keeps the pods that exist fast while the HPA adds more (30–60 s). It doesn't add capacity, and at `maxReplicas` it is what users see.
-- **CI coverage.** `scripts/hpa-drill.sh` runs in CI and proves the HPA adds pods under load; it stops the load once the first new pod is ready. It does not measure capacity.
+- **CI coverage.** `scripts/hpa-drill.sh` runs in CI and proves the HPA adds pods under load; it stops the load once the first new pod is ready, then returns prod to the HPA's floor at once (`maxReplicas` lowered to `minReplicas` and restored), so the extra pods' CPU requests don't hold CI's node through the 5-minute scale-down window. It does not measure capacity.
 
 **Autoscaling, first CI run (PR #11).** 600 req/s from inside the cluster against 2 pods:
 
