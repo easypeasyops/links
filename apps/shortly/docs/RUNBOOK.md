@@ -24,7 +24,7 @@ Operational procedures for shortly. shortly lives in `apps/shortly/` of the link
 | Helm release | `shortly` in each namespace; the platform's service chart (digest in `deploy/application/envs/<env>.yaml`), values in `deploy/service/` and `deploy/envs/` |
 | Canary (prod) | New versions get 10%, then 50% of the Gateway's traffic, each step judged by Prometheus (traffic, 5xx ≤ 1%, redirect p99 ≤ 250 ms), then 100%: about 7 min. A failed step aborts and `deploy.sh` rolls back. Rollbacks to the last 3 revisions are immediate. See Deploy |
 | Deploys | GitOps: Argo CD (namespace `argocd`) syncs each environment from `deploy/envs/<env>.yaml` on `main` within 60 s. Promote with `scripts/promote.sh`; roll back by reverting the promotion PR. UI: http://argocd.localhost:8090 (front door) |
-| Front door | Gateway `gateway/shortly` (Envoy Gateway); prod = `sho.rt.localhost`, staging = `staging.sho.rt.localhost`. Locally, always on: `http://sho.rt.localhost:8080/<code>`; the dev tools at `http://{argocd,grafana,prometheus,alertmanager}.localhost:8090` (the front door, Local cluster operations) |
+| Front door | Gateway `gateway/front-door` (Envoy Gateway); prod = `sho.rt.localhost`, staging = `staging.sho.rt.localhost`. Locally, always on: `http://sho.rt.localhost:8080/<code>`; the dev tools at `http://{argocd,grafana,prometheus,alertmanager}.localhost:8090` (the front door, Local cluster operations) |
 | Endpoints | `/healthz` liveness · `/readyz` readiness on port 8000 · `/metrics` on port **9100** (Prometheus only, by NetworkPolicy) |
 | Database | CloudNativePG Cluster `shortly-db` per namespace (Service `shortly-db-rw`); the app reads Secret `shortly-db-app` (key `uri`). The primary pod: `kubectl -n shortly-prod get cluster shortly-db -o jsonpath='{.status.currentPrimary}'` (`shortly-db-1` until a failover); psql there with `kubectl -n shortly-prod exec -it <primary> -c postgres -- psql -d shortly` |
 | Backups | WAL archived continuously and a base backup hourly at :23 UTC, by the Barman Cloud plugin, to `s3://cnpg-backups/<ns>/shortly-db` (SeaweedFS, namespace `backups`), 7 days. RPO: the archive's lag (minutes); prove: `scripts/restore-drill-cnpg.sh`; restore: "Restore Postgres from a backup" |
@@ -445,11 +445,11 @@ helm -n $NS history shortly
 The Gateway is the user path; probes and Prometheus go around it. So a broken front door looks like **traffic dropping**, not errors: no alert fires on the pods.
 
 ```bash
-kubectl -n gateway get gateway shortly                         # PROGRAMMED must be True
+kubectl -n gateway get gateway front-door                      # PROGRAMMED must be True
 kubectl -n shortly-prod get httproute shortly -o jsonpath='{.status.parents[0].conditions}'   # Accepted, ResolvedRefs
 kubectl -n envoy-gateway-system get pods                       # envoy-gateway (controller) and the proxy
 kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50
-kubectl -n shortly-prod run probe --rm -i --restart=Never --image=postgres:17-alpine -- wget -q -O- --header 'Host: sho.rt.localhost' http://shortly-gateway.envoy-gateway-system.svc/readyz
+kubectl -n shortly-prod run probe --rm -i --restart=Never --image=postgres:17-alpine -- wget -q -O- --header 'Host: sho.rt.localhost' http://front-door.envoy-gateway-system.svc/readyz
 ```
 
 | What you see | Cause | Fix |
@@ -830,7 +830,7 @@ A PR that changes only Markdown files (other than `docs/RUNBOOK.md`) skips the w
 | k8s → Lint and schema-validate | A chart manifest fails its schema | Run the step's `kubeconform` command locally; the error names the field |
 | k8s → backup and restore | `prod's WAL … not archived after 120 s` (the plugin can't reach the bucket: the Cluster's `ContinuousArchiving` condition, the `shortly-db-backup` ExternalSecret), `the drill Cluster never became healthy` (its pods' logs print above: the recovery can't read the bucket, or no base backup completed yet), `restored schema at revision …` or `restored N links, expected M`, `link e2ewal1 … is not in the restored database` (WAL wasn't replayed), `a pod that isn't a backup or database pod reached the backup bucket` (the `seaweedfs` NetworkPolicy) | `SOURCE=shortly-prod KEEP=1 scripts/restore-drill-cnpg.sh` against kind; see "The database: CloudNativePG" |
 | k8s → expired-link cleanup | `index … missing or invalid` (the concurrent index build failed: see the migrate Job's logs), `the Job did not complete` (its logs print above: DB access, provenance, Pod Security), `left …, want e2efut1,e2enew1` (the cutoff or grace period changed) | `kubectl -n shortly-staging logs job/cleanup-e2e`; `uv run pytest tests/test_cleanup.py -v` |
-| k8s → gateway | `prod /readyz via sho.rt.localhost` or `staging …` (the route isn't attached or the proxy isn't ready), `create through sho.rt.localhost failed`, `a prod link resolved through staging's hostname` (two routes claim one hostname), `an unknown hostname was routed somewhere` (a route without `hostnames`) | `kubectl -n gateway get gateway shortly`; `kubectl -n shortly-prod get httproute shortly -o yaml` (status: `Accepted`, `ResolvedRefs`); `kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50` |
+| k8s → gateway | `prod /readyz via sho.rt.localhost` or `staging …` (the route isn't attached or the proxy isn't ready), `create through sho.rt.localhost failed`, `a prod link resolved through staging's hostname` (two routes claim one hostname), `an unknown hostname was routed somewhere` (a route without `hostnames`) | `kubectl -n gateway get gateway front-door`; `kubectl -n shortly-prod get httproute shortly -o yaml` (status: `Accepted`, `ResolvedRefs`); `kubectl -n envoy-gateway-system logs deploy/envoy-gateway --tail=50` |
 | k8s → network policies | `a non-Prometheus pod scraped prod's metrics port` or `a pod that isn't shortly reached Postgres` (a policy missing, or the CNI not enforcing NetworkPolicy), or a `control:` line (the allowed path broke: check labels and `networkPolicy` values) | `kubectl -n shortly-prod get networkpolicy`; the step's commands in `scripts/k8s-e2e.sh` |
 | k8s → admission checks | `was ADMITTED, expected refused` (the policy isn't enforcing), `was refused, expected admitted` (the release no longer verifies in-cluster: often no network to Sigstore), `not by the provenance policy` (Pod Security or a manifest error), or no allowlist reports | `scripts/admission-check.sh` against kind; `kubectl -n kyverno logs deploy/kyverno-admission-controller` |
 | k8s → HPA drill | `HPA has no CPU metrics` (metrics-server not ready); `load too light` (CPU never got 10% past the target: raise the drill's `RATE`); or no scale-up despite high CPU (a real HPA problem) | `IMAGE=shortly:e2e scripts/k8s-e2e.sh`, or just `scripts/hpa-drill.sh` against a running kind cluster |
@@ -866,7 +866,7 @@ The local environments are disposable: `../../../platform/scripts/cluster.sh up`
 | Create without the front door (ports 8080 and 8090 left free) | `FRONT_DOOR=0 ../../../platform/scripts/cluster.sh up`; then port-forward by hand, e.g. `kubectl -n monitoring port-forward svc/grafana 3000:80` |
 | Open the app through the Gateway | http://sho.rt.localhost:8080 (prod) or http://staging.sho.rt.localhost:8080, always on (the front door, below) |
 | Front door down? (a UI or the app doesn't answer on 8080 / 8090) | `docker ps --filter name=shortly-front-door` (two, `Up`); `../../../platform/scripts/cluster.sh up` recreates them. A port taken by an old `kubectl port-forward` is the usual cause: it says so; stop that one |
-| Is the Gateway routing? | `kubectl -n gateway get gateway shortly` (`PROGRAMMED True`); `kubectl get httproute -A` |
+| Is the Gateway routing? | `kubectl -n gateway get gateway front-door` (`PROGRAMMED True`); `kubectl get httproute -A` |
 | Admission checks only | `scripts/admission-check.sh` (server-side dry runs; creates nothing) |
 | Admission policies and their state | `kubectl get imagevalidatingpolicy,validatingpolicy`; reports: `kubectl get policyreport -A` |
 | Prometheus UI (targets, rules, alerts) | http://prometheus.localhost:8090 |

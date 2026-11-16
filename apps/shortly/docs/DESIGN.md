@@ -719,7 +719,7 @@ An environment and the namespace it runs in are two things: staging runs in `sho
 
 ```mermaid
 flowchart LR
-  U[client] -->|Host: sho.rt.localhost| E[Envoy proxy<br/>envoy-gateway-system/shortly-gateway]
+  U[client] -->|Host: sho.rt.localhost| E[Envoy proxy<br/>envoy-gateway-system/front-door]
   U -->|Host: staging.sho.rt.localhost| E
   E -->|HTTPRoute prod, weighted| P[prod: Services shortly-stable / shortly-canary]
   E -->|HTTPRoute staging| S[staging: Service shortly]
@@ -932,7 +932,7 @@ Each failure below degrades predictably and is visible in at least one signal; [
 | WAL archiving failing (bucket down or full, keys wrong) | Nothing user-facing at first; the point a restore can reach stops moving, and unarchived WAL fills the database's volume, which would stop the database | `ShortlyWalArchivingFailing` after 15 minutes; the Cluster's `ContinuousArchiving` condition; the `plugin-barman-cloud` sidecar's log |
 | Database lost (volume deleted, corrupted) | Every request fails; restore from the newest dump loses up to 1 hour of writes | `ShortlyDown` / `ShortlyNotReady`; RUNBOOK, Restore Postgres from a backup |
 | Index build fails halfway (lock timeout, disk) | The migration Job fails and the release is aborted; an invalid index is left, which the next run drops and rebuilds | Failed `shortly-migrate-<rev>` Job; `indisvalid = false` in `pg_index` |
-| Gateway proxy down (Envoy pod lost, bad config) | Users can't reach any environment; in-cluster callers and probes are unaffected, so pods stay Ready and the SLO metrics show a drop in traffic, not errors | `ShortlyDown` doesn't fire (pods are fine): watch request rate; `kubectl -n gateway get gateway shortly` (`Programmed`) |
+| Gateway proxy down (Envoy pod lost, bad config) | Users can't reach any environment; in-cluster callers and probes are unaffected, so pods stay Ready and the SLO metrics show a drop in traffic, not errors | `ShortlyDown` doesn't fire (pods are fine): watch request rate; `kubectl -n gateway get gateway front-door` (`Programmed`) |
 | HTTPRoute not accepted (hostname or parent misconfigured) | That environment is unreachable through the Gateway; the others are fine | `kubectl -n <ns> get httproute` shows the parent's `Accepted`/`ResolvedRefs` conditions |
 | Tracing backend down | Spans dropped by the batch exporter; requests unaffected | Exporter warnings in logs |
 | Vulnerable dependency published | CI image scan fails; release workflow refuses to publish | Red `build, scan` job |
