@@ -8,8 +8,8 @@ env: staging
 # only to a released digest whose provenance verifies (the release's notes say how); move
 # staging's first.
 chart:
-  version: 1.2.1
-  digest: sha256:ca3d68b758d57577660a870180415210590c9ed299d80756102debb502d012f4
+  version: 1.4.0
+  digest: sha256:71cbda3906a1181d2dfaa4635c1647d615ec5e23a6c017a5bc3738db01c02fb8
 # shortly's values, from links at this revision, layered in this order.
 values:
   repoURL: https://github.com/easypeasyops/links.git
