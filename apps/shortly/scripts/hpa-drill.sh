@@ -9,7 +9,7 @@
 # It stops the load as soon as the HPA has added a ready pod: that is all it asserts, and
 # the rest of the load would only cost time (about a minute in CI). DURATION is the ceiling;
 # FULL=1 runs it out, to watch the HPA keep scaling and see k6's summary. Then it returns
-# the environment to the HPA's floor at once (maxReplicas lowered, then restored).
+# the environment to the HPA's floor at once (maxReplicas lowered, then the HPA recreated).
 #
 # It gates on scaling only. k6's latency thresholds are expected to fail during the first
 # seconds of the spike (that is the gap autoscaling has to close); they are printed, not
@@ -142,13 +142,32 @@ pass "HPA scaled $min → $peak ready replicas; first new pod ready after ${firs
 
 # 4. Back to the floor now, not after the HPA's scale-down window (5 minutes): the extra
 #    pods' CPU requests filled CI's node, and the next step's Job couldn't be scheduled
-#    (links #157). maxReplicas at the floor makes the HPA scale down at once; then it is
-#    put back, before any check can fail.
+#    (links #157). maxReplicas at the floor makes the HPA scale down at once. Then the HPA
+#    is recreated with its maxReplicas back: an HPA remembers its recommendations for the
+#    whole window, so the same one with maxReplicas restored scaled straight back up to the
+#    load's count (links #164). A new one starts from the CPU it reads now.
 kubectl -n "$NS" patch hpa shortly --type merge -p "{\"spec\":{\"maxReplicas\":$min}}" >/dev/null
 for _ in $(seq 1 60); do
   settled && break
   sleep 2
 done
-kubectl -n "$NS" patch hpa shortly --type merge -p "{\"spec\":{\"maxReplicas\":$max}}" >/dev/null
+kubectl -n "$NS" get hpa shortly -o json | python3 -c '
+import json, sys
+hpa = json.load(sys.stdin)
+hpa.pop("status", None)
+for key in ("uid", "resourceVersion", "creationTimestamp", "generation", "managedFields"):
+    hpa["metadata"].pop(key, None)
+hpa["spec"]["maxReplicas"] = int(sys.argv[1])
+json.dump(hpa, sys.stdout)' "$max" | kubectl replace --force -f - >/dev/null
 settled || fail "$(ready) ready replicas 120 s after the drill, above the HPA floor $min"
-pass "back to $min ready replicas after the drill (maxReplicas $max again)"
+# The new HPA's first decisions (it syncs every 15 s) must keep the floor.
+for _ in $(seq 1 12); do
+  [[ -n "$(hpa '{.status.desiredReplicas}')" ]] && break
+  sleep 5
+done
+sleep 20
+desired=$(hpa '{.status.desiredReplicas}')
+if ((${desired:-0} > min)) || ! settled; then
+  fail "the recreated HPA wants ${desired:-?} replicas, $(ready) ready: above the floor $min"
+fi
+pass "back to $min ready replicas after the drill; the HPA recreated with maxReplicas $max"
