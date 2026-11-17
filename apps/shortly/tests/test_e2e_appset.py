@@ -44,7 +44,15 @@ def run(patch: str) -> subprocess.CompletedProcess[str]:
             "templatePatch": patch,
         }
     }
-    args = [LOCK, "c0ffee", "https://github.com/easypeasyops/platform.git", "shortly", "e2e", LINKS]
+    args = [
+        LOCK,
+        "c0ffee",
+        "https://github.com/easypeasyops/platform.git",
+        "shortly",
+        "e2e",
+        LINKS,
+        "400m",
+    ]
     return subprocess.run(
         [sys.executable, str(SCRIPT), *args],
         input=json.dumps(appset),
@@ -77,6 +85,7 @@ def test_values_at_the_commit_under_test_then_ci_values() -> None:
         in patch
     )
     assert '"image": {"repository": "shortly", "tag": "e2e", "digest": ""}' in patch
+    assert '"resources": {"requests": {"cpu": "400m"}}' in patch
     assert patch.endswith(f'targetRevision: "{LOCK}"\n      ref: platform\n')
 
 
