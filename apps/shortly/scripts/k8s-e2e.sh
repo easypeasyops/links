@@ -62,7 +62,7 @@ export DEPLOY_EXTRA_VALUES="${DEPLOY_EXTRA_VALUES-$PLATFORM_DIR/deploy/kind/e2e-
 # 12. Prod's real 500m (deploy/service/values.yaml) is 2000m at a canary's peak (4 pods),
 # which left CI's 4-CPU node about 10m free at step 12's canary; at 400m about 650m stays
 # free, room for one more pod. The HPA's 70% target is of this request, so the same load
-# reads 25% higher: the drill (step 6) still scales 2 → 4 and back.
+# reads 25% higher: the drill (step 6) still adds a pod and goes back to 2.
 E2E_PROD_CPU=400m
 prod_cpu=(--set "resources.requests.cpu=$E2E_PROD_CPU")
 # Both environments' Postgres is a CloudNativePG Cluster archiving to the backup bucket.
