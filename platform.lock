@@ -1,4 +1,4 @@
 # The platform commit this repo is built, tested and deployed against (platform plan 3.4):
 # CI's kind e2e checks out easypeasyops/platform here and runs its cluster.sh. Move it in a
 # PR of its own; that PR's e2e is where a new platform proves itself on shortly.
-easypeasyops/platform@08373edb899c6c3fa7815f34de131227aa4e8273
+easypeasyops/platform@299607aaaab00071463e73ce9a152f8fffee2c0a
