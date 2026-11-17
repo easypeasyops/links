@@ -2,7 +2,7 @@
 
     kubectl create --dry-run=client -o json -f <platform>/apps/applicationset.yaml \\
       | python3 scripts/lib/e2e-appset.py <lock> <revision> <platform repo> <image repo> <tag> \\
-          <links repo>
+          <links repo> <cpu>
 
 Reads the ApplicationSet as JSON on stdin, prints it changed in exactly these ways:
   - the generator reads only shortly's prod env file, from <links repo> at <revision> (the
@@ -11,7 +11,8 @@ Reads the ApplicationSet as JSON on stdin, prints it changed in exactly these wa
   - the namespace's baseline (deploy/app-namespace) is read at the locked platform commit,
     not main;
   - the platform's deploy/kind/e2e-values.yaml is layered after the app's values files (CI
-    clocks, as deploy.sh), then the local build and a lower HPA ceiling as valuesObject;
+    clocks, as deploy.sh), then the local build, a lower HPA ceiling and the e2e's CPU
+    request <cpu> (the one k8s-e2e.sh gives deploy.sh) as valuesObject;
   - applicationsSync: create-only, so an edit to the generated Application sticks.
 Standard library only: the CI runner's python has no YAML module.
 """
@@ -25,7 +26,14 @@ VALUE_FILES_END = "        {{- end }}\n"
 
 
 def adjust(
-    appset: dict, lock: str, revision: str, platform_repo: str, repo: str, tag: str, links_repo: str
+    appset: dict,
+    lock: str,
+    revision: str,
+    platform_repo: str,
+    repo: str,
+    tag: str,
+    links_repo: str,
+    cpu: str,
 ) -> dict:
     spec = appset["spec"]
     git = spec["generators"][0]["git"]
@@ -43,6 +51,9 @@ def adjust(
         # canary needs room for one more pod, which the CI node then lacks; a lower ceiling
         # takes effect at once and doesn't touch the pod template.
         "autoscaling": {"maxReplicas": 2},
+        # As deploy.sh's prod deploys in k8s-e2e.sh: the same pod template, so taking prod
+        # over starts no rollout (PT-71: the canary's room on CI's node).
+        "resources": {"requests": {"cpu": cpu}},
     }
     patch = patch.replace(VALUES_REVISION, f"targetRevision: {json.dumps(revision)}")
     patch = patch.replace(PLATFORM_REVISION, f"targetRevision: {json.dumps(lock)}\n")
@@ -62,4 +73,4 @@ def adjust(
 
 
 if __name__ == "__main__":
-    print(json.dumps(adjust(json.load(sys.stdin), *sys.argv[1:7])))
+    print(json.dumps(adjust(json.load(sys.stdin), *sys.argv[1:8])))

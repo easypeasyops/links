@@ -58,6 +58,13 @@ SUITE="${E2E_SUITE:-all}"
 case "$SUITE" in all | platform | delivery) ;; *) echo "E2E_SUITE must be all, platform or delivery" >&2; exit 2 ;; esac
 suite() { [[ "$SUITE" == all || "$SUITE" == "$1" ]]; }
 export DEPLOY_EXTRA_VALUES="${DEPLOY_EXTRA_VALUES-$PLATFORM_DIR/deploy/kind/e2e-values.yaml}"
+# Prod's CPU request in this e2e only (PT-71): every prod deploy below, and Argo CD's in step
+# 12. Prod's real 500m (deploy/service/values.yaml) is 2000m at a canary's peak (4 pods),
+# which left CI's 4-CPU node about 10m free at step 12's canary; at 400m about 650m stays
+# free, room for one more pod. The HPA's 70% target is of this request, so the same load
+# reads 25% higher: the drill (step 6) still adds a pod and goes back to 2.
+E2E_PROD_CPU=400m
+prod_cpu=(--set "resources.requests.cpu=$E2E_PROD_CPU")
 # Both environments' Postgres is a CloudNativePG Cluster archiving to the backup bucket.
 # Without the bucket (BACKUPS=0) it can't archive: every deploy turns backups off, through
 # one more values file (deploy.sh takes one), so no deploy turns them back on.
@@ -215,7 +222,7 @@ grep -q 'links_created_total 1.0' <<<"$metrics" || fail "staging metrics"
 pass "staging: migrated, ready, create → 307, metrics on port 9100 only"
 
 # ---------------------------------------------------------------- 3. promote to prod
-DEPLOY_TIMEOUT=6m "$ROOT/scripts/deploy.sh" prod "$IMAGE" >/dev/null # creates prod's Cluster too
+DEPLOY_TIMEOUT=6m "$ROOT/scripts/deploy.sh" prod "$IMAGE" "${prod_cpu[@]}" >/dev/null # creates prod's Cluster too
 [[ "$(workload prod)" == rollout/shortly ]] || fail "prod is not an Argo Rollout (canary.enabled?)"
 ready=$(kubectl -n "$PROD_NS" get rollout shortly -o jsonpath='{.status.readyReplicas}')
 [[ "$ready" == 2 ]] || fail "prod has $ready ready replicas, want 2"
@@ -367,7 +374,7 @@ errors_file=$(mktemp) stop_file=$(mktemp -u)
 load_pid=$!
 
 if CANARY_TIMEOUT=45s CANARY_TRAFFIC=0 "$ROOT/scripts/deploy.sh" prod "$IMAGE" \
-  --set config.logLevel=NOT_A_LEVEL --set migrations.enabled=false >/dev/null 2>&1; then
+  --set config.logLevel=NOT_A_LEVEL --set migrations.enabled=false "${prod_cpu[@]}" >/dev/null 2>&1; then
   fail "broken release was accepted"
 fi
 touch "$stop_file"
@@ -386,7 +393,7 @@ pass "broken release auto-rolled back (now revision $(revision prod)); 0 failed 
 # A healthy new version (only the log level differs) goes 10% → 50% → 100%, passing analysis
 # at each step, with deploy.sh's synthetic traffic through the Gateway.
 start=$SECONDS
-"$ROOT/scripts/deploy.sh" prod "$IMAGE" --set config.logLevel=DEBUG "${canary_fast[@]}" >/dev/null \
+"$ROOT/scripts/deploy.sh" prod "$IMAGE" --set config.logLevel=DEBUG "${canary_fast[@]}" "${prod_cpu[@]}" >/dev/null \
   || fail "a healthy canary was not promoted"
 took=$((SECONDS - start))
 [[ "$(pod_env prod SHORTLY_LOG_LEVEL)" == DEBUG ]] || fail "DEBUG release didn't apply"
@@ -438,7 +445,7 @@ if ((monitoring)); then
   ) &
   load_pid=$!
   start=$SECONDS
-  if "$ROOT/scripts/deploy.sh" prod "$IMAGE" --set config.faultErrorRatio=0.5 "${canary_fast[@]}" \
+  if "$ROOT/scripts/deploy.sh" prod "$IMAGE" --set config.faultErrorRatio=0.5 "${canary_fast[@]}" "${prod_cpu[@]}" \
     >/dev/null 2>&1; then
     fail "a canary failing half its requests was promoted"
   fi
@@ -646,7 +653,7 @@ print(json.dumps(project))
 ' "$platform_repo" | kubectl apply -f - >/dev/null
   kubectl create --dry-run=client -o json -f "$PLATFORM_DIR/apps/applicationset.yaml" \
     | python3 "$ROOT/scripts/lib/e2e-appset.py" "$PLATFORM_LOCK" "$GITOPS_REVISION" \
-      "$platform_repo" "${IMAGE%:*}" "${IMAGE##*:}" "$links_repo" \
+      "$platform_repo" "${IMAGE%:*}" "${IMAGE##*:}" "$links_repo" "$E2E_PROD_CPU" \
     | kubectl apply -f - >/dev/null
   for _ in $(seq 1 40); do [[ -n "$(app '{.metadata.name}')" ]] && break; sleep 3; done
   [[ "$(app '{.metadata.ownerReferences[0].name}')" == apps ]] \
@@ -692,6 +699,10 @@ print(json.dumps(project))
     sleep 3
   done
   [[ "$new_hash" != "$old_hash" ]] || fail "GitOps: the canary did not finish in 420 s ($(ro '{.status.phase}'))"
+  # The node's CPU at the canary's peak, on every run (PT-71): the old pods stay 30 s after
+  # the promotion, so all of prod's pods are still here. Free = allocatable - requests.
+  echo "     node at the canary's end: $(kubectl -n "$PROD_NS" get pods -l app.kubernetes.io/name=shortly --no-headers | wc -l) prod pods, $(kubectl get nodes -o jsonpath='{.items[0].status.allocatable.cpu}') CPU allocatable"
+  kubectl describe nodes | sed -n '/^Allocated resources:/,/^Events:/p' | sed 's/^/     /'
   [[ "$(pod_env prod SHORTLY_LOG_LEVEL)" == DEBUG ]] || fail "GitOps: the change did not reach the Rollout"
   ((max_weight >= 10)) || fail "GitOps: the canary never got traffic (max weight $max_weight%)"
   if ((monitoring)); then
