@@ -17,7 +17,7 @@
 #   - EXPECT_LINKS, if given: exactly that many links came back
 #   - EXPECT_CODE, if given: a link written after the base backup came back (from WAL)
 # and prints how long the restore took: the RTO evidence (docs/DESIGN.md, Backups).
-# Run by scripts/k8s-e2e.sh (step 11c) against staging. The pg_dump drill
+# Run by scripts/k8s-e2e.sh (step 11) against prod, in the background. The pg_dump drill
 # (scripts/restore-drill.sh) covers a namespace still on the old Postgres.
 set -euo pipefail
 

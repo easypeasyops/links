@@ -28,16 +28,17 @@
 #   9. network policies are enforced: the metrics port and Postgres refuse other pods
 #  10. the cleanup CronJob deletes links past their grace period, and only those
 #  11. prod's CloudNativePG backups restore: its base backup plus a link written after it
-#      (WAL only), into a scratch Cluster (scripts/restore-drill-cnpg.sh), and only backup and
-#      database pods reach the bucket (skipped if BACKUPS=0)
-#  11b. `cluster.sh wake` restarts the CronJob scheduler
+#      (WAL only), into a scratch Cluster (scripts/restore-drill-cnpg.sh, run in the background
+#      during steps 8-10 and 12's takeover), and only backup and database pods reach the
+#      bucket (skipped if BACKUPS=0)
+#  11b. `cluster.sh wake` restarts the CronJob scheduler (run before step 11)
 #  12. GitOps: Argo CD takes prod over from this commit, reverts a hand edit, and runs a
 #      canary it started itself without fighting Argo Rollouts over the route's weights
 #      (needs GITOPS_REVISION, a commit Argo CD can fetch; CI sets it)
 #
 # E2E_SUITE splits the run for CI's two parallel kind jobs. Both run steps 0-3a, then:
-#   platform: 3b, 3c, 6-12 (rate limit, front door, autoscaling, monitoring and the alert drill, admission,
-#             network policies, cleanup, backups, GitOps)
+#   platform: 3b, 3c, 6, 7, 11b, 11, 8-10, 12 (rate limit, front door, autoscaling, monitoring
+#             and the alert drill, wake, backups, admission, network policies, cleanup, GitOps)
 #   delivery: 4, 5, 5b (automatic and manual rollback, both canaries)
 # (GitOps runs with the platform half: that half was about 4 minutes shorter without it.)
 #   all:      everything in one cluster (the default; what a laptop runs)
@@ -54,6 +55,7 @@ source "$(dirname "$0")/lib/platform.sh"
 source "$(dirname "$0")/lib/client.sh"
 PF_PIDS=()
 ALERT_PID="" ALERT_LOG=$(mktemp)
+RESTORE_PID="" RESTORE_LOG=$(mktemp)
 SUITE="${E2E_SUITE:-all}"
 case "$SUITE" in all | platform | delivery) ;; *) echo "E2E_SUITE must be all, platform or delivery" >&2; exit 2 ;; esac
 suite() { [[ "$SUITE" == all || "$SUITE" == "$1" ]]; }
@@ -101,6 +103,11 @@ on_exit() {
     kill "$ALERT_PID" 2>/dev/null || true
     wait "$ALERT_PID" 2>/dev/null || true # its EXIT trap restores staging
     sed 's/^/     alert drill: /' "$ALERT_LOG"
+  fi
+  if [[ -n "$RESTORE_PID" ]]; then # the same for the restore drill (step 11)
+    kill "$RESTORE_PID" 2>/dev/null || true
+    wait "$RESTORE_PID" 2>/dev/null || true
+    sed 's/^/     restore drill: /' "$RESTORE_LOG"
   fi
   if [[ $status -ne 0 ]]; then
     echo "--- diagnostics ---"
@@ -488,6 +495,77 @@ else
   echo "skip monitoring checks: kube-prometheus-stack not installed (MONITORING=0?)"
 fi
 
+# 11b. `cluster.sh wake` (after a laptop slept) restarts the CronJob scheduler
+# (kube-controller-manager), so the cleanup CronJob runs again on time. While the platform
+# still runs the old Postgres's pg_dump CronJob, it also starts an overdue backup at once
+# (MAX_AGE=0 makes every backup "overdue" here). It runs before step 11, not after it: the
+# restart pauses the controllers (Jobs, volumes) that the restore drill's Cluster needs.
+restarts() { kubectl -n kube-system get pod -l component=kube-controller-manager \
+  -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'; }
+before=$(restarts)
+WAKE_BACKUP_MAX_AGE=0 "$PLATFORM_DIR/scripts/cluster.sh" wake
+(($(restarts) == before + 1)) || fail "wake: kube-controller-manager was not restarted"
+if kubectl -n "$PROD_NS" get cronjob postgres-backup >/dev/null 2>&1; then
+  wake_job=$(kubectl -n "$PROD_NS" get jobs -o name | grep -m1 'job.batch/backup-wake-' || true)
+  [[ -n "$wake_job" ]] || fail "wake: no backup-wake Job in prod"
+  kubectl -n "$PROD_NS" wait --for=condition=complete "$wake_job" --timeout=180s >/dev/null \
+    || fail "wake: $wake_job did not complete"
+fi
+pass "wake: kube-controller-manager restarted${wake_job:+, and the overdue prod backup ran at once ($wake_job)}"
+
+# ---------------------------------------------------------------- 11. backup and restore
+# Prod's CloudNativePG backups (platform plan 4.3): the base backup the chart takes when the
+# Cluster is created, then a link written after it, in WAL only. Restoring both into a
+# scratch Cluster (scripts/restore-drill-cnpg.sh) proves the archive replays, not just that
+# a snapshot exists. A backup is only proven by a restore; this one is proven on every PR.
+# The restore runs in the background during steps 8-10 and Argo CD's takeover (step 12),
+# which write no links to prod: it expects prod's exact link count. Collected before step
+# 12's canary, whose synthetic traffic creates links.
+psql_prod() {
+  local primary
+  primary=$(kubectl -n "$PROD_NS" get cluster shortly-db -o jsonpath='{.status.currentPrimary}')
+  kubectl -n "$PROD_NS" exec "$primary" -c postgres -- psql -d shortly -v ON_ERROR_STOP=1 -tAc "$1"
+}
+if kubectl -n "$PROD_NS" get objectstore shortly-db >/dev/null 2>&1; then
+  for _ in $(seq 1 60); do
+    [[ "$(kubectl -n "$PROD_NS" get backups -l cnpg.io/cluster=shortly-db \
+      -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' | grep -c completed)" -gt 0 ]] && break
+    sleep 3
+  done
+  psql_prod "INSERT INTO links (code, target, created_at) VALUES ('e2ewal1', 'https://example.com/wal', now())" >/dev/null
+  want_links=$(psql_prod "SELECT count(*) FROM links")
+  # Close the WAL segment holding that insert, and wait until the plugin has archived it.
+  segment=$(psql_prod "SELECT pg_walfile_name(pg_switch_wal())")
+  archived=""
+  for _ in $(seq 1 40); do
+    archived=$(psql_prod "SELECT coalesce(last_archived_wal, '') FROM pg_stat_archiver")
+    [[ -n "$archived" && ! "$archived" < "$segment" ]] && break
+    sleep 3
+  done
+  [[ -n "$archived" && ! "$archived" < "$segment" ]] \
+    || fail "backup: prod's WAL $segment not archived after 120 s (last: '${archived:-none}')"
+  pass "backup: prod's base backup completed, and WAL up to $segment is archived"
+  SOURCE="$PROD_NS" EXPECT_CODE=e2ewal1 EXPECT_LINKS="$want_links" "$ROOT/scripts/restore-drill-cnpg.sh" \
+    >"$RESTORE_LOG" 2>&1 &
+  RESTORE_PID=$!
+  echo "     restore drill started in the background"
+else
+  echo "skip backup checks: no backup bucket (BACKUPS=0?)"
+fi
+collect_restore() {
+  local pid=$RESTORE_PID
+  RESTORE_PID=""
+  [[ -n "$pid" ]] || return 0
+  wait "$pid" || { sed 's/^/     /' "$RESTORE_LOG"; fail "restore drill (scripts/restore-drill-cnpg.sh)"; }
+  cat "$RESTORE_LOG"
+  # The bucket is for backup and database pods only: the client pod (neither) is refused. The
+  # control is the drill above, whose Cluster reached it.
+  if kubectl -n "$PROD_NS" exec client -- nc -z -w 3 seaweedfs.backups.svc 8333 2>/dev/null; then
+    fail "network policy: a pod that isn't a backup or database pod reached the backup bucket"
+  fi
+  pass "network policy: the backup bucket refuses pods other than backup and database pods"
+}
+
 # ---------------------------------------------------------------- 8. admission policy
 if kubectl get crd imagevalidatingpolicies.policies.kyverno.io >/dev/null 2>&1; then
   "$ROOT/scripts/admission-check.sh"
@@ -561,63 +639,6 @@ summary=$(kubectl -n "$STAGING_NS" logs job/cleanup-e2e | grep '"cleanup finishe
 kubectl -n "$STAGING_NS" delete job cleanup-e2e --wait=false >/dev/null
 pass "cleanup: the Job deleted only the link past its grace period (404), kept the rest (410, live)"
 
-# ---------------------------------------------------------------- 11. backup and restore
-# Prod's CloudNativePG backups (platform plan 4.3): the base backup the chart takes when the
-# Cluster is created, then a link written after it, in WAL only. Restoring both into a
-# scratch Cluster (scripts/restore-drill-cnpg.sh) proves the archive replays, not just that
-# a snapshot exists. A backup is only proven by a restore; this one is proven on every PR.
-psql_prod() {
-  local primary
-  primary=$(kubectl -n "$PROD_NS" get cluster shortly-db -o jsonpath='{.status.currentPrimary}')
-  kubectl -n "$PROD_NS" exec "$primary" -c postgres -- psql -d shortly -v ON_ERROR_STOP=1 -tAc "$1"
-}
-if kubectl -n "$PROD_NS" get objectstore shortly-db >/dev/null 2>&1; then
-  for _ in $(seq 1 60); do
-    [[ "$(kubectl -n "$PROD_NS" get backups -l cnpg.io/cluster=shortly-db \
-      -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' | grep -c completed)" -gt 0 ]] && break
-    sleep 3
-  done
-  psql_prod "INSERT INTO links (code, target, created_at) VALUES ('e2ewal1', 'https://example.com/wal', now())" >/dev/null
-  want_links=$(psql_prod "SELECT count(*) FROM links")
-  # Close the WAL segment holding that insert, and wait until the plugin has archived it.
-  segment=$(psql_prod "SELECT pg_walfile_name(pg_switch_wal())")
-  archived=""
-  for _ in $(seq 1 40); do
-    archived=$(psql_prod "SELECT coalesce(last_archived_wal, '') FROM pg_stat_archiver")
-    [[ -n "$archived" && ! "$archived" < "$segment" ]] && break
-    sleep 3
-  done
-  [[ -n "$archived" && ! "$archived" < "$segment" ]] \
-    || fail "backup: prod's WAL $segment not archived after 120 s (last: '${archived:-none}')"
-  pass "backup: prod's base backup completed, and WAL up to $segment is archived"
-  SOURCE="$PROD_NS" EXPECT_CODE=e2ewal1 EXPECT_LINKS="$want_links" "$ROOT/scripts/restore-drill-cnpg.sh"
-  # The bucket is for backup and database pods only: the client pod (neither) is refused. The
-  # control is the drill above, whose Cluster reached it.
-  if kubectl -n "$PROD_NS" exec client -- nc -z -w 3 seaweedfs.backups.svc 8333 2>/dev/null; then
-    fail "network policy: a pod that isn't a backup or database pod reached the backup bucket"
-  fi
-  pass "network policy: the backup bucket refuses pods other than backup and database pods"
-else
-  echo "skip backup checks: no backup bucket (BACKUPS=0?)"
-fi
-
-# 11b. `cluster.sh wake` (after a laptop slept) restarts the CronJob scheduler
-# (kube-controller-manager), so the cleanup CronJob runs again on time. While the platform
-# still runs the old Postgres's pg_dump CronJob, it also starts an overdue backup at once
-# (MAX_AGE=0 makes every backup "overdue" here).
-restarts() { kubectl -n kube-system get pod -l component=kube-controller-manager \
-  -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}'; }
-before=$(restarts)
-WAKE_BACKUP_MAX_AGE=0 "$PLATFORM_DIR/scripts/cluster.sh" wake
-(($(restarts) == before + 1)) || fail "wake: kube-controller-manager was not restarted"
-if kubectl -n "$PROD_NS" get cronjob postgres-backup >/dev/null 2>&1; then
-  wake_job=$(kubectl -n "$PROD_NS" get jobs -o name | grep -m1 'job.batch/backup-wake-' || true)
-  [[ -n "$wake_job" ]] || fail "wake: no backup-wake Job in prod"
-  kubectl -n "$PROD_NS" wait --for=condition=complete "$wake_job" --timeout=180s >/dev/null \
-    || fail "wake: $wake_job did not complete"
-fi
-pass "wake: kube-controller-manager restarted${wake_job:+, and the overdue prod backup ran at once ($wake_job)}"
-
 fi # 6-11
 
 # ---------------------------------------------------------------- 12. GitOps (Argo CD)
@@ -673,6 +694,8 @@ print(json.dumps(project))
   ((healed)) || fail "GitOps: self-heal did not restore the PodDisruptionBudget within 60s"
   pass "GitOps: a hand edit (PDB minAvailable 1 → 0) was reverted in $((SECONDS - start))s"
 
+  collect_restore # step 11, before the canary's synthetic traffic writes links to prod
+
   # A change through Argo CD (as a merged PR would make): a full canary, with its own
   # synthetic traffic, while Argo CD keeps watching. It must not reset the weights.
   old_hash=$(ro '{.status.stableRS}')
@@ -717,5 +740,6 @@ print(json.dumps(project))
 else
   echo "skip GitOps checks: no Argo CD, or GITOPS_REVISION unset (CI sets it)"
 fi
+[[ -z "$RESTORE_PID" ]] || collect_restore # step 11, when step 12 didn't run
 
 echo "k8s e2e passed"
