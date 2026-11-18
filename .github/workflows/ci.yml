@@ -63,8 +63,11 @@ jobs:
     runs-on: ubuntu-latest
     # A hung drill shouldn't hold a runner. The platform half takes 15 to 17 minutes since
     # the platform grew and the HPA drill waits for its CPU to settle (#166); a slow runner
-    # took over 20 and was cancelled mid-drill (#163).
-    timeout-minutes: 25
+    # took over 20 and was cancelled mid-drill (#163). Since then the platform install alone
+    # varies from 9.5 to 15 minutes, and a run was cancelled at 25 with the drill still
+    # running (#170, run 44179462196: install 15 minutes, drill over 9). The delivery half
+    # takes about 12; it shares the limit as it shares the job.
+    timeout-minutes: 35
     strategy:
       fail-fast: false # a failure in one half shouldn't hide the other half's result
       matrix:
