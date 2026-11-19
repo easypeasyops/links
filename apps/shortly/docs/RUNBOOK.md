@@ -797,6 +797,8 @@ The kind e2e runs as two jobs in parallel, `kind e2e (platform)` and `kind e2e (
 
 Both jobs install the platform from `easypeasyops/platform` at the commit in `platform.lock` (step "Which platform"). A failure that appears right after a PR moved the lock is the new platform's: compare with the PR before it, and fix in the platform repo or move the lock back. Locally the scripts use the platform clone beside this repo (`../../../platform`, or `PLATFORM_DIR`) and print a note when it isn't at the locked commit.
 
+**A red nightly run.** CI also runs every night at 11:37 UTC on `main` (`schedule`), with the platform at its `main` instead of `platform.lock` (the step "Which platform" names the commit). Pull requests and pushes keep the lock. A nightly that fails while the PRs are green means the platform's `main` broke shortly: the next lock move will fail the same way. Find the platform change in the failing drill, then fix shortly in the PR that moves the lock, or the platform. GitHub emails whoever last edited the cron. To try a platform commit by hand: `gh workflow run ci.yml --ref main -f platform-ref=<branch, tag or sha>` (empty: the lock).
+
 A slow or stuck platform install: the kind job's progress lines name what holds each Application back (`[Degraded Deployment/…: message]`), and the step "Platform start-up report" lists image pulls and the slowest pods to become Ready.
 
 Checks from the reusable workflows are named `<job> / <step job>`: `check / lint, type-check, test` and `image / build, scan, smoke-test image`; their steps are in `.github/workflows/reusable-*.yml`.
