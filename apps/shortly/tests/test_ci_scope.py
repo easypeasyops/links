@@ -47,5 +47,6 @@ def test_only_markdown_other_than_the_runbook_skips(
     assert _scope(tmp_path, changed) == expected
 
 
-def test_pushes_to_main_always_run_everything(tmp_path: Path) -> None:
-    assert _scope(tmp_path, ["apps/shortly/docs/DESIGN.md"], event="push") == "full=true"
+@pytest.mark.parametrize("event", ["push", "schedule", "workflow_dispatch"])
+def test_pushes_nightly_and_manual_runs_always_run_everything(tmp_path: Path, event: str) -> None:
+    assert _scope(tmp_path, ["apps/shortly/docs/DESIGN.md"], event=event) == "full=true"

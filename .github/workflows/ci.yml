@@ -4,14 +4,27 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Nightly, the kind e2e runs against the platform's main instead of platform.lock, so a
+  # platform change that breaks shortly shows the next morning, not when the lock moves
+  # (platform PT-113). 11:37 UTC is 03:37 or 04:37 in Los Angeles, after the platform's own
+  # nightly (10:17 UTC). Off the hour: GitHub delays and drops runs queued on the hour.
+  schedule:
+    - cron: "37 11 * * *"
+  workflow_dispatch:
+    inputs:
+      platform-ref:
+        description: "Platform branch, tag or commit for the kind e2e (empty: platform.lock)"
+        required: false
+        default: ""
 
 # Least privilege: the default GITHUB_TOKEN can write to the repo; CI only needs to read.
 permissions:
   contents: read
 
-# A new push to the same PR/branch cancels the now-stale run.
+# A new push to the same PR/branch cancels the now-stale run. Nightly and manual runs have
+# groups of their own: a push to main doesn't cancel the nightly, nor one platform-ref another.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}-${{ inputs.platform-ref }}
   cancel-in-progress: true
 
 jobs:
@@ -89,9 +102,21 @@ jobs:
       # The platform this commit runs on (platform plan 3.4): cluster.sh, the kind config, the
       # policies and the platform chart all come from easypeasyops/platform at the commit
       # platform.lock names. A platform change reaches this e2e when a PR moves the lock.
+      # Nightly runs take the platform's main instead, and a manual run the platform-ref it
+      # is given; the lock in this checkout is rewritten to that commit, so the scripts
+      # (scripts/lib/platform.sh, the GitOps drill) use the same platform as cluster.sh.
       - name: Which platform (platform.lock)
         id: platform
+        env:
+          REF: ${{ github.event_name == 'schedule' && 'main' || inputs.platform-ref }}
+          GH_TOKEN: ${{ github.token }}
         run: |
+          if [[ -n "$REF" ]]; then
+            sha=$(gh api "repos/easypeasyops/platform/commits/$REF" --jq .sha)
+            [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::platform ref '$REF' is no commit"; exit 1; }
+            echo "::notice::Platform at $REF ($sha), not platform.lock"
+            echo "easypeasyops/platform@$sha" >platform.lock
+          fi
           sha=$(sed -nE 's/^easypeasyops\/platform@([0-9a-f]{40})$/\1/p' platform.lock)
           [[ -n "$sha" ]] || { echo "::error::platform.lock names no easypeasyops/platform@<sha>"; exit 1; }
           echo "sha=$sha" >>"$GITHUB_OUTPUT"
