@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Alert drill: a real outage travels Prometheus -> Alertmanager and is routed to the right
 # receiver. staging has one fixed replica and no HPA, so scaling it to zero is a clean,
-# reversible outage; ShortlyNoAvailablePods must reach Alertmanager, routed to "staging".
+# reversible outage; ShortlyNoAvailablePods must reach Alertmanager, routed to "apps": the
+# platform's receiver for every app, which posts to #<app>-alerts-<env> (platform PT-99).
 # staging is restored afterwards, on failure too.
 #
 #   scripts/alert-drill.sh        # about 90 s, most of it the alert's `for: 1m`
@@ -37,9 +38,9 @@ for a in json.load(sys.stdin):
   sleep 5
 done
 [[ -n "$receiver" ]] || fail "ShortlyNoAvailablePods for staging never reached Alertmanager"
-[[ "$receiver" == staging ]] || fail "staging alert routed to '$receiver', want 'staging'"
+[[ "$receiver" == apps ]] || fail "staging alert routed to '$receiver', want 'apps'"
 took=$((SECONDS - start))
 restore
 kubectl -n "$STAGING_NS" rollout status deploy/shortly --timeout=120s >/dev/null
 trap - EXIT
-pass "staging scaled to 0: ShortlyNoAvailablePods reached Alertmanager after ${took}s, routed to 'staging'; restored"
+pass "staging scaled to 0: ShortlyNoAvailablePods reached Alertmanager after ${took}s, routed to 'apps'; restored"
