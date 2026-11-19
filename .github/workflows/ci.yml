@@ -152,6 +152,9 @@ jobs:
           ARGOCD_APPS: "0" # Argo CD doesn't manage the app yet: e2e step 12 does that
           POLICIES: ${{ matrix.policies }}
           BACKUPS: ${{ matrix.backups }}
+          # No Slack bot token in CI: from platform PT-97, cluster.sh up fails with Slack on
+          # and no token, so CI switches it off (alerts stay in Alertmanager).
+          SLACK: "0"
 
       # Where the platform's start-up time goes: each image pull (from the kubelet's events)
       # and each pod's time from creation to Ready. The baseline for making set-up faster.
