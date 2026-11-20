@@ -68,12 +68,12 @@ $out"
   pass "admitted: $1 $2 ($3)"
 }
 
+# refused <pod|deployment> <image> <why> [what the refusal must say: default, the provenance policy]
 refused() {
-  local out
+  local out by="${4:-require-release-provenance}"
   if out=$(try "$1" "$2"); then fail "$1 with $2 was ADMITTED, expected refused ($3)"; fi
   # Refused by Kyverno, not by something else (Pod Security, a typo in the manifest).
-  grep -q "require-release-provenance" <<<"$out" \
-    || fail "$1 with $2 was refused, but not by the provenance policy:
+  grep -qF "$by" <<<"$out" || fail "$1 with $2 was refused, but not with \"$by\":
 $out"
   pass "refused:  $1 $2 ($3)"
 }
@@ -86,18 +86,32 @@ refused pod "$REPO@$UNATTESTED" "a real image with no attestation of its own"
 refused pod "$REPO:0.2.0" "a tag: mutable, so never verified"
 refused pod "$REPO@$MISSING" "a digest that doesn't exist"
 refused deployment "$REPO@$UNATTESTED" "Pod templates are checked too (autogen)"
-admitted pod "shortly:e2e" "a local build: not a registry image, outside the policy"
+admitted pod "shortly:e2e" "a local build: outside the provenance policy; the allowlist's named exception"
 
-# The allowlist is Audit in kind: admitted, but reported. The app pods from the earlier
-# steps run shortly:e2e, which isn't on it, so their PolicyReport must say "fail".
-for _ in $(seq 1 36); do
-  failed=$(kubectl -n "$NS" get policyreport -o json 2>/dev/null | python3 -c '
+# The allowlist (app-allowed-images): Audit in kind up to platform PT-111, Deny from then
+# (shortly:e2e passes it through the named exception for the app's own local build). Read
+# from the policy itself, so this holds on either side of a lock move; any other answer,
+# or no policy, fails.
+FOREIGN=busybox:1.36 # an image no app namespace may run
+actions=$(kubectl get validatingpolicy app-allowed-images -o jsonpath='{.spec.validationActions}' 2>/dev/null) \
+  || fail "allowlist policy app-allowed-images not installed (POLICIES=0? see the platform's scripts/cluster.sh)"
+case "$actions" in
+  *Deny*)
+    refused pod "$FOREIGN" "outside the allowlist" "image not allowed in the namespaces of app"
+    ;;
+  *Audit*)
+    admitted pod "$FOREIGN" "outside the allowlist, which is Audit here: reported, not refused"
+    # Audit only reports: the policy must still be evaluating shortly's pods.
+    for _ in $(seq 1 36); do
+      results=$(kubectl -n "$NS" get policyreport -o json 2>/dev/null | python3 -c '
 import json, sys
 items = json.load(sys.stdin).get("items", [])
-print(sum(1 for r in items for res in r.get("results", [])
-          if res.get("policy") == "app-allowed-images" and res.get("result") == "fail"))')
-  ((failed > 0)) && break
-  sleep 5
-done
-((failed > 0)) || fail "no allowlist violations reported in $NS after 180 s (reports controller?)"
-pass "allowlist (Audit): $failed violation(s) reported in $NS for the local build"
+print(sum(1 for r in items for res in r.get("results", []) if res.get("policy") == "app-allowed-images"))')
+      ((results > 0)) && break
+      sleep 5
+    done
+    ((results > 0)) || fail "no allowlist results reported in $NS after 180 s (reports controller?)"
+    pass "allowlist (Audit): $results result(s) reported in $NS"
+    ;;
+  *) fail "app-allowed-images has validationActions $actions: expected Deny or Audit" ;;
+esac
