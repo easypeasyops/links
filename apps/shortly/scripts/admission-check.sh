@@ -80,10 +80,17 @@ $out"
 
 kubectl get imagevalidatingpolicy require-release-provenance >/dev/null 2>&1 \
   || fail "provenance policy not installed (POLICIES=0? see the platform's scripts/cluster.sh)"
+# The allowlist's mode (see below): under Deny it refuses a tag before the provenance policy does.
+actions=$(kubectl get validatingpolicy app-allowed-images -o jsonpath='{.spec.validationActions}' 2>/dev/null) \
+  || fail "allowlist policy app-allowed-images not installed (POLICIES=0? see the platform's scripts/cluster.sh)"
+case "$actions" in
+  *Deny*) tag_refused_by="image not allowed in the namespaces of app" ;;
+  *) tag_refused_by="require-release-provenance" ;;
+esac
 
 admitted pod "$RELEASE" "the documented release"
 refused pod "$REPO@$UNATTESTED" "a real image with no attestation of its own"
-refused pod "$REPO:0.2.0" "a tag: mutable, so never verified"
+refused pod "$REPO:0.2.0" "a tag: mutable, so never verified" "$tag_refused_by"
 refused pod "$REPO@$MISSING" "a digest that doesn't exist"
 refused deployment "$REPO@$UNATTESTED" "Pod templates are checked too (autogen)"
 admitted pod "shortly:e2e" "a local build: outside the provenance policy; the allowlist's named exception"
@@ -93,8 +100,6 @@ admitted pod "shortly:e2e" "a local build: outside the provenance policy; the al
 # from the policy itself, so this holds on either side of a lock move; any other answer,
 # or no policy, fails.
 FOREIGN=busybox:1.36 # an image no app namespace may run
-actions=$(kubectl get validatingpolicy app-allowed-images -o jsonpath='{.spec.validationActions}' 2>/dev/null) \
-  || fail "allowlist policy app-allowed-images not installed (POLICIES=0? see the platform's scripts/cluster.sh)"
 case "$actions" in
   *Deny*)
     refused pod "$FOREIGN" "outside the allowlist" "image not allowed in the namespaces of app"
